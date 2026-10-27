@@ -1,0 +1,13 @@
+services:
+  db:
+    image: postgres:16
+    environment: {POSTGRES_USER: rembo, POSTGRES_PASSWORD: rembo, POSTGRES_DB: rembo}
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck: {test: ["CMD-SHELL", "pg_isready -U rembo"], interval: 3s, retries: 20}
+  app:
+    build: .
+    env_file: .env
+    environment: {DATABASE_URL: "postgresql://rembo:rembo@db:5432/rembo"}
+    depends_on: {db: {condition: service_healthy}}
+    ports: ["8080:8080"]
+volumes: {pgdata: {}}
