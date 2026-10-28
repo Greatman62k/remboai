@@ -48,28 +48,17 @@ def test_verification_handshake_and_forged_requests():
 
 
 @needs_db
-def test_message_is_echoed_exactly_once_even_if_meta_redelivers():
+def test_a_message_is_processed_exactly_once_even_if_meta_redelivers():
+    from tests.harness import build, client, payload, post
+
     async def run():
-        pool = await db.make_pool(DSN)
-        await pool.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
-        await db.migrate(pool)
-        sent = []
-
-        def graph(req: httpx.Request) -> httpx.Response:
-            sent.append((str(req.url), req.headers["authorization"], json.loads(req.content)))
-            return httpx.Response(200, json={"messages": [{"id": "out"}]})
-
-        http = httpx.AsyncClient(transport=httpx.MockTransport(graph))
-        app.state.settings, app.state.pool, app.state.wa = SETTINGS, pool, WhatsApp(http, "v25.0")
-        async with web(app) as c:
-            raw, h = signed(text_payload("hello"))
-            assert (await c.post("/webhook", content=raw, headers=h)).status_code == 200
-            assert (await c.post("/webhook", content=raw, headers=h)).status_code == 200   # redelivery
-        assert len(sent) == 1
-        url, auth, body = sent[0]
-        assert url == "https://graph.facebook.com/v25.0/PID/messages" and auth == "Bearer TOKEN"
-        assert body["to"] == "254712345678" and "hello" in body["text"]["body"]
-        await http.aclose()
+        pool, out, _ = await build(DSN)
+        out.script["prices?"] = {"intent": "price_list"}
+        async with client() as c:
+            assert (await post(c, payload("254712345678", "prices?", mid="wamid.7"))).status_code == 200
+            assert (await post(c, payload("254712345678", "prices?", mid="wamid.7"))).status_code == 200   # Meta redelivers the same id
+        assert len(out.calls) == 1 and len(out.sent) == 1
+        assert out.sent[0]["to"] == "254712345678" and out.sent[0]["_auth"] == "Bearer TOK" and "Fade (KES 500)" in out.sent[0]["text"]["body"]
         await pool.close()
     asyncio.run(run())
 
