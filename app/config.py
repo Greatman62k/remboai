@@ -7,8 +7,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     database_url: str
-    wa_app_secret: str
-    wa_verify_token: str
+    wa_app_secret: str = ""
+    wa_verify_token: str = ""
     wa_access_token: str = ""
     graph_version: str = "v25.0"
 
@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     asr_timeout_s: float = 45.0          # covers a cold start of the GPU container
     vision_enabled: bool = True          # photo matching uses the same Meta endpoints as the text model
     rate_limit_per_min: int = 20         # messages per sender per minute; beyond this they are ignored (protects model credits)
+
+    # Telegram: a second channel for the same receptionist (no business verification needed). Empty token = off.
+    telegram_bot_token: str = ""        # from @BotFather
+    telegram_mode: str = "auto"         # auto = webhook when PUBLIC_BASE_URL is https, otherwise long polling | poll | webhook
+    telegram_webhook_secret: str = ""    # random string Telegram echoes back in a header
 
     # M-Pesa (Daraja). Sandbox moves no real money; production needs Safaricom's Go Live approval for the salon's till.
     mpesa_env: str = "sandbox"           # sandbox | production
