@@ -10,7 +10,7 @@ problem statement **Build for Your World**.
 > Every file here was written during the event; see [CHANGELOG.md](CHANGELOG.md).
 
 ## Status
-Working: signed WhatsApp webhook, booking conversation (English / Swahili / Sheng) on Meta's models with failover, slot holds that cannot double-book, M-Pesa deposits paid straight to the salon's own till (sandbox-tested; production needs Safaricom Go Live). owner commands over WhatsApp, an owner web page and API (docs/OWNER_API.md). voice notes (Meta's Omnilingual ASR on Modal). photo matching (Muse Spark vision). Next: reminders, first server deployment.
+Working: signed WhatsApp webhook, booking conversation (English / Swahili / Sheng) on Meta's models with failover, slot holds that cannot double-book, M-Pesa deposits paid straight to the salon's own till (sandbox-tested; production needs Safaricom Go Live). owner commands over WhatsApp, an owner web page and API (docs/OWNER_API.md). voice notes (Meta's Omnilingual ASR on Modal). photo matching (Muse Spark vision). a Telegram channel on the same engine (text, buttons, voice notes, photos, deposits, owner commands). Next: reminders, first server deployment.
 
 ## Run locally
 ```bash
@@ -18,7 +18,7 @@ cp .env.example .env          # fill in your own values
 docker compose up --build     # Postgres + the app on :8080
 python -m pytest -q           # tests (database tests need TEST_DATABASE_URL)
 ```
-`python scripts/doctor.py` checks the whole set-up (WhatsApp token, models, M-Pesa, public URL) and says what to fix.
+Testing the whole thing end to end: docs/E2E_TEST.md. `python scripts/doctor.py` checks the whole set-up (WhatsApp token, models, M-Pesa, public URL) and says what to fix.
 
 ## Layout
 - `app/whatsapp.py` signature check, payload parsing, sending, explanations of Meta's error codes
@@ -28,7 +28,8 @@ python -m pytest -q           # tests (database tests need TEST_DATABASE_URL)
 - `app/mpesa.py` Daraja client; `app/payments.py` deposits: request, idempotent settlement, refund parking, reconciliation sweeper
 - `app/vision.py` hairstyle photo -> one of the salon's services; `app/voice.py` voice notes -> text; `deploy/modal_asr.py` the speech service; `deploy/` production compose, Caddy, backups
 - `app/ownerapi.py` + `app/web/` the owner JSON API and web page
-- `app/owner.py` the owner's WhatsApp commands, time off, daily summary
+- `app/owner.py` the owner's chat commands, time off, daily summary
+- `app/telegram.py` Telegram as a second channel (`tg:<id>` addresses, polling or webhook); `app/inbound.py` the channel-independent entry point; see docs/TELEGRAM.md
 - `scripts/seed_salon.py` create a salon with stylists and services
 
 ## Privacy

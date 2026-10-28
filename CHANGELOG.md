@@ -43,3 +43,12 @@ Everything in this repository was written during the Meta Global AI Developer Ha
 - Photo matching: a customer sends a hairstyle photo, Muse Spark (vision) suggests which of the salon's services it needs, code validates the suggestion against the menu (price and time come from the menu), and the booking carries on, with a caption such as "kesho mchana" continuing straight to slots. Doubtful, off-menu or non-hair photos are never guessed at. Photos are never stored.
 - `doctor` shows the model a plain red square to prove image input works; 8 vision tests.
 
+
+## Oct 28 (Telegram)
+- Telegram as a second channel on the same engine, because a WhatsApp Business account cannot message until Meta business verification completes. Bots need no verification and no public URL while testing (long polling).
+- Customers and owners are `tg:<chat id>` addresses; a channel hub routes every send by address, so deposits, reminders, owner alerts and the daily summary reach the right app.
+- Inline keyboards for slot buttons, voice notes and photos through the same speech and vision pipelines, `/start`, `/id` (shows the id to use as `--owner`), shared contacts.
+- Webhook mode with a secret header (constant-time check, closed when no secret is set) or polling; polling backs off on errors and removes any webhook first.
+- Found by tests: a Telegram button tap carried no text, which the conversation treats as unreadable; the tapped button's label is now used, as WhatsApp does.
+- 10 Telegram tests with a fake Bot API. 76 tests in total.
+- End-to-end test guide and Telegram set-up guide.
