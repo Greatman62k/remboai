@@ -19,6 +19,10 @@ ERROR_HINTS = {
     131047: "more than 24 hours since the customer last wrote; free text is refused, send a template",
     131026: "message undeliverable; the recipient may not have WhatsApp or has not accepted the terms",
     133010: "phone number not registered with the Cloud API",
+    131031: "the WhatsApp business account is locked or restricted; check Business Settings > Security centre and the account quality page, then see Meta's verification notice",
+    131042: "payment problem on the WhatsApp business account; check the payment method under WhatsApp Manager > Payment settings",
+    131051: "unsupported message type",
+    130429: "sending too fast (throughput limit); slow down and retry",
 }
 
 
