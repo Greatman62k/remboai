@@ -14,6 +14,7 @@ from app.ctx import Ctx
 from app.llm import Extractor
 from app.main import app
 from app.mpesa import Daraja
+from app.telegram import Channels, Telegram
 from app.vision import StyleMatcher
 from app.voice import Transcriber
 from app.whatsapp import WhatsApp
@@ -38,12 +39,16 @@ class Outside:
         self.media_mime = "audio/ogg; codecs=opus"
         self.vision: list[dict] = []     # image requests the model received
         self.vision_answer = {"service": "Fade", "style": "low skin fade", "confidence": 0.9}
+        self.tg: list[dict] = []         # Telegram Bot API calls: {"method", **payload}
+        self.tg_updates: list[dict] = []   # what getUpdates will hand out
         self.stk: list[dict] = []        # STK pushes Daraja received
         self.stk_fails = False           # make Daraja refuse pushes
         self.queries: dict[str, dict] = {}   # checkout id -> status query answer (absent: "still processing")
 
     def handler(self, req: httpx.Request) -> httpx.Response:
         host = req.url.host
+        if host == "api.telegram.org":
+            return self.telegram(req)
         if host == "graph.facebook.com" and req.method == "GET":        # media lookup: where is voice note X?
             if self.media_gone:
                 return httpx.Response(404, json={"error": {"code": 100}})
@@ -77,6 +82,30 @@ class Outside:
         if host == "sandbox.safaricom.co.ke":
             return self.daraja(req)
         return httpx.Response(404)
+
+    def telegram(self, req: httpx.Request) -> httpx.Response:
+        if req.url.path.startswith("/file/bot"):                    # a voice note or photo being downloaded
+            return httpx.Response(200, content=b"TG-FILE-BYTES")
+        method = req.url.path.rsplit("/", 1)[1]
+        body = json.loads(req.content or b"{}")
+        self.tg.append({"method": method, **body})
+        if method == "getUpdates":
+            if not self.tg_updates:
+                return httpx.Response(409, json={"ok": False, "error_code": 409, "description": "conflict"})
+            out, self.tg_updates = self.tg_updates, []
+            return httpx.Response(200, json={"ok": True, "result": out})
+        if method == "getFile":
+            path = "photos/file_1.jpg" if body["file_id"].startswith("PHOTO") else "voice/file_1.oga"
+            return httpx.Response(200, json={"ok": True, "result": {"file_id": body["file_id"], "file_size": self.media_size, "file_path": path}})
+        if method == "getMe":
+            return httpx.Response(200, json={"ok": True, "result": {"id": 111, "username": "rembo_test_bot"}})
+        return httpx.Response(200, json={"ok": True, "result": True})
+
+    def tg_to(self, chat: str) -> list[dict]:
+        return [m for m in self.tg if m["method"] == "sendMessage" and str(m["chat_id"]) == chat]
+
+    def tg_bodies(self, chat: str) -> list[str]:
+        return [m["text"] for m in self.tg_to(chat)]
 
     def daraja(self, req: httpx.Request) -> httpx.Response:
         if req.url.path == "/oauth/v1/generate":
@@ -159,15 +188,34 @@ async def build(dsn: str, till: bool = True, **over):
     conf = dict(database_url=dsn, wa_app_secret=SECRET, wa_verify_token="v", wa_access_token="TOK",
                 llm_base_url="https://primary.test/v1", llm_api_key="k", llm_model="muse-spark-1.3",
                 mpesa_consumer_key="ck", mpesa_consumer_secret="cs", mpesa_passkey="pk", mpesa_callback_secret=CB_SECRET,
-                public_base_url="https://rembo.test", asr_url="https://asr.test/transcribe", asr_token="asrtok")
+                public_base_url="https://rembo.test", asr_url="https://asr.test/transcribe", asr_token="asrtok",
+                telegram_bot_token="111:TESTTOKEN", telegram_webhook_secret="tgsecret")
     conf.update(over)
     settings = Settings(_env_file=None, **conf)
     http = httpx.AsyncClient(transport=httpx.MockTransport(out.handler))
     wa = WhatsApp(http, settings.graph_version)
     app.state.settings, app.state.pool, app.state.wa = settings, pool, wa
     llm = Extractor(http, settings)
-    app.state.ctx = Ctx(settings, pool, wa, llm, Daraja(http, settings), Transcriber(http, settings), StyleMatcher(http, settings, llm.endpoints))
+    tg = Telegram(http, settings.telegram_bot_token)
+    await pool.execute("UPDATE salons SET tg_bot_id='tg:111'")
+    app.state.tg = tg
+    app.state.ctx = Ctx(settings, pool, Channels(wa, tg), llm, Daraja(http, settings), Transcriber(http, settings), StyleMatcher(http, settings, llm.endpoints))
     return pool, out, salon
+
+
+def tg_update(uid: int, chat: int, text: str | None = None, data: str | None = None, **extra) -> dict:
+    """A Telegram update: a text message, or (with data) a tap on an inline button, or extra message fields such as voice/photo."""
+    who = {"id": chat, "first_name": "Tg" + str(chat)}
+    msg = {"message_id": uid, "chat": {"id": chat, "type": "private"}, "from": who, **extra}
+    if text is not None:
+        msg["text"] = text
+    if data is not None:
+        return {"update_id": uid, "callback_query": {"id": f"cb{uid}", "from": who, "message": msg, "data": data}}
+    return {"update_id": uid, "message": msg}
+
+
+async def post_tg(c: httpx.AsyncClient, update: dict, secret: str = "tgsecret") -> httpx.Response:
+    return await c.post("/telegram/webhook", json=update, headers={"x-telegram-bot-api-secret-token": secret})
 
 
 def client():
