@@ -50,6 +50,7 @@ class Message:
     kind: str
     text: str
     reply_id: str | None = None
+    media_id: str | None = None   # voice notes: what to download from Meta
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,13 +75,17 @@ def parse_messages(payload: dict) -> list[Message]:
             sender, mid, kind = m.get("from"), m.get("id"), m.get("type", "")
             if not (pid and sender and mid):
                 continue
-            text, reply_id = "", None
-            if kind == "text":
+            text, reply_id, media_id = "", None, None
+            if kind == "audio":
+                media_id = (m.get("audio") or {}).get("id")
+            elif kind == "image":
+                media_id, text = (m.get("image") or {}).get("id"), (m.get("image") or {}).get("caption") or ""
+            elif kind == "text":
                 text = (m.get("text") or {}).get("body", "")
             elif kind == "interactive":
                 reply = (m.get("interactive") or {}).get("button_reply") or (m.get("interactive") or {}).get("list_reply") or {}
                 reply_id, text = reply.get("id"), reply.get("title", "")
-            out.append(Message(mid, sender, names.get(sender), pid, kind, text.strip(), reply_id))
+            out.append(Message(mid, sender, names.get(sender), pid, kind, text.strip(), reply_id, media_id))
     return out
 
 
@@ -101,8 +106,33 @@ class WhatsApp:
         self.http, self.version = http, graph_version
 
     async def send_text(self, phone_number_id: str, token: str, to: str, body: str) -> bool:
+        return await self._send(phone_number_id, token, to, {"type": "text", "text": {"body": body[:4096], "preview_url": False}})
+
+    async def send_buttons(self, phone_number_id: str, token: str, to: str, body: str, buttons: list[tuple[str, str]]) -> bool:
+        """Up to three quick-reply buttons (id, title); WhatsApp limits a title to 20 characters."""
+        action = {"buttons": [{"type": "reply", "reply": {"id": i, "title": t[:20]}} for i, t in buttons[:3]]}
+        return await self._send(phone_number_id, token, to, {"type": "interactive", "interactive": {"type": "button", "body": {"text": body[:1024]}, "action": action}})
+
+    async def download_media(self, token: str, media_id: str, max_bytes: int = 2_000_000) -> tuple[bytes, str] | None:
+        """Fetch a voice note (or other media) Meta is holding for us. Two steps: ask for the URL, then download it with the same token."""
+        headers = {"Authorization": f"Bearer {token}"}
+        try:
+            info = await self.http.get(f"https://graph.facebook.com/{self.version}/{media_id}", headers=headers)
+            info.raise_for_status()
+            meta = info.json()
+            if int(meta.get("file_size") or 0) > max_bytes:
+                log.warning("media %s is too large (%s bytes)", media_id, meta.get("file_size"))
+                return None
+            blob = await self.http.get(meta["url"], headers=headers)
+            blob.raise_for_status()
+        except (httpx.HTTPError, KeyError, ValueError) as e:
+            log.warning("could not download media %s: %s", media_id, e.__class__.__name__)
+            return None
+        return (blob.content, meta.get("mime_type") or "audio/ogg") if 0 < len(blob.content) <= max_bytes else None
+
+    async def _send(self, phone_number_id: str, token: str, to: str, content: dict) -> bool:
         url = f"https://graph.facebook.com/{self.version}/{phone_number_id}/messages"
-        payload = {"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": body[:4096], "preview_url": False}}
+        payload = {"messaging_product": "whatsapp", "to": to, **content}
         try:
             r = await self.http.post(url, json=payload, headers={"Authorization": f"Bearer {token}"})
         except httpx.HTTPError as e:
