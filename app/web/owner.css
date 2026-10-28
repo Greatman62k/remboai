@@ -1,0 +1,51 @@
+:root {
+  --bg: #f6f7f5; --card: #ffffff; --ink: #1c211f; --muted: #66706b; --line: #dfe3df;
+  --accent: #0f6b5c; --accent-ink: #ffffff; --warn: #9a5b00; --warn-bg: #fff3dc; --bad: #b3261e;
+  --radius: 12px; --gutter: 16px;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #121614; --card: #1b211e; --ink: #eef2ef; --muted: #98a39d; --line: #2c3530; --accent: #4cc2a9; --accent-ink: #08201a; --warn: #ffcf80; --warn-bg: #33270f; --bad: #ff8a80; }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+header { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px var(--gutter); background: var(--card); border-bottom: 1px solid var(--line); }
+header div { display: flex; flex-direction: column; }
+.muted { color: var(--muted); font-size: 14px; }
+nav { display: flex; gap: 4px; padding: 8px var(--gutter); overflow-x: auto; background: var(--card); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 2; }
+nav button { flex: 1 0 auto; border: 0; background: transparent; color: var(--muted); padding: 10px 14px; border-radius: 999px; font: inherit; font-weight: 600; cursor: pointer; }
+nav button[aria-selected="true"] { background: var(--accent); color: var(--accent-ink); }
+main { max-width: 720px; margin: 0 auto; padding: var(--gutter); display: grid; gap: 14px; }
+h2 { font-size: 18px; margin: 4px 0 0; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; display: grid; gap: 10px; }
+.row { display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.stat { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; }
+.stat b { display: block; font-size: 22px; }
+.booking { display: grid; grid-template-columns: 56px 1fr auto; gap: 10px; align-items: start; padding: 12px 0; border-top: 1px solid var(--line); }
+.booking:first-child { border-top: 0; }
+.time { font-weight: 700; font-variant-numeric: tabular-nums; }
+.pill { display: inline-block; font-size: 13px; padding: 2px 8px; border-radius: 999px; background: var(--line); }
+.pill.ok { background: var(--accent); color: var(--accent-ink); }
+.pill.wait { background: var(--warn-bg); color: var(--warn); }
+.banner { background: var(--warn-bg); color: var(--warn); border-radius: var(--radius); padding: 12px 14px; }
+label { display: grid; gap: 4px; font-size: 14px; color: var(--muted); }
+input, select { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px; min-width: 0; width: 100%; }
+input[type="checkbox"] { width: 22px; height: 22px; }
+button { font: inherit; font-weight: 600; border: 0; border-radius: 10px; padding: 10px 14px; background: var(--accent); color: var(--accent-ink); cursor: pointer; }
+button.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+button.danger { background: transparent; color: var(--bad); border: 1px solid var(--bad); }
+button:disabled { opacity: .5; cursor: default; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.hours { display: grid; grid-template-columns: 56px 28px 1fr 1fr; gap: 8px; align-items: center; }
+#toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: var(--ink); color: var(--bg); padding: 10px 16px; border-radius: 999px; opacity: 0; pointer-events: none; transition: opacity .2s; max-width: 90vw; }
+#toast.show { opacity: 1; }
+#toast.err { background: var(--bad); color: #fff; }
+.center { text-align: center; padding: 36px 0; display: grid; gap: 14px; justify-items: center; }
+[hidden] { display: none !important; }
+a { color: var(--accent); }
+.daynav { display: flex; gap: 8px; }
+.daynav input { flex: 1; }
+.daynav button { flex: 0 0 48px; }
+.hours { grid-template-columns: 44px 24px 1fr 1fr; gap: 6px; }
+.hours input[type="time"] { padding: 8px 6px; font-size: 15px; }
