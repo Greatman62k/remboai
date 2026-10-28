@@ -27,13 +27,13 @@ async def run_checks(s, http: httpx.AsyncClient, pool) -> list[Check]:
     out: list[Check] = []
     add = lambda *a, **k: out.append(Check(*a, **k))  # noqa: E731
 
-    missing = [n for n, v in (("WA_ACCESS_TOKEN", s.wa_access_token), ("LLM_API_KEY", s.llm_api_key)) if not v]
+    missing = [n for n, v in (("LLM_API_KEY", s.llm_api_key),) if not v]
     add("configuration", not missing, "required values present" if not missing else "missing in .env: " + ", ".join(missing))
 
     salons = []
     try:
         salons = [dict(r) for r in await pool.fetch(
-            "SELECT s.id::text, s.name, s.wa_phone_number_id, s.owner_wa_id, s.deposit_kes, sp.kind, sp.shortcode, sp.party_b, "
+            "SELECT s.id::text, s.name, s.wa_phone_number_id, s.tg_bot_id, s.owner_wa_id, s.deposit_kes, sp.kind, sp.shortcode, sp.party_b, "
             "(SELECT count(*) FROM services v WHERE v.salon_id=s.id AND v.active) AS services, "
             "(SELECT count(*) FROM staff t WHERE t.salon_id=s.id AND t.active) AS staff "
             "FROM salons s LEFT JOIN salon_payment sp ON sp.salon_id=s.id WHERE s.active")]
@@ -50,7 +50,12 @@ async def run_checks(s, http: httpx.AsyncClient, pool) -> list[Check]:
             add(label + " deposits", False, "deposit is set but no till/paybill: bookings will be confirmed with NO deposit (use --till)", warn=True)
         elif sl["kind"]:
             add(label + " deposits", True, f"KES {sl['deposit_kes']} to {sl['kind']} {sl['party_b']} (shortcode {sl['shortcode']})")
-        add(label + " owner", bool(sl["owner_wa_id"]), "owner WhatsApp number set" if sl["owner_wa_id"] else "no --owner: no booking alerts or owner commands", warn=True)
+        add(label + " owner", bool(sl["owner_wa_id"]), "owner contact set" if sl["owner_wa_id"] else "no --owner: no booking alerts or owner commands", warn=True)
+        if not sl["wa_phone_number_id"]:
+            continue
+        if not s.wa_access_token:
+            add(label + " WhatsApp", False, "WA_ACCESS_TOKEN missing in .env")
+            continue
         try:
             r = await http.get(f"https://graph.facebook.com/{s.graph_version}/{sl['wa_phone_number_id']}",
                                params={"fields": "display_phone_number,verified_name"}, headers={"Authorization": f"Bearer {s.wa_access_token}"})
@@ -62,6 +67,19 @@ async def run_checks(s, http: httpx.AsyncClient, pool) -> list[Check]:
                 add(label + " WhatsApp", False, f"Meta says {code}: {explain(code)}")
         except (httpx.HTTPError, ValueError) as e:
             add(label + " WhatsApp", False, f"could not reach Meta: {e.__class__.__name__}")
+
+    if s.telegram_bot_token:
+        try:
+            r = await http.post(f"https://api.telegram.org/bot{s.telegram_bot_token}/getMe", timeout=10)
+            me = r.json().get("result") or {}
+            add("telegram", bool(me), f"bot @{me.get('username')} (id {me.get('id')})" if me else "Telegram refused the token (check TELEGRAM_BOT_TOKEN)")
+            linked = any(sl.get("tg_bot_id") == f"tg:{me.get('id')}" for sl in salons) if me else False
+            if me:
+                add("telegram salon", linked, "a salon is linked to this bot" if linked else f"no salon uses this bot: seed with --telegram-bot-id {me.get('id')}")
+        except (httpx.HTTPError, ValueError) as e:
+            add("telegram", False, f"could not reach Telegram: {e.__class__.__name__}")
+    else:
+        add("telegram", False, "TELEGRAM_BOT_TOKEN not set: Telegram channel off", warn=True)
 
     ext = Extractor(http, s)
     today = datetime.now(ZoneInfo("Africa/Nairobi")).date()
