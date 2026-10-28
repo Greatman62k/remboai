@@ -36,6 +36,8 @@ docker compose -f deploy/docker-compose.prod.yml exec app python scripts/doctor.
 - Daraja needs nothing pasted: the callback URL is built from `PUBLIC_BASE_URL` and `MPESA_CALLBACK_SECRET`. For real money, the salon's till must be approved for production (Go Live) and `MPESA_ENV=production` set with the passkey Safaricom issues.
 - While the WhatsApp number is a test number, only recipients added under API Setup > To (maximum 5) can chat with it.
 
+- Telegram (optional): see [TELEGRAM.md](TELEGRAM.md). Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET`; with an https `PUBLIC_BASE_URL` the webhook is registered on start.
+
 ## 6. Voice notes (Modal, optional but recommended)
 Customers send voice notes, often in Swahili or Sheng. Meta's open-source Omnilingual ASR (1,600+ languages, Swahili included) runs on a Modal GPU:
 ```bash
