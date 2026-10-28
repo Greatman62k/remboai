@@ -1,12 +1,24 @@
+import asyncio
+import hmac
 import json
 import logging
 from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
-from fastapi.responses import PlainTextResponse
+from pathlib import Path
+
+from fastapi.responses import FileResponse, PlainTextResponse
 
 from .config import get_settings
+from .conversation import handle as converse
+from .ctx import Ctx
+from .llm import Extractor
+from .mpesa import Daraja
+from .vision import StyleMatcher
+from .voice import Transcriber
+from .ownerapi import router as owner_api
+from .payments import process_callback, run_sweeper
 from .db import make_pool, migrate
 from .whatsapp import Message, WhatsApp, explain, mask, parse_failures, parse_messages, verify_signature
 
@@ -22,17 +34,57 @@ async def lifespan(app: FastAPI):
     for name in await migrate(pool):
         log.info("applied migration %s", name)
     http = httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=3.0))
-    app.state.settings, app.state.pool, app.state.wa = s, pool, WhatsApp(http, s.graph_version)
+    wa = WhatsApp(http, s.graph_version)
+    app.state.settings, app.state.pool, app.state.wa = s, pool, wa
+    llm = Extractor(http, s)
+    app.state.ctx = Ctx(s, pool, wa, llm, Daraja(http, s), Transcriber(http, s), StyleMatcher(http, s, llm.endpoints))
+    if not app.state.ctx.daraja.configured:
+        log.warning("M-Pesa is not fully configured: deposits cannot be requested")
+    sweeper = asyncio.create_task(run_sweeper(app.state.ctx))
     yield
+    sweeper.cancel()
+    await asyncio.gather(sweeper, return_exceptions=True)
     await http.aclose()
     await pool.close()
 
 
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+app.include_router(owner_api)
+
+WEB = Path(__file__).parent / "web"
+# The owner page loads only its own files and talks only to its own API; the sign-in token never leaves in a Referer.
+PAGE_HEADERS = {
+    "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY",
+}
+
+
+@app.get("/owner")
+@app.get("/owner/login/{token}")
+async def owner_page(token: str = ""):
+    return FileResponse(WEB / "owner.html", headers=PAGE_HEADERS)
+
+
+@app.get("/owner/static/{name}")
+async def owner_static(name: str):
+    files = {"owner.js": "text/javascript", "owner.css": "text/css"}
+    if name not in files:
+        raise HTTPException(404)
+    return FileResponse(WEB / name, media_type=files[name], headers=PAGE_HEADERS)
 
 
 @app.get("/health")
 async def health():
+    return {"ok": True}
+
+
+@app.get("/ready")
+async def ready(request: Request):
+    """Healthy means the database answers; /health only says the process is up."""
+    try:
+        await request.app.state.pool.fetchval("SELECT 1")
+    except Exception:
+        raise HTTPException(503)
     return {"ok": True}
 
 
@@ -46,15 +98,19 @@ async def verify(request: Request):
 
 
 async def handle(app: FastAPI, msg: Message) -> None:
-    """Runs after the 200 has gone back to Meta. Day 1: echo, once per message id."""
+    """Runs after the 200 has gone back to Meta: once per message id, then the conversation."""
     try:
         fresh = await app.state.pool.fetchval(
             "INSERT INTO inbound_messages (wa_message_id, wa_id) VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING 1", msg.id, msg.sender)
         if not fresh:
             return
+        recent = await app.state.pool.fetchval(
+            "SELECT count(*) FROM inbound_messages WHERE wa_id=$1 AND received_at > now() - interval '1 minute'", msg.sender)
+        if recent > app.state.settings.rate_limit_per_min:
+            log.warning("rate limit: ignoring %s (%d messages in a minute)", mask(msg.sender), recent)
+            return
         log.info("message from %s kind=%s", mask(msg.sender), msg.kind)
-        reply = f"Habari! I received: {msg.text}" if msg.text else "Habari! I can read text messages for now."
-        await app.state.wa.send_text(msg.phone_number_id, app.state.settings.wa_access_token, msg.sender, reply)
+        await converse(app.state.ctx, msg)
     except Exception:
         log.exception("failed handling message %s", msg.id)
 
@@ -75,3 +131,28 @@ async def receive(request: Request, bg: BackgroundTasks):
     for msg in parse_messages(payload):
         bg.add_task(handle, request.app, msg)
     return {"status": "ok"}
+
+
+async def callback_task(ctx, payload: dict) -> None:
+    try:
+        await process_callback(ctx, payload)
+    except Exception:
+        log.exception("failed processing M-Pesa callback")  # the sweeper's status query will still settle it
+
+
+@app.post("/mpesa/callback/{secret}")
+async def mpesa_callback(secret: str, request: Request, bg: BackgroundTasks):
+    """Safaricom posts the result of each STK prompt here. The secret in the path is how we know it is them."""
+    expected = request.app.state.settings.mpesa_callback_secret
+    if not expected or not hmac.compare_digest(secret.encode(), expected.encode()):
+        raise HTTPException(404)
+    raw = await request.body()
+    if len(raw) > 100_000:
+        raise HTTPException(413)
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        payload = None
+    if isinstance(payload, dict):
+        bg.add_task(callback_task, request.app.state.ctx, payload)
+    return {"ResultCode": 0, "ResultDesc": "Accepted"}
