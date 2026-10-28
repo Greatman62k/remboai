@@ -11,10 +11,11 @@ from pathlib import Path
 from fastapi.responses import FileResponse, PlainTextResponse
 
 from .config import get_settings
-from .conversation import handle as converse
+from .inbound import inbound
 from .ctx import Ctx
 from .llm import Extractor
 from .mpesa import Daraja
+from .telegram import Channels, Telegram, parse_update, run_poller
 from .vision import StyleMatcher
 from .voice import Transcriber
 from .ownerapi import router as owner_api
@@ -37,13 +38,25 @@ async def lifespan(app: FastAPI):
     wa = WhatsApp(http, s.graph_version)
     app.state.settings, app.state.pool, app.state.wa = s, pool, wa
     llm = Extractor(http, s)
-    app.state.ctx = Ctx(s, pool, wa, llm, Daraja(http, s), Transcriber(http, s), StyleMatcher(http, s, llm.endpoints))
+    tg = Telegram(http, s.telegram_bot_token) if s.telegram_bot_token else None
+    app.state.ctx = Ctx(s, pool, Channels(wa, tg), llm, Daraja(http, s), Transcriber(http, s), StyleMatcher(http, s, llm.endpoints))
+    app.state.tg = tg
+    poller = None
+    if tg:
+        mode = s.telegram_mode if s.telegram_mode != "auto" else ("webhook" if s.public_base_url.startswith("https://") else "poll")
+        if mode == "webhook":
+            if not s.telegram_webhook_secret or not await tg.set_webhook(f"{s.public_base_url.rstrip('/')}/telegram/webhook", s.telegram_webhook_secret):
+                log.error("Telegram webhook was not set (needs PUBLIC_BASE_URL and TELEGRAM_WEBHOOK_SECRET)")
+        elif mode == "poll":
+            poller = asyncio.create_task(run_poller(app.state.ctx, tg, inbound))
     if not app.state.ctx.daraja.configured:
         log.warning("M-Pesa is not fully configured: deposits cannot be requested")
     sweeper = asyncio.create_task(run_sweeper(app.state.ctx))
     yield
-    sweeper.cancel()
-    await asyncio.gather(sweeper, return_exceptions=True)
+    for task in (sweeper, poller):
+        if task:
+            task.cancel()
+    await asyncio.gather(*(t for t in (sweeper, poller) if t), return_exceptions=True)
     await http.aclose()
     await pool.close()
 
@@ -92,27 +105,14 @@ async def ready(request: Request):
 async def verify(request: Request):
     q = request.query_params
     expected = request.app.state.settings.wa_verify_token
-    if q.get("hub.mode") == "subscribe" and q.get("hub.verify_token") == expected:
+    if expected and q.get("hub.mode") == "subscribe" and q.get("hub.verify_token") == expected:
         return PlainTextResponse(q.get("hub.challenge", ""))
     raise HTTPException(403)
 
 
 async def handle(app: FastAPI, msg: Message) -> None:
-    """Runs after the 200 has gone back to Meta: once per message id, then the conversation."""
-    try:
-        fresh = await app.state.pool.fetchval(
-            "INSERT INTO inbound_messages (wa_message_id, wa_id) VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING 1", msg.id, msg.sender)
-        if not fresh:
-            return
-        recent = await app.state.pool.fetchval(
-            "SELECT count(*) FROM inbound_messages WHERE wa_id=$1 AND received_at > now() - interval '1 minute'", msg.sender)
-        if recent > app.state.settings.rate_limit_per_min:
-            log.warning("rate limit: ignoring %s (%d messages in a minute)", mask(msg.sender), recent)
-            return
-        log.info("message from %s kind=%s", mask(msg.sender), msg.kind)
-        await converse(app.state.ctx, msg)
-    except Exception:
-        log.exception("failed handling message %s", msg.id)
+    """Runs after the 200 has gone back to the channel."""
+    await inbound(app.state.ctx, msg)
 
 
 @app.post("/webhook")
@@ -120,7 +120,8 @@ async def receive(request: Request, bg: BackgroundTasks):
     raw = await request.body()
     if len(raw) > MAX_BODY:
         raise HTTPException(413)
-    if not verify_signature(raw, request.headers.get("x-hub-signature-256"), request.app.state.settings.wa_app_secret):
+    secret = request.app.state.settings.wa_app_secret
+    if not secret or not verify_signature(raw, request.headers.get("x-hub-signature-256"), secret):   # an empty secret would make signatures forgeable
         raise HTTPException(403)
     try:
         payload = json.loads(raw)
@@ -156,3 +157,26 @@ async def mpesa_callback(secret: str, request: Request, bg: BackgroundTasks):
     if isinstance(payload, dict):
         bg.add_task(callback_task, request.app.state.ctx, payload)
     return {"ResultCode": 0, "ResultDesc": "Accepted"}
+
+
+@app.post("/telegram/webhook")
+async def telegram_webhook(request: Request, bg: BackgroundTasks):
+    """Telegram sends the secret we gave it in a header; without it the request is not from Telegram."""
+    secret = request.app.state.settings.telegram_webhook_secret
+    sent = request.headers.get("x-telegram-bot-api-secret-token", "")
+    tg = request.app.state.tg
+    if tg is None or not secret or not hmac.compare_digest(sent.encode(), secret.encode()):
+        raise HTTPException(404)
+    raw = await request.body()
+    if len(raw) > MAX_BODY:
+        raise HTTPException(413)
+    try:
+        update = json.loads(raw)
+    except ValueError:
+        raise HTTPException(400)
+    msg, cb = parse_update(update if isinstance(update, dict) else {}, tg.bot_key)
+    if cb:
+        bg.add_task(tg.answer_callback, cb)
+    if msg:
+        bg.add_task(handle, request.app, msg)
+    return {"ok": True}

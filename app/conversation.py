@@ -97,10 +97,10 @@ async def _catalog(ctx, salon_id: str) -> list[dict]:
 
 async def _handle(ctx, msg: Message) -> None:
     salon = await ctx.pool.fetchrow(
-        "SELECT id::text, name, wa_phone_number_id, timezone, open_hours, deposit_kes, owner_wa_id FROM salons WHERE wa_phone_number_id=$1 AND active",
+        "SELECT id::text, name, wa_phone_number_id, timezone, open_hours, deposit_kes, owner_wa_id FROM salons WHERE (wa_phone_number_id=$1 OR tg_bot_id=$1) AND active",
         msg.phone_number_id)
     if salon is None:
-        log.warning("message for unknown phone_number_id %s", msg.phone_number_id)
+        log.warning("message for a number or bot we do not serve: %s", msg.phone_number_id)
         return
     salon = dict(salon)
     if isinstance(salon["open_hours"], str):
