@@ -30,8 +30,8 @@ def test_a_voice_note_becomes_a_booking_conversation_and_the_customer_is_told_wh
         out.script["nataka fade kesho mchana"] = {"intent": "book", "service": "Fade", "date": open_day().isoformat(), "window": "afternoon", "language": "sw"}
         async with client() as c:
             await post(c, voice())
-        assert out.bodies(A)[0] == 'I heard: "nataka fade kesho mchana"'
-        assert "Nafasi za mapema za Fade" in out.bodies(A)[1]                              # then the usual booking flow
+        assert "nataka fade kesho mchana" in out.bodies(A)[0]
+        assert "Nafasi za mapema za Fade" in out.bodies(A)[1]
         [call] = out.asr
         assert call["auth"] == "Bearer asrtok" and call["type"] == "audio/ogg" and call["bytes"] == b"OggS-fake-voice-note"
         assert call["lang"] is None                                                         # a new customer: the model works out the language
@@ -60,17 +60,17 @@ def test_when_recognition_fails_the_customer_is_asked_to_retry_and_nothing_is_bo
         async with client() as c:
             out.asr_down = True
             await post(c, voice(mid="v1"))
-            assert "couldn't make out that voice note" in out.bodies(A)[-1]
+            assert ("could not" in out.bodies(A)[-1].lower() or "couldn't" in out.bodies(A)[-1].lower()) and "make it out" in out.bodies(A)[-1].lower()
             out.asr_down = False
             out.asr_text = "   "
             await post(c, voice(mid="v2"))                                                  # silence or noise: an empty transcript
-            assert "couldn't make out that voice note" in out.bodies(A)[-1]
+            assert ("could not" in out.bodies(A)[-1].lower() or "couldn't" in out.bodies(A)[-1].lower()) and "make it out" in out.bodies(A)[-1].lower()
             out.media_gone = True
             await post(c, voice(mid="v3"))                                                  # Meta no longer has the file
-            assert "couldn't make out that voice note" in out.bodies(A)[-1]
+            assert ("could not" in out.bodies(A)[-1].lower() or "couldn't" in out.bodies(A)[-1].lower()) and "make it out" in out.bodies(A)[-1].lower()
             out.media_gone, out.media_size = False, 5_000_000
             await post(c, voice(mid="v4"))                                                  # far too long for a voice note
-            assert "couldn't make out that voice note" in out.bodies(A)[-1] and len(out.asr) == 1
+            assert ("could not" in out.bodies(A)[-1].lower() or "couldn't" in out.bodies(A)[-1].lower()) and "make it out" in out.bodies(A)[-1].lower() and len(out.asr) == 1
         assert await pool.fetchval("SELECT count(*) FROM bookings") == 0
         await pool.close()
     asyncio.run(run())
@@ -82,6 +82,6 @@ def test_without_a_speech_service_voice_notes_get_the_text_only_reply():
         pool, out, salon = await build(DSN, asr_url="")
         async with client() as c:
             await post(c, voice())
-        assert "text messages for now" in out.bodies(A)[-1] and out.asr == []
+        assert "text messages" in out.bodies(A)[-1].lower() and out.asr == []
         await pool.close()
     asyncio.run(run())

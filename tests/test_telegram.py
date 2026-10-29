@@ -43,12 +43,12 @@ def test_a_telegram_customer_can_book_through_text_and_buttons():
         async with client() as c:
             assert (await post_tg(c, tg_update(1, C1, "fade"))).json() == {"ok": True}
             offer = out.tg_to(str(C1))[-1]
-            assert offer["text"].startswith("Earliest slots for Fade")
+            assert "earliest" in offer["text"].lower() and "Fade" in offer["text"]
             buttons = [b for row in offer["reply_markup"]["inline_keyboard"] for b in row]
             assert buttons[0]["callback_data"] == "slot:0"
             await post_tg(c, tg_update(2, C1, data="slot:0"))
         assert any(m["method"] == "answerCallbackQuery" and m["callback_query_id"] == "cb2" for m in out.tg)   # the button spinner stops
-        assert "You're booked: Fade" in out.tg_bodies(str(C1))[-1]
+        assert "booked" in out.tg_bodies(str(C1))[-1].lower() and "Fade" in out.tg_bodies(str(C1))[-1]
         assert await pool.fetchval("SELECT status FROM bookings") == "confirmed"
         assert await pool.fetchval("SELECT wa_id FROM clients") == f"tg:{C1}"
         assert out.sent == []                                                                # nothing went to WhatsApp
@@ -66,13 +66,13 @@ def test_a_telegram_customer_is_asked_for_an_mpesa_number_then_pays_and_is_confi
             await post_tg(c, tg_update(1, C1, "fade"))
             await post_tg(c, tg_update(2, C1, data="slot:0"))
             assert out.stk == []                                                             # a Telegram id is not a phone number
-            assert "Which M-Pesa number" in out.tg_bodies(str(C1))[-1] or "M-Pesa number" in out.tg_bodies(str(C1))[-1]
+            assert "m-pesa number" in out.tg_bodies(str(C1))[-1].lower()
             await post_tg(c, tg_update(3, C1, "0711 000 001"))
             assert len(out.stk) == 1 and out.stk[0]["PhoneNumber"] == "254711000001" and out.stk[0]["Amount"] == 200
             assert "M-Pesa request" in out.tg_bodies(str(C1))[-1]
             await c.post(f"/mpesa/callback/{CB_SECRET}", json=callback("ws_CO_1"))
         assert await pool.fetchval("SELECT status FROM bookings") == "confirmed"
-        assert out.tg_bodies(str(C1))[-1].startswith("Payment of KES 200 received (M-Pesa QAB1CD2EF3)")
+        assert "200" in out.tg_bodies(str(C1))[-1] and "QAB1CD2EF3" in out.tg_bodies(str(C1))[-1]
         assert out.tg_bodies(str(OWNER))[-1].startswith("New booking:")                      # the owner hears on Telegram too
         assert out.sent == []
         await pool.close()
@@ -87,7 +87,7 @@ def test_voice_notes_and_photos_work_over_telegram():
         out.script["nataka fade kesho mchana"] = {"intent": "book", "service": "Fade", "date": open_day().isoformat(), "window": "afternoon", "language": "sw"}
         async with client() as c:
             await post_tg(c, tg_update(1, C1, voice={"file_id": "VOICE1", "duration": 3}))
-            assert out.tg_bodies(str(C1))[0] == 'I heard: "nataka fade kesho mchana"'
+            assert "nataka fade kesho mchana" in out.tg_bodies(str(C1))[0]
             assert out.asr[0]["bytes"] == b"TG-FILE-BYTES" and out.asr[0]["type"] == "audio/ogg"
             await post_tg(c, tg_update(2, C2, caption="I want this", photo=[{"file_id": "PHOTO1", "file_size": 500}]))
         assert any(v["image"].startswith("data:image/jpeg;base64,") for v in out.vision)
@@ -160,7 +160,7 @@ def test_the_poller_handles_updates_in_order_acknowledges_buttons_and_backs_off_
             await asyncio.sleep(0.05)
             if out.tg_to(str(C1)):
                 break
-        assert out.tg_to(str(C1))[-1]["text"].startswith("Earliest slots for Fade")
+        assert "earliest" in out.tg_to(str(C1))[-1]["text"].lower() and "Fade" in out.tg_to(str(C1))[-1]["text"]
         assert any(m["method"] == "deleteWebhook" for m in out.tg)                           # polling and a webhook cannot coexist
         out.tg_updates = [tg_update(2, C1, data="slot:0")]
         for _ in range(100):

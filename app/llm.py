@@ -41,13 +41,22 @@ class Result:
     ms: int = 0
 
 
-def build_prompt(today: date, services: list[str], state: str) -> str:
+def build_prompt(today: date, services: list[str], state: str, history: list[dict] | None = None) -> str:
     cal = "\n".join(f"{(today + timedelta(days=i)).strftime('%a')} = {(today + timedelta(days=i)).isoformat()}" for i in range(14))
+    hist = ""
+    if history:
+        lines = []
+        for turn in history[-4:]:
+            role = turn.get("role", "user")
+            text = (turn.get("text") or "")[:200]
+            lines.append(f"{role}: {text}")
+        if lines:
+            hist = "\nRecent conversation:\n" + "\n".join(lines) + "\n"
     return f"""You read WhatsApp messages sent to a Kenyan salon or barbershop and fill in a JSON form. Reply with ONE JSON object and nothing else.
 Customers write English, Swahili and Sheng, often mixed. Today is {today.strftime('%A')} {today.isoformat()} (Africa/Nairobi).
 Calendar for the next 14 days:
 {cal}
-
+{hist}
 Fields:
 intent: book | choose_slot | cancel | price_list | hours | greeting | other
 service: copy EXACTLY one name from this list, or null: {json.dumps(services)}
@@ -137,9 +146,9 @@ class Extractor:
             e.append((self.s.llm_fallback_base_url, self.s.llm_fallback_api_key, self.s.llm_fallback_model, 1))
         return e
 
-    def _body(self, model: str, text: str, today: date, services: list[str], state: str) -> dict:
+    def _body(self, model: str, text: str, today: date, services: list[str], state: str, history: list[dict] | None = None) -> dict:
         body: dict = {"model": model, "messages": [
-            {"role": self.s.llm_system_role, "content": build_prompt(today, services, state)},
+            {"role": self.s.llm_system_role, "content": build_prompt(today, services, state, history)},
             {"role": "user", "content": f'Message: "{text[:500]}"'}]}
         if self.s.llm_reasoning_effort:
             body["reasoning_effort"] = self.s.llm_reasoning_effort
@@ -149,15 +158,15 @@ class Extractor:
             body["response_format"] = {"type": "json_schema", "json_schema": {"name": "extraction", "schema": Extraction.model_json_schema()}}
         return body
 
-    async def extract(self, text: str, *, today: date, services: list[dict], state: str) -> Result:
+    async def extract(self, text: str, *, today: date, services: list[dict], state: str, history: list[dict] | None = None) -> Result:
         names = [s["name"] for s in services]
         if self.budget is not None and not await self.budget.take("text"):
-            return Result(sanitize(rule_extract(text, today, services, state), today), "keywords")   # today's ceiling is reached
+            return Result(sanitize(rule_extract(text, today, services, state), today), "keywords")
         for base, key, model, attempts in self.endpoints():
             for attempt in range(attempts):
                 t0 = clock.perf_counter()
                 try:
-                    r = await self.http.post(base.rstrip("/") + "/chat/completions", json=self._body(model, text, today, names, state),
+                    r = await self.http.post(base.rstrip("/") + "/chat/completions", json=self._body(model, text, today, names, state, history),
                                              headers={"Authorization": f"Bearer {key}"}, timeout=self.s.llm_timeout_s)
                     r.raise_for_status()
                     ex = sanitize(_coerce(_json_from(r.json()["choices"][0]["message"]["content"])), today)

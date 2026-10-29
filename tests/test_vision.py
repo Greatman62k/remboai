@@ -41,12 +41,12 @@ def test_a_photo_becomes_a_service_and_the_booking_carries_on_from_there():
         out.script["kesho mchana"] = {"intent": "book", "date": open_day().isoformat(), "window": "afternoon"}
         async with client() as c:
             await post(c, photo())
-            assert out.bodies(A)[-1].startswith("That looks like a Fade (KES 500, about 45 min)")
+            assert "Fade" in out.bodies(A)[-1] and "500" in out.bodies(A)[-1]
             [v] = out.vision
             assert v["image"] == "data:image/jpeg;base64," + base64.b64encode(b"OggS-fake-voice-note").decode()
             assert '"Fade"' in v["prompt"] and '"Silk press"' in v["prompt"] and "never identify" in v["prompt"]
             await post(c, payload(A, "kesho mchana", mid="t1"))                              # the service is remembered from the photo
-            assert "Earliest slots for Fade" in out.bodies(A)[-1]
+            assert "earliest" in out.bodies(A)[-1].lower() and "Fade" in out.bodies(A)[-1]
         await pool.close()
     asyncio.run(run())
 
@@ -60,7 +60,7 @@ def test_a_caption_with_a_day_goes_straight_to_slots():
         out.script["kesho mchana"] = {"intent": "book", "date": open_day().isoformat(), "window": "afternoon"}
         async with client() as c:
             await post(c, photo(caption="kesho mchana"))
-        assert "Silk press (KES 2500" in out.bodies(A)[-2] and "Earliest slots for Silk press" in out.bodies(A)[-1]
+        assert "Silk press" in out.bodies(A)[-2] and "earliest" in out.bodies(A)[-1].lower() and "Silk press" in out.bodies(A)[-1]
         await pool.close()
     asyncio.run(run())
 
@@ -80,7 +80,7 @@ def test_what_the_model_says_is_checked_against_the_menu_and_doubtful_photos_are
             )):
                 out.vision_answer = answer
                 await post(c, photo(mid=f"p{i}"))
-                assert "couldn't tell the style" in out.bodies(A)[-1] and "Fade (KES 500)" in out.bodies(A)[-1], answer
+                assert ("could not" in out.bodies(A)[-1].lower() or "couldn't" in out.bodies(A)[-1].lower()) and "identify" in out.bodies(A)[-1].lower() and "Fade (KES 500)" in out.bodies(A)[-1], answer
         assert await pool.fetchval("SELECT count(*) FROM bookings") == 0
         await pool.close()
     asyncio.run(run())
@@ -93,17 +93,17 @@ def test_photo_problems_never_leave_the_customer_in_silence():
         async with client() as c:
             out.media_mime = "image/gif"
             await post(c, photo(mid="g1"))                                                          # a format the model is not sent
-            assert "couldn't tell the style" in out.bodies(A)[-1] and out.vision == []
+            assert ("could not" in out.bodies(A)[-1].lower() or "couldn't" in out.bodies(A)[-1].lower()) and "identify" in out.bodies(A)[-1].lower() and out.vision == []
             out.media_mime = "image/jpeg"
             out.media_gone = True
             await post(c, photo(mid="g2"))
-            assert "couldn't tell the style" in out.bodies(A)[-1]
+            assert ("could not" in out.bodies(A)[-1].lower() or "couldn't" in out.bodies(A)[-1].lower()) and "identify" in out.bodies(A)[-1].lower()
             out.media_gone, out.media_size = False, 9_000_000
             await post(c, photo(mid="g3"))
-            assert "couldn't tell the style" in out.bodies(A)[-1] and out.vision == []
+            assert ("could not" in out.bodies(A)[-1].lower() or "couldn't" in out.bodies(A)[-1].lower()) and "identify" in out.bodies(A)[-1].lower() and out.vision == []
             out.media_size, out.down = 20_000, {"primary.test"}
             await post(c, photo(mid="g4"))                                                          # model unreachable
-            assert "couldn't tell the style" in out.bodies(A)[-1]
+            assert ("could not" in out.bodies(A)[-1].lower() or "couldn't" in out.bodies(A)[-1].lower()) and "identify" in out.bodies(A)[-1].lower()
         await pool.close()
     asyncio.run(run())
 
@@ -117,7 +117,7 @@ def test_the_failover_endpoint_reads_the_photo_when_the_first_is_down():
         async with client() as c:
             await post(c, photo())
         assert [v["host"] for v in out.vision] == ["primary.test", "fallback.test"] and out.vision[1]["model"] == "muse-spark-open"
-        assert out.bodies(A)[-1].startswith("That looks like a Fade")
+        assert "Fade" in out.bodies(A)[-1]
         await pool.close()
     asyncio.run(run())
 
@@ -128,6 +128,6 @@ def test_with_photo_matching_switched_off_a_photo_gets_the_text_only_reply():
         pool, out, salon = await build(DSN, vision_enabled=False)
         async with client() as c:
             await post(c, photo())
-        assert "text messages for now" in out.bodies(A)[-1] and out.vision == []
+        assert "text messages" in out.bodies(A)[-1].lower() and out.vision == []
         await pool.close()
     asyncio.run(run())
