@@ -10,6 +10,8 @@ from pathlib import Path
 
 from fastapi.responses import FileResponse, PlainTextResponse
 
+from . import logs
+from .budget import Budget
 from .config import get_settings
 from .inbound import inbound
 from .ctx import Ctx
@@ -23,7 +25,7 @@ from .payments import process_callback, run_sweeper
 from .db import make_pool, migrate
 from .whatsapp import Message, WhatsApp, explain, mask, parse_failures, parse_messages, verify_signature
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+logs.setup()
 log = logging.getLogger("rembo")
 MAX_BODY = 1_000_000
 
@@ -37,9 +39,10 @@ async def lifespan(app: FastAPI):
     http = httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=3.0))
     wa = WhatsApp(http, s.graph_version)
     app.state.settings, app.state.pool, app.state.wa = s, pool, wa
-    llm = Extractor(http, s)
+    budget = Budget(pool, s)
+    llm = Extractor(http, s, budget)
     tg = Telegram(http, s.telegram_bot_token) if s.telegram_bot_token else None
-    app.state.ctx = Ctx(s, pool, Channels(wa, tg), llm, Daraja(http, s), Transcriber(http, s), StyleMatcher(http, s, llm.endpoints))
+    app.state.ctx = Ctx(s, pool, Channels(wa, tg), llm, Daraja(http, s), Transcriber(http, s, budget), StyleMatcher(http, s, llm.endpoints, budget))
     app.state.tg = tg
     poller = None
     if tg:
