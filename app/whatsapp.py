@@ -134,6 +134,10 @@ class WhatsApp:
             return None
         return (blob.content, meta.get("mime_type") or "audio/ogg") if 0 < len(blob.content) <= max_bytes else None
 
+    async def send_template(self, phone_number_id: str, token: str, to: str, template: str, lang: str, body_params: list[str]) -> bool:
+        comps = [{"type": "body", "parameters": [{"type": "text", "text": p[:1024]} for p in body_params]}] if body_params else []
+        return await self._send(phone_number_id, token, to, {"type": "template", "template": {"name": template, "language": {"code": lang}, "components": comps}})
+
     async def _send(self, phone_number_id: str, token: str, to: str, content: dict) -> bool:
         url = f"https://graph.facebook.com/{self.version}/{phone_number_id}/messages"
         payload = {"messaging_product": "whatsapp", "to": to, **content}

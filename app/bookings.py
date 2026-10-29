@@ -51,8 +51,9 @@ async def release(pool: asyncpg.Pool, booking_id: str) -> None:
 
 
 async def expire_holds(pool: asyncpg.Pool) -> int:
-    # A hold with a payment prompt still open is kept: the customer may be typing their PIN right now.
-    r = await pool.execute(
-        "UPDATE bookings b SET status='expired' WHERE b.status='held' AND b.hold_expires_at < now() AND NOT EXISTS "
-        "(SELECT 1 FROM payments p WHERE p.booking_id=b.id AND p.status='pending' AND p.created_at > now() - interval '5 minutes')")
+    rows = await pool.fetch("SELECT id FROM bookings b WHERE b.status='held' AND b.hold_expires_at < now() AND NOT EXISTS (SELECT 1 FROM payments p WHERE p.booking_id=b.id AND p.status='pending' AND p.created_at > now() - interval '5 minutes')")
+    if rows:
+        for r in rows:
+            await pool.execute("UPDATE reminder_jobs SET status='cancelled' WHERE booking_id=$1::uuid AND status='pending'", r["id"])
+    r = await pool.execute("UPDATE bookings b SET status='expired' WHERE b.status='held' AND b.hold_expires_at < now() AND NOT EXISTS (SELECT 1 FROM payments p WHERE p.booking_id=b.id AND p.status='pending' AND p.created_at > now() - interval '5 minutes')")
     return int(r.split()[-1])
