@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import logging
 import re
 import time
@@ -41,6 +42,38 @@ def _local_ingress_peek(key: str, window_s: int) -> int:
     return count if time.monotonic() - started < window_s else 0
 
 
+def _trusted_proxy_match(client_ip: str, cidrs: str) -> bool:
+    if not cidrs:
+        return False
+    try:
+        ip = ipaddress.ip_address(client_ip)
+    except ValueError:
+        return False
+    for cidr in cidrs.split(","):
+        c = cidr.strip()
+        if not c:
+            continue
+        try:
+            if ip in ipaddress.ip_network(c, strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _client_ip(scope, trusted_cidrs: str) -> str:
+    direct = str((scope.get("client") or ("unknown", 0))[0])[:128]
+    if not trusted_cidrs:
+        return direct
+    headers = dict((k.decode().lower(), v.decode()) for k, v in scope.get("headers", []))
+    fwd = headers.get("x-forwarded-for", "")
+    if fwd and _trusted_proxy_match(direct, trusted_cidrs):
+        first = fwd.split(",")[0].strip().split(":")[0]
+        if first:
+            return first[:128]
+    return direct
+
+
 def _local_ingress_count(key: str, window_s: int) -> int:
     now = time.monotonic()
     if key not in _INGRESS_LOCAL and len(_INGRESS_LOCAL) >= _INGRESS_LOCAL_MAX_KEYS:
@@ -73,8 +106,8 @@ class IngressRateLimit:
         window_s = _positive_int(getattr(settings, "ingress_rate_window_s", 60), 60)
         source_limit = _positive_int(getattr(settings, "ingress_rate_burst", 120), 120)
         global_limit = _positive_int(getattr(settings, "ingress_rate_global", 600), 600)
-        client = scope.get("client") or ("unknown", 0)
-        source = str(client[0])[:128]
+        trusted = getattr(settings, "trusted_proxy_cidrs", "") or ""
+        source = _client_ip(scope, trusted)
         source_key = f"rl:ingress:source:{source}"
         global_key = "rl:ingress:global"
         try:
