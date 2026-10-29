@@ -23,6 +23,7 @@ class Settings(BaseSettings):
         return v
 
     database_url: str
+    redis_url: str = "redis://localhost:6379/0"
     wa_app_secret: str = ""
     wa_verify_token: str = ""
     wa_access_token: str = ""
@@ -48,25 +49,43 @@ class Settings(BaseSettings):
     llm_fallback_model: str = ""
 
     hold_minutes: int = 10
-    # Voice notes: Meta's Omnilingual ASR (open source, 1600+ languages incl. Swahili) served from our own Modal GPU app, see deploy/modal_asr.py
-    asr_url: str = ""                    # https://<workspace>--rembo-asr-asr-web.modal.run/transcribe ; empty = voice notes not supported
+    asr_url: str = ""
     asr_token: str = ""
-    asr_timeout_s: float = 45.0          # covers a cold start of the GPU container
-    vision_enabled: bool = True          # photo matching uses the same Meta endpoints as the text model
-    rate_limit_per_min: int = 20         # messages per sender per minute; beyond this they are ignored (protects model credits)
+    asr_timeout_s: float = 45.0
+    vision_enabled: bool = True
+    rate_limit_per_min: int = 20
+    rate_burst: int = 10
+    rate_window_s: int = 60
+    rate_daily: int = 300
+    llm_daily_per_salon: int = 5000
+    ingress_rate_burst: int = 120
+    ingress_rate_global: int = 600
+    ingress_rate_window_s: int = 60
 
     # Telegram: a second channel for the same receptionist (no business verification needed). Empty token = off.
     telegram_bot_token: str = ""        # from @BotFather
     telegram_mode: str = "auto"         # auto = webhook when PUBLIC_BASE_URL is https, otherwise long polling | poll | webhook
     telegram_webhook_secret: str = ""    # random string Telegram echoes back in a header
 
-    # M-Pesa (Daraja). Sandbox moves no real money; production needs Safaricom's Go Live approval for the salon's till.
-    mpesa_env: str = "sandbox"           # sandbox | production
+    mpesa_env: str = "sandbox"
     mpesa_consumer_key: str = ""
     mpesa_consumer_secret: str = ""
     mpesa_passkey: str = ""
-    mpesa_callback_secret: str = ""      # random string that becomes part of the callback URL path
-    public_base_url: str = ""            # https://your-domain, where Safaricom can reach /mpesa/callback/<secret>
+    mpesa_callback_secret: str = ""
+    mpesa_verify_callbacks: bool = True
+    public_base_url: str = ""
+    ops_api_key: str = ""
+    token_encryption_key: str = ""
+    webhook_max_pending: int = 10000
+    webhook_max_pending_per_sender: int = 100
+    webhook_retention_days: int = 30
+    inbound_retention_days: int = 90
+    handoff_hours: float = 4.0
+    confirm_exact_booking: bool = True
+    unpaid_hold_limit: int = 3
+    webhook_workers: int = 4
+    db_pool_max: int = 10
+    salon_setup_invite_hours: int = 168
 
 
 @lru_cache

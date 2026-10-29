@@ -4,10 +4,19 @@ services:
     environment: {POSTGRES_USER: rembo, POSTGRES_PASSWORD: rembo, POSTGRES_DB: rembo}
     volumes: [pgdata:/var/lib/postgresql/data]
     healthcheck: {test: ["CMD-SHELL", "pg_isready -U rembo"], interval: 3s, retries: 20}
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: [redisdata:/data]
+    healthcheck: {test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"], interval: 3s, retries: 20}
   app:
     build: .
     env_file: .env
-    environment: {DATABASE_URL: "postgresql://rembo:rembo@db:5432/rembo"}
-    depends_on: {db: {condition: service_healthy}}
+    environment:
+      DATABASE_URL: "postgresql://rembo:rembo@db:5432/rembo"
+      REDIS_URL: "redis://redis:6379/0"
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
     ports: ["8080:8080"]
-volumes: {pgdata: {}}
+volumes: {pgdata: {}, redisdata: {}}
