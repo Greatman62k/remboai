@@ -41,13 +41,13 @@ class Accepted:
 
 @dataclass(frozen=True, slots=True)
 class Outcome:
-    """The final answer for one STK prompt, from the callback or from a status query."""
     checkout_request_id: str
     code: int
     desc: str
     receipt: str | None = None
     amount: int | None = None
     phone: str | None = None
+    raw: dict | None = None
 
     @property
     def ok(self) -> bool:
@@ -72,7 +72,8 @@ def parse_callback(payload: dict) -> Outcome | None:
         amount = None
     phone = str(items["PhoneNumber"]) if items.get("PhoneNumber") is not None else None
     receipt = str(items["MpesaReceiptNumber"]) if items.get("MpesaReceiptNumber") else None
-    return Outcome(cid, code, str(cb.get("ResultDesc", "")), receipt, amount, phone)
+    out = Outcome(cid, code, str(cb.get("ResultDesc", "")), receipt, amount, phone, payload)
+    return out
 
 
 class Daraja:
