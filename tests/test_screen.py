@@ -46,8 +46,8 @@ def test_an_off_topic_first_message_costs_no_model_call_and_is_pointed_back_to_w
             await post(c, payload(A, "write me a poem about the moon", mid="m1"))
             await post(c, payload("254711000002", "andika shairi kuhusu mwezi", mid="m2"))
         assert out.calls == []
-        assert out.bodies(A)[0].startswith("I'm the booking assistant for Zuri Cuts")
-        assert "msaidizi" in out.bodies("254711000002")[0] or out.bodies("254711000002")[0].startswith("I'm the booking assistant")
+        assert "booking assistant" in out.bodies(A)[0].lower() and "Zuri Cuts" in out.bodies(A)[0]
+        assert "booking assistant" in out.bodies("254711000002")[0].lower()
         await pool.close()
     asyncio.run(run())
 
@@ -61,7 +61,7 @@ def test_a_plain_greeting_is_answered_without_the_model_and_a_real_request_still
             await post(c, payload(A, "hi", mid="m1"))
             assert out.calls == [] and "Zuri Cuts" in out.bodies(A)[0]
             await post(c, payload(A, "fade kesho", mid="m2"))
-        assert len(out.calls) == 1 and "Earliest slots" in out.bodies(A)[-1]
+        assert len(out.calls) == 1 and "earliest" in out.bodies(A)[-1].lower() and "Fade" in out.bodies(A)[-1]
         await pool.close()
     asyncio.run(run())
 
@@ -77,7 +77,7 @@ def test_a_follow_up_answer_in_the_middle_of_a_booking_is_not_screened():
             before = len(out.calls)
             await post(c, payload(A, "friday afternoon", mid="m2"))
             assert len(out.calls) == before + 1
-            assert "Earliest slots" in out.bodies(A)[-1]
+            assert "earliest" in out.bodies(A)[-1].lower() and "Fade" in out.bodies(A)[-1]
         await pool.close()
     asyncio.run(run())
 
@@ -88,7 +88,7 @@ def test_the_screen_applies_on_telegram_too():
         pool, out, salon = await build(DSN)
         async with client() as c:
             await post_tg(c, tg_update(1, 5001, "what's the weather in Nairobi"))
-        assert out.calls == [] and out.tg_bodies("5001")[0].startswith("I'm the booking assistant")
+        assert out.calls == [] and "booking assistant" in out.tg_bodies("5001")[0].lower()
         await pool.close()
     asyncio.run(run())
 

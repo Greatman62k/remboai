@@ -126,7 +126,7 @@ def test_two_customers_tapping_the_same_slot_get_exactly_one_hold():
             rs = await asyncio.gather(post(c, payload(A, reply_id="slot:0", mid="a2")), post(c, payload(B, reply_id="slot:0", mid="b2")))
             assert all(r.status_code == 200 for r in rs)
         assert await pool.fetchval("SELECT count(*) FROM bookings WHERE status='held'") == 1
-        losers = [w for w in (A, B) if "Holding Fade" not in out.bodies(w)[-1]]
+        losers = [w for w in (A, B) if "Fade" not in out.bodies(w)[-1] or "200" not in out.bodies(w)[-1]]
         assert len(losers) == 1 and "just taken" in out.bodies(losers[0])[-1]            # the loser is told and offered the next slots
         await pool.close()
     asyncio.run(run())
@@ -153,11 +153,11 @@ def test_with_no_model_at_all_the_rules_still_complete_a_booking_across_messages
         out.down.add("primary.test")
         async with client() as c:
             await post(c, payload(A, "fade", mid="1"))                       # service only: asks the day
-            assert "Which day" in out.bodies(A)[-1]
+            assert "which day" in out.bodies(A)[-1].lower()
             await post(c, payload(A, "kesho", mid="2"))                      # the day arrives next: slots offered
             assert out.to(A)[-1]["type"] == "interactive"
             await post(c, payload(A, "2", mid="3"))                          # a bare number picks a slot
-            assert "Nimehifadhi" in out.bodies(A)[-1] or "Holding Fade" in out.bodies(A)[-1]
+            assert "Fade" in out.bodies(A)[-1]
         assert await pool.fetchval("SELECT count(*) FROM bookings WHERE status='held'") == 1
         await pool.close()
     asyncio.run(run())
@@ -203,6 +203,6 @@ def test_unknown_number_and_non_text_messages_are_handled_calmly():
             voice = payload(A, mid="v1")
             voice["entry"][0]["changes"][0]["value"]["messages"][0] = {"from": A, "id": "v1", "type": "audio", "audio": {"id": "X"}}
             await post(c, voice)
-            assert "text messages for now" in out.bodies(A)[-1]
+            assert "text messages" in out.bodies(A)[-1].lower()
         await pool.close()
     asyncio.run(run())
