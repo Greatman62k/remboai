@@ -210,6 +210,8 @@ async def _handle(ctx, msg: Message) -> None:
             res = Result(quick, "rules")
         else:
             res = await ctx.llm.extract(msg.text, today=now.date(), services=services, state=st.get("state", "idle"), history=st.get("history"))
+            if res.ex.intent == "other" and quick.intent == "book" and (quick.service or quick.date or quick.window or quick.time):
+                res = Result(quick, "keywords")
     ex = res.ex
     log.info("understood intent=%s via %s %s %dms", ex.intent, res.source, res.model, res.ms)
     if ex.intent != "other" and ex.language != lang:
