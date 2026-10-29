@@ -80,7 +80,7 @@ def test_what_the_model_says_is_checked_against_the_menu_and_doubtful_photos_are
             )):
                 out.vision_answer = answer
                 await post(c, photo(mid=f"p{i}"))
-                assert ("could not" in out.bodies(A)[-1].lower() or "couldn't" in out.bodies(A)[-1].lower()) and "identify" in out.bodies(A)[-1].lower() and "Fade (KES 500)" in out.bodies(A)[-1], answer
+                assert ("could not" in out.bodies(A)[-1].lower() or "couldn't" in out.bodies(A)[-1].lower()) and "identify" in out.bodies(A)[-1].lower() and "Fade" in out.bodies(A)[-1] and "KES 500" in out.bodies(A)[-1], answer
         assert await pool.fetchval("SELECT count(*) FROM bookings") == 0
         await pool.close()
     asyncio.run(run())

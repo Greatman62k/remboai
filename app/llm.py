@@ -26,11 +26,12 @@ Intent = Literal["book", "choose_slot", "cancel", "price_list", "hours", "greeti
 class Extraction(BaseModel):
     intent: Intent = "other"
     service: str | None = None
-    date: str | None = None          # YYYY-MM-DD
+    date: str | None = None
     window: Literal["morning", "afternoon", "evening"] | None = None
-    time: str | None = None          # HH:MM, 24 hour
-    choice: int | None = None        # 1-based slot number
+    time: str | None = None
+    choice: int | None = None
     language: Literal["en", "sw"] = "en"
+    far_date: bool = False
 
 
 @dataclass
@@ -79,14 +80,17 @@ def _json_from(content: str) -> dict:
 
 
 def sanitize(ex: Extraction, today: date) -> Extraction:
-    """Code is the authority: drop anything implausible instead of trusting the model."""
     if ex.date:
         try:
             d = date.fromisoformat(ex.date)
             if not today <= d <= today + timedelta(days=60):
+                ex.far_date = True
                 ex.date = None
+            else:
+                ex.far_date = False
         except ValueError:
             ex.date = None
+            ex.far_date = False
     if ex.time and not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", ex.time):
         ex.time = None
     if ex.choice is not None and ex.choice not in (1, 2, 3):

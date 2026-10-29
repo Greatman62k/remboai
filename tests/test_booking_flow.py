@@ -174,7 +174,7 @@ def test_cancel_prices_hours_greeting_and_unknown_service():
             "how are you": {"intent": "other"}})
         async with client() as c:
             await post(c, payload(A, "prices?", mid="1"))
-            assert "Fade (KES 500)" in out.bodies(A)[-1] and "Silk press (KES 2500)" in out.bodies(A)[-1]
+            assert "Fade" in out.bodies(A)[-1] and "KES 500" in out.bodies(A)[-1] and "Silk press" in out.bodies(A)[-1] and "KES 2500" in out.bodies(A)[-1]
             await post(c, payload(A, "when are you open", mid="2"))
             assert "Sun: closed" in out.bodies(A)[-1]
             await post(c, payload(A, "how are you", mid="3"))

@@ -126,7 +126,7 @@ def test_only_the_owner_has_commands_and_an_owner_can_still_use_the_customer_flo
             await post(c, payload(B, f"block {day}", mid="b1"))                           # a customer typing a command: nothing happens
             assert await pool.fetchval("SELECT count(*) FROM time_off") == 0
             await post(c, payload(OWNER, "prices?", mid="o1"))
-            assert "Fade (KES 500)" in out.bodies(OWNER)[-1]
+            assert "Fade" in out.bodies(OWNER)[-1] and "KES 500" in out.bodies(OWNER)[-1]
             await post(c, payload(OWNER, "block", mid="o2"))
             assert "which day" in out.bodies(OWNER)[-1].lower()
             await post(c, payload(OWNER, f"block {day} 16:00-14:00", mid="o3"))

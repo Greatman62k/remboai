@@ -142,7 +142,7 @@ def test_services_and_stylists_can_be_managed_and_customers_see_the_change():
                 assert (await c.post("/api/owner/services", json=bad, headers=hdr)).status_code == 422
             out.script["prices?"] = {"intent": "price_list"}
             await post(c, payload(A, "prices?", mid="p1"))
-            assert "Dreadlock retwist (KES 1500)" in out.bodies(A)[-1]
+            assert "Dreadlock retwist" in out.bodies(A)[-1] and "KES 1500" in out.bodies(A)[-1]
             assert (await c.patch(f"/api/owner/services/{sid}", json={"price_kes": 1800}, headers=hdr)).json()["price_kes"] == 1800
             assert (await c.patch(f"/api/owner/services/{sid}", json={}, headers=hdr)).status_code == 422
             await c.patch(f"/api/owner/services/{sid}", json={"active": False}, headers=hdr)                             # hidden from customers

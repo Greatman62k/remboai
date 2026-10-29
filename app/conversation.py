@@ -72,7 +72,9 @@ def match_service(name: str | None, services: list[dict]) -> dict | None:
 
 
 def menu(services: list[dict]) -> str:
-    return "\n".join(f"- {s['name']} (KES {s['price_kes']})" for s in services)
+    if not services:
+        return "No services are currently listed. Please contact us directly and we will be happy to assist you."
+    return "\n".join(f"- {s['name']} (KES {s['price_kes']}, {s['duration_min']} min)" for s in services)
 
 
 async def handle(ctx, msg: Message) -> None:
@@ -345,6 +347,10 @@ async def _book(ctx, salon, client, st, services, tz, now, chat, lang, ex: Extra
         service = match_service(mem.get("service_name"), services) or next((s for s in services if s["id"] == mem.get("service_id")), None)
     if ex.service and service is None:
         await _reply(ctx, salon["id"], chat.to, st, chat, t(lang, "unknown_service", menu=menu(services)))
+        return
+    if getattr(ex, "far_date", False):
+        await _save(ctx, salon["id"], chat.to, {"state": "asking", "service_name": service["name"] if service else None, "history": st.get("history", [])})
+        await _reply(ctx, salon["id"], chat.to, st, chat, t(lang, "far_date"))
         return
     day = date.fromisoformat(ex.date) if ex.date else (date.fromisoformat(mem["date"]) if mem.get("date") else None)
     window = ex.window or mem.get("window")
