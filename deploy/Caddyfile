@@ -1,12 +1,40 @@
+{
+    servers {
+        max_header_size 8KiB
+        timeouts {
+            read_header 5s
+            read_body 15s
+            read_body_idle 5s 1024
+            write 30s
+            write_idle 10s 1024
+            idle 30s
+        }
+    }
+}
+
 {$DOMAIN} {
-	encode gzip
-	request_body {
-		max_size 1MB
-	}
-	header {
-		Strict-Transport-Security "max-age=31536000"
-		X-Content-Type-Options nosniff
-		-Server
-	}
-	reverse_proxy app:8080
+    encode gzip
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer"
+        -Server
+    }
+    request_body {
+        max_size 256KiB
+    }
+    @app path /health /webhook /mpesa/callback/* /ops/* /setup/*
+    handle @app {
+        reverse_proxy app:8080 {
+            transport http {
+                dial_timeout 2s
+                response_header_timeout 20s
+                max_conns_per_host 48
+                keepalive_idle_conns_per_host 16
+            }
+        }
+    }
+    handle {
+        respond 404
+    }
 }

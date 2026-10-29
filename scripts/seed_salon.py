@@ -51,13 +51,29 @@ async def main() -> int:
             "INSERT INTO salon_payment (salon_id, kind, shortcode, party_b) VALUES ($1::uuid,$2,$3,$4) "
             "ON CONFLICT (salon_id) DO UPDATE SET kind=EXCLUDED.kind, shortcode=EXCLUDED.shortcode, party_b=EXCLUDED.party_b",
             salon, kind, shortcode, party_b)
-    staff = [await pool.fetchval("INSERT INTO staff (salon_id, name) VALUES ($1::uuid,$2) RETURNING id::text", salon, n) for n in a.stylist]
+    staff = []
+    for name in a.stylist:
+        sid = await pool.fetchval(
+            "SELECT id::text FROM staff WHERE salon_id=$1::uuid AND lower(name)=lower($2) ORDER BY id LIMIT 1", salon, name)
+        if sid:
+            await pool.execute("UPDATE staff SET name=$2, active=true WHERE id=$1::uuid", sid, name)
+        else:
+            sid = await pool.fetchval("INSERT INTO staff (salon_id, name) VALUES ($1::uuid,$2) RETURNING id::text", salon, name)
+        staff.append(sid)
     for spec in a.service:
         parts = spec.split(":")
         name, price, mins = parts[0], int(parts[1]), int(parts[2])
         aliases = [x.strip() for x in parts[3].split(",")] if len(parts) > 3 else []
-        sid = await pool.fetchval("INSERT INTO services (salon_id,name,aliases,duration_min,price_kes) VALUES ($1::uuid,$2,$3,$4,$5) RETURNING id::text",
-                                  salon, name, aliases, mins, price)
+        sid = await pool.fetchval(
+            "SELECT id::text FROM services WHERE salon_id=$1::uuid AND lower(name)=lower($2) ORDER BY id LIMIT 1", salon, name)
+        if sid:
+            await pool.execute(
+                "UPDATE services SET name=$2, aliases=$3, duration_min=$4, price_kes=$5, active=true WHERE id=$1::uuid",
+                sid, name, aliases, mins, price)
+        else:
+            sid = await pool.fetchval(
+                "INSERT INTO services (salon_id,name,aliases,duration_min,price_kes) VALUES ($1::uuid,$2,$3,$4,$5) RETURNING id::text",
+                salon, name, aliases, mins, price)
         for st in staff:
             await pool.execute("INSERT INTO staff_services VALUES ($1::uuid,$2::uuid) ON CONFLICT DO NOTHING", st, sid)
     print(f"salon {a.name} ready with {len(staff)} stylist(s) and {len(a.service)} service(s)")

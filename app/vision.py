@@ -48,8 +48,8 @@ def make_png(rgb: tuple[int, int, int] = (200, 30, 30), size: int = 16) -> bytes
 
 
 class StyleMatcher:
-    def __init__(self, http: httpx.AsyncClient, settings, endpoints):
-        self.http, self.s, self._endpoints = http, settings, endpoints
+    def __init__(self, http: httpx.AsyncClient, settings, endpoints, budget=None):
+        self.http, self.s, self._endpoints, self.budget = http, settings, endpoints, budget
 
     @property
     def enabled(self) -> bool:
@@ -68,6 +68,8 @@ class StyleMatcher:
     async def match(self, image: bytes, mime: str, services: list[str], caption: str = "") -> StyleGuess | None:
         mime = mime.split(";")[0].strip().lower()
         if not self.enabled or mime not in OK_TYPES or not 0 < len(image) <= MAX_IMAGE:
+            return None
+        if self.budget is not None and not await self.budget.take("vision"):
             return None
         for base, key, model, _ in self._endpoints():
             t0 = clock.perf_counter()

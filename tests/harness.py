@@ -185,7 +185,7 @@ async def build(dsn: str, till: bool = True, **over):
     if till:
         await pool.execute("INSERT INTO salon_payment (salon_id, kind, shortcode, party_b) VALUES ($1::uuid,'till','174379','5012345')", salon)
     out = Outside()
-    conf = dict(database_url=dsn, wa_app_secret=SECRET, wa_verify_token="v", wa_access_token="TOK",
+    conf = dict(database_url=dsn, wa_app_secret=SECRET, wa_verify_token="v", wa_access_token="TOK", ingress_rate_burst=10000, ingress_rate_global=20000, mpesa_verify_callbacks=False,
                 llm_base_url="https://primary.test/v1", llm_api_key="k", llm_model="muse-spark-1.3",
                 mpesa_consumer_key="ck", mpesa_consumer_secret="cs", mpesa_passkey="pk", mpesa_callback_secret=CB_SECRET,
                 public_base_url="https://rembo.test", asr_url="https://asr.test/transcribe", asr_token="asrtok",
@@ -199,7 +199,7 @@ async def build(dsn: str, till: bool = True, **over):
     tg = Telegram(http, settings.telegram_bot_token)
     await pool.execute("UPDATE salons SET tg_bot_id='tg:111'")
     app.state.tg = tg
-    app.state.ctx = Ctx(settings, pool, Channels(wa, tg), llm, Daraja(http, settings), Transcriber(http, settings), StyleMatcher(http, settings, llm.endpoints))
+    app.state.ctx = Ctx(settings, pool, Channels(wa, tg), llm, None, Daraja(http, settings), Transcriber(http, settings), StyleMatcher(http, settings, llm.endpoints))
     return pool, out, salon
 
 
