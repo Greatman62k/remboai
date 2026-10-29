@@ -328,3 +328,17 @@ def test_doctor_reports_what_works_and_says_what_to_fix():
         assert checks["M-Pesa"].ok and checks["M-Pesa mode"].warn and checks["model failover"].warn
         await pool.close()
     asyncio.run(run())
+
+
+@needs_db
+def test_doctor_reports_a_malformed_public_url_instead_of_crashing():
+    async def run():
+        import httpx
+        from app.doctor import run_checks
+        from tests.harness import app as _app
+        pool, out, salon = await build(DSN, public_base_url="not-a-url", asr_url="")
+        async with httpx.AsyncClient(transport=httpx.MockTransport(out.handler)) as http:
+            checks = {c.name: c for c in await run_checks(_app.state.settings, http, pool)}
+        assert not checks["public URL"].ok and "https://your-domain" in checks["public URL"].detail
+        await pool.close()
+    asyncio.run(run())
