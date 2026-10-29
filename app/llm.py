@@ -123,6 +123,8 @@ def rule_extract(text: str, today: date, services: list[dict], state: str = "idl
         return Extraction(intent="choose_slot", choice=int(t), language=lang)
     if _CANCEL.search(t):
         return Extraction(intent="cancel", language=lang)
+    if re.search(r"\b(service|services|huduma|orodha|menu)\b", t):
+        return Extraction(intent="price_list", language=lang)
     if _PRICE.search(t) and not re.search(r"\bsaa\s+ngapi\b", t):
         return Extraction(intent="price_list", language=lang)
     if _HOURS.search(t):

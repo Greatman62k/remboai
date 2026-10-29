@@ -19,4 +19,10 @@ services:
       db: {condition: service_healthy}
       redis: {condition: service_healthy}
     ports: ["8080:8080"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+        labels: "service=rembo"
 volumes: {pgdata: {}, redisdata: {}}

@@ -31,6 +31,14 @@ services:
       redis:
         condition: service_healthy
     networks: [internal]
+    volumes:
+      - applogs:/tmp/logs
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "10"
+        labels: "service=rembo"
   db:
     image: postgres:16-alpine
     restart: unless-stopped
@@ -76,3 +84,4 @@ volumes:
   pgdata: {}
   redisdata: {}
   caddy_data: {}
+  applogs: {}

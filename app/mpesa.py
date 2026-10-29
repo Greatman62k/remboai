@@ -29,6 +29,39 @@ def normalize_msisdn(text: str) -> str | None:
     return "254" + m.group(1) if m else None
 
 
+_EXTRACT = re.compile(r"(?:\+?254|0)?[71]\d{8}")
+
+
+def extract_msisdn(text: str) -> str | None:
+    """Find a Kenyan number anywhere inside free text, like 'my number is 0712345678'."""
+    if not text:
+        return None
+    cleaned = re.sub(r"[\s\-().]", "", text)
+    # search in cleaned version for any embedded candidate
+    for m in _EXTRACT.finditer(cleaned):
+        cand = m.group(0)
+        norm = normalize_msisdn(cand)
+        if norm:
+            return norm
+    # also try original text with spaces removed per candidate
+    return None
+
+
+def looks_like_phone_attempt(text: str) -> bool:
+    """Heuristic: user tried to give a phone but it is half, malformed or invalid."""
+    if not text:
+        return False
+    t = text.lower()
+    if any(k in t for k in ("namba", "number", "phone", "mpesa", "safaricom", "tel")):
+        return True
+    digits = re.sub(r"\D", "", t)
+    if 4 <= len(digits) <= 15 and any(p in t for p in ("07", "01", "254", "71", "74", "79")):
+        return True
+    if re.search(r"\d{4,}", t):
+        return True
+    return False
+
+
 class MpesaError(Exception):
     """Daraja refused or could not be reached."""
 

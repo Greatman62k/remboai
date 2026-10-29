@@ -864,6 +864,8 @@
  "price_payment_words": {
   "en": [
    "price*",
+   "service*",
+   "menu",
    "cost",
    "how much",
    "deposit",
@@ -891,6 +893,8 @@
    "price for"
   ],
   "sw": [
+   "huduma",
+   "orodha",
    "bei",
    "pesa",
    "amana",
