@@ -1,10 +1,26 @@
+import re
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_INLINE_COMMENT = re.compile(r"\s+#.*$")
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _no_inline_comments(cls, v):
+        """`KEY=value  # note` is a comment for python-dotenv but part of the value for Docker's env_file. Treat both the same.
+        A value that is only a comment (`KEY=  # note`) becomes empty."""
+        if isinstance(v, str):
+            v = v.strip()
+            if v.startswith("#"):
+                return ""
+            return _INLINE_COMMENT.sub("", v)
+        return v
 
     database_url: str
     wa_app_secret: str = ""
@@ -20,6 +36,13 @@ class Settings(BaseSettings):
     llm_reasoning_effort: str = "minimal"  # "" to omit
     llm_system_role: str = "developer"
     llm_timeout_s: float = 8.0
+    # Daily ceilings on metered calls (0 = no limit). Past a ceiling the feature degrades instead of spending more.
+    llm_daily_limit: int = 3000
+    vision_daily_limit: int = 300
+    voice_daily_limit: int = 500
+    per_sender_daily_limit: int = 300     # messages one person can send in a day
+    strike_limit: int = 3                 # abuse signals in 24 hours before a sender is ignored (0 = never)
+    max_active_bookings: int = 3          # upcoming bookings and holds one customer can have at once
     llm_fallback_base_url: str = ""
     llm_fallback_api_key: str = ""
     llm_fallback_model: str = ""
