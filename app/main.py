@@ -27,6 +27,7 @@ from .voice import Transcriber
 from .whatsapp import Message, WhatsApp, explain, mask, parse_failures, parse_messages, verify_signature
 from .ownerapi import router as owner_api
 from .webhook_jobs import QueueCapacityError, enqueue_jobs, webhook_worker, list_dead_jobs, requeue_dead_job, purge_expired_data
+from .metrics import observe_request, render as metrics_render, update_queue_depth
 from .onboarding import verify_onboarding_schema, create_setup_invite, get_setup_invite, csrf_for_token, parse_setup_form, complete_setup_invite, setup_headers, setup_form, setup_complete_page, setup_unavailable_page, InviteConflict, InviteUnavailable, OnboardingError
 from .token_crypto import verify_stored_tokens
 
@@ -121,11 +122,12 @@ async def lifespan(app: FastAPI):
     for _ in range(max(1, int(getattr(s, "webhook_workers", 2)))):
         workers.append(asyncio.create_task(webhook_worker(app.state.ctx)))
     retention_task = asyncio.create_task(_retention_loop(app.state.ctx))
+    reminder_task = asyncio.create_task(_reminder_loop(app.state.ctx))
     yield
-    for t in workers + [sweeper, poller, retention_task]:
+    for t in workers + [sweeper, poller, retention_task, reminder_task]:
         if t:
             t.cancel()
-    await asyncio.gather(*(t for t in workers + [sweeper, poller, retention_task] if t), return_exceptions=True)
+    await asyncio.gather(*(t for t in workers + [sweeper, poller, retention_task, reminder_task] if t), return_exceptions=True)
     await http.aclose()
     if redis_client is not None:
         try:
@@ -134,11 +136,28 @@ async def lifespan(app: FastAPI):
             pass
     await pool.close()
 
+async def _reminder_loop(ctx):
+    while True:
+        try:
+            await asyncio.sleep(60)
+            if getattr(ctx.settings, 'reminder_enabled', True):
+                from .reminders import run_reminders
+                await run_reminders(ctx)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception('reminder loop failed')
+
 async def _retention_loop(ctx):
     while True:
         try:
             await asyncio.sleep(24*3600)
             await purge_expired_data(ctx.pool, webhook_days=ctx.settings.webhook_retention_days, inbound_days=ctx.settings.inbound_retention_days)
+            try:
+                from .reminders import run_reminders
+                await run_reminders(ctx)
+            except Exception:
+                log.exception("reminders failed in retention loop")
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -147,6 +166,22 @@ async def _retention_loop(ctx):
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 hardening.install(app)
 app.include_router(owner_api)
+
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    import time as _t
+    start = _t.time()
+    response = await call_next(request)
+    try:
+        route = request.url.path
+        if route.startswith("/metrics"):
+            route = "/metrics"
+        elif route.startswith("/health") or route.startswith("/ready"):
+            route = "/health"
+        observe_request(request.method, route, response.status_code, _t.time() - start)
+    except Exception:
+        pass
+    return response
 WEB = Path(__file__).parent / "web"
 PAGE_HEADERS = {"Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'", "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY"}
 
@@ -392,3 +427,18 @@ async def retry_job(request: Request, job_id: str, x_ops_key: str | None = Heade
     if not await requeue_dead_job(ctx.pool, jid):
         raise HTTPException(404, "Dead webhook job not found")
     return {"id": jid, "status": "pending"}
+
+@app.get("/metrics")
+async def metrics(request: Request, x_ops_key: str | None = Header(default=None)):
+    ctx = getattr(request.app.state, "ctx", None)
+    if ctx is None:
+        raise HTTPException(404)
+    if not getattr(ctx.settings, "metrics_enabled", True):
+        raise HTTPException(404)
+    client_ip = str(request.client.host if request.client else "unknown")
+    if client_ip not in ("127.0.0.1", "::1"):
+        await _check_ops_key(ctx, x_ops_key, request)
+    await update_queue_depth(ctx.pool)
+    data, ctype = metrics_render()
+    from fastapi.responses import Response
+    return Response(content=data, media_type=ctype)
