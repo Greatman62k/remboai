@@ -88,6 +88,9 @@ class Settings(BaseSettings):
     salon_setup_invite_hours: int = 168
     trusted_proxy_cidrs: str = ""
     metrics_enabled: bool = True
+    reminder_enabled: bool = True
+    reminder_template_24h: str = "reminder_24h"
+    reminder_template_2h: str = "reminder_2h"
 
 
 @lru_cache
