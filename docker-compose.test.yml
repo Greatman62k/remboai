@@ -1,0 +1,23 @@
+services:
+  test-db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: rembo_test
+      POSTGRES_PASSWORD: rembo_test
+      POSTGRES_DB: rembo_test
+    ports:
+      - "127.0.0.1:55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rembo_test -d rembo_test"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  test-redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:55433:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
