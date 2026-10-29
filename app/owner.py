@@ -22,6 +22,7 @@ SUMMARY_HOUR = 20   # local time after which the end-of-day summary goes out
 
 HELP = re.compile(r"^\s*(help|menu|msaada|\?)\W*$", re.I)
 LIST = re.compile(r"^\s*(today|tomorrow|leo|kesho|bookings?|schedule|ratiba|miadi)\b", re.I)
+NOSHOW = re.compile(r"^\s*(noshow|no.show|no_show|missed|mhudhurio)\s+#?(\d{1,2})\W*$", re.I)
 BLOCK = re.compile(r"^\s*(block|close|funga)\b(.*)$", re.I | re.S)
 UNBLOCK = re.compile(r"^\s*(unblock|reopen|open|fungua)\b(.*)$", re.I | re.S)
 CANCEL = re.compile(r"^\s*(cancel|ghairi)\s+#?(\d{1,2})\W*$", re.I)
@@ -106,6 +107,9 @@ async def handle(ctx, salon: dict, to: str, text: str, tz: ZoneInfo, now: dateti
     if SUMMARY.match(text):
         await say(await summary_text(ctx, salon, tz, now, lang))
         return True
+    if m := NOSHOW.match(text):
+        await _noshow(ctx, salon, to, int(m[2]), tz, lang)
+        return True
     if m := CANCEL.match(text):
         await _cancel(ctx, salon, to, int(m[2]), tz, lang)
         return True
@@ -182,6 +186,23 @@ async def cancel_booking(ctx, salon: dict, booking_id: str, tz: ZoneInfo) -> dic
     row["when"] = when
     return row
 
+
+async def _noshow(ctx, salon, to, n: int, tz, lang: str) -> None:
+    raw = await ctx.pool.fetchval("SELECT state FROM conversations WHERE salon_id=$1::uuid AND wa_id=$2", salon["id"], to)
+    state = raw if isinstance(raw, dict) else __import__("json").loads(raw or "{}")
+    ids = state.get("owner_list") or []
+    if not 1 <= n <= len(ids):
+        await _say(ctx, salon, to, t(lang, "owner_bad_number", n=n))
+        return
+    bid = ids[n - 1]
+    row = await ctx.pool.fetchrow("UPDATE bookings SET status='no_show' WHERE id=$1::uuid AND salon_id=$2::uuid AND status='confirmed' RETURNING id::text, starts_at", bid, salon["id"])
+    if row is None:
+        await _say(ctx, salon, to, t(lang, "owner_bad_number", n=n))
+        return
+    await ctx.pool.execute("UPDATE reminder_jobs SET status='cancelled' WHERE booking_id=$1::uuid AND status='pending'", bid)
+    when = row["starts_at"].astimezone(tz).strftime("%a %d %b, %H:%M")
+    await _say(ctx, salon, to, t(lang, "owner_noshow", when=when))
+    log.info("owner marked no-show %s", bid)
 
 async def _cancel(ctx, salon, to, n: int, tz, lang: str) -> None:
     raw = await ctx.pool.fetchval("SELECT state FROM conversations WHERE salon_id=$1::uuid AND wa_id=$2", salon["id"], to)

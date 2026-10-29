@@ -16,6 +16,7 @@ import asyncpg
 from . import mpesa
 from .bookings import expire_holds
 from .messages import has, t
+from .metrics import bookings_confirmed, payments_total
 from .mpesa import MpesaError, Outcome
 from .whatsapp import mask
 
@@ -151,6 +152,16 @@ async def announce(ctx, s: Settlement) -> None:
     lang, when = s.lang, _when(s)
     ref = f" (M-Pesa {s.receipt})" if s.receipt else ""
     if s.outcome == "paid":
+        try:
+            from .reminders import schedule_reminders
+            await schedule_reminders(ctx.pool, s.booking_id)
+        except Exception:
+            pass
+        bookings_confirmed.inc()
+        try:
+            payments_total.labels("paid", getattr(s, "settled_via", "callback") or "callback").inc()
+        except Exception:
+            pass
         await _send(ctx, s.pid, s.client_wa_id, t(lang, "paid", amount=s.amount, ref=ref, service=s.service, when=when, stylist=s.stylist, salon=s.salon_name))
         if s.owner_wa_id:
             await _send(ctx, s.pid, s.owner_wa_id, t("en", "owner_booked", client=s.client_name or mask(s.client_wa_id), service=s.service,
