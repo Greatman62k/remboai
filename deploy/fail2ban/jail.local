@@ -1,0 +1,36 @@
+[DEFAULT]
+bantime = 1h
+findtime = 10m
+maxretry = 5
+backend = systemd
+banaction = ufw
+
+[sshd]
+enabled = true
+port = 22
+filter = sshd
+logpath = /var/log/auth.log
+maxretry = 5
+bantime = 24h
+
+[rembo-429]
+enabled = true
+port = http,https
+filter = rembo-429
+logpath = /var/log/caddy/*.log
+          /var/log/rembo/app.log
+maxretry = 20
+findtime = 5m
+bantime = 1h
+action = ufw[blocktype=reject]
+
+[rembo-5xx]
+enabled = true
+port = http,https
+filter = rembo-5xx
+logpath = /var/log/caddy/*.log
+          /var/log/rembo/app.log
+maxretry = 10
+findtime = 5m
+bantime = 2h
+action = ufw[blocktype=reject]

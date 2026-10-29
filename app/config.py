@@ -86,6 +86,8 @@ class Settings(BaseSettings):
     webhook_workers: int = 4
     db_pool_max: int = 10
     salon_setup_invite_hours: int = 168
+    trusted_proxy_cidrs: str = ""
+    metrics_enabled: bool = True
 
 
 @lru_cache
