@@ -338,9 +338,11 @@ async def _book(ctx, salon, client, st, services, tz, now, chat, lang, ex: Extra
         return
     if st.get("state") == "held" and st.get("booking_id"):  # starting over: do not keep blocking the old slot
         await release(ctx.pool, st["booking_id"])
-    # Remember answers across messages: "fade" now, "tomorrow" next.
-    mem = st if st.get("state") in ("asking",) else {}
-    service = match_service(ex.service, services) if ex.service else (match_service(mem.get("service_name"), services))
+    mem = st if st.get("state") in ("asking", "offered", "held") else {}
+    if ex.service:
+        service = match_service(ex.service, services)
+    else:
+        service = match_service(mem.get("service_name"), services) or next((s for s in services if s["id"] == mem.get("service_id")), None)
     if ex.service and service is None:
         await _reply(ctx, salon["id"], chat.to, st, chat, t(lang, "unknown_service", menu=menu(services)))
         return
