@@ -92,6 +92,10 @@ class Settings(BaseSettings):
     reminder_template_24h: str = "reminder_24h"
     reminder_template_2h: str = "reminder_2h"
 
+    log_level: str = "INFO"
+    log_format: str = "text"             # text | json
+    log_file: str = ""                   # e.g. /data/logs/app.log - empty = stdout only
+
 
 @lru_cache
 def get_settings() -> Settings:

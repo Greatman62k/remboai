@@ -18,7 +18,7 @@ from .messages import t
 from .whatsapp import Message, mask
 
 log = logging.getLogger("rembo.conv")
-PAY_WORDS = re.compile(r"^\s*(pay|lipa|retry|resend|tena|try again)(\s+(now|sasa))?\W*$", re.I)
+PAY_WORDS = re.compile(r"^\s*(pay|paid|lipa|nimelipa|nimeshalipa|nimetuma|nimeshatuma|done|sent|tuma|retry|resend|tena|try again)(\s+(now|sasa|hivi|tayari))?\W*$", re.I)
 HORIZON_DAYS = 14
 
 
@@ -74,7 +74,48 @@ def match_service(name: str | None, services: list[dict]) -> dict | None:
 def menu(services: list[dict]) -> str:
     if not services:
         return "No services are currently listed. Please contact us directly and we will be happy to assist you."
-    return "\n".join(f"- {s['name']} (KES {s['price_kes']}, {s['duration_min']} min)" for s in services)
+    from .service_categories import category_label
+    grouped: dict[str, list[dict]] = {}
+    for s in services:
+        cat = s.get("category") or "other"
+        grouped.setdefault(cat, []).append(s)
+    order = ["barbering", "braids", "hair", "nails", "makeup", "other"]
+    lines = []
+    for cat in order:
+        if cat not in grouped:
+            continue
+        lines.append(f"{category_label(cat)}:")
+        for s in sorted(grouped[cat], key=lambda x: x["name"]):
+            lines.append(f"- {s['name']} (KES {s['price_kes']}, {s['duration_min']} min)")
+    # any unexpected categories
+    for cat, items in grouped.items():
+        if cat not in order:
+            lines.append(f"{category_label(cat)}:")
+            for s in sorted(items, key=lambda x: x["name"]):
+                lines.append(f"- {s['name']} (KES {s['price_kes']}, {s['duration_min']} min)")
+    return "\n".join(lines)
+
+
+def example_for(services: list[dict], lang: str) -> str:
+    if not services:
+        return "an appointment Saturday afternoon" if lang == "en" else "miadi Jumamosi mchana"
+    svc = sorted(services, key=lambda s: s["name"])[0]["name"]
+    if lang == "sw":
+        return f"{svc} Jumamosi mchana"
+    return f"{svc} Saturday afternoon"
+
+
+def _tap_is_duplicate(st: dict, reply_id: str | None, now: datetime) -> bool:
+    last = st.get("last_tap")
+    if not last or not reply_id:
+        return False
+    try:
+        at = datetime.fromisoformat(last.get("at")) if isinstance(last.get("at"), str) else last.get("at")
+        if at and (now - at).total_seconds() < 60 and last.get("id") == reply_id:
+            return True
+    except Exception:
+        return False
+    return False
 
 
 async def handle(ctx, msg: Message) -> None:
@@ -184,12 +225,81 @@ async def _handle(ctx, msg: Message) -> None:
     now = datetime.now(tz)
     services = await _catalog(ctx, salon["id"])
 
-    # While a deposit is due, a phone number or "pay" needs no model: it is an instruction for the payment.
-    if st.get("state") == "held" and st.get("booking_id"):
-        number = mpesa.normalize_msisdn(msg.text)
-        if number or PAY_WORDS.match(msg.text):
-            await _pay(ctx, salon, st, services, tz, chat, lang, number or st.get("phone") or mpesa.normalize_msisdn(msg.sender))
+    # Guard: rapid duplicate taps on the same slot button - WhatsApp users often double-tap.
+    tap_id: str | None = None
+    if msg.reply_id and msg.reply_id.startswith("slot:"):
+        tap_id = msg.reply_id
+    elif msg.text.strip() in ("1", "2", "3") and st.get("state") in ("offered", "held"):
+        tap_id = f"num:{msg.text.strip()}"
+    if tap_id and _tap_is_duplicate(st, tap_id, now):
+        log.info("duplicate tap ignored %s %s", mask(msg.sender), tap_id)
+        return
+    if st.get("state") == "held" and tap_id:
+        try:
+            held_dt = datetime.fromisoformat(st.get("held_at")) if isinstance(st.get("held_at"), str) else None
+        except Exception:
+            held_dt = None
+        if held_dt and (now - held_dt).total_seconds() < 120:
+            if st.get("already_held_sent"):
+                return
+            svc_name = next((s["name"] for s in services if s["id"] == st.get("service_id")), st.get("service_name") or "your booking")
+            when = st.get("held_when") or "your booked time"
+            stylist = st.get("held_stylist") or "your stylist"
+            await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, "already_held", service=svc_name, when=when, stylist=stylist))
+            st["already_held_sent"] = True
+            st["last_tap"] = {"id": tap_id, "at": now.isoformat()}
+            await _save(ctx, salon["id"], msg.sender, st)
             return
+        return
+
+    # Guard against stale held state looping when no booking exists.
+    if st.get("state") == "held" and st.get("booking_id"):
+        crow = await ctx.pool.fetchrow("SELECT status FROM bookings WHERE id=$1::uuid", st["booking_id"])
+        if not crow or crow["status"] != "held":
+            await _save(ctx, salon["id"], msg.sender, {"history": st.get("history", [])})
+            st = {"history": st.get("history", [])}
+        else:
+            strict = mpesa.normalize_msisdn(msg.text or "")
+            embedded = mpesa.extract_msisdn(msg.text or "") if not strict else None
+            number = strict or embedded
+            if number:
+                await _pay(ctx, salon, st, services, tz, chat, lang, number, msg.text)
+                return
+            if PAY_WORDS.match(msg.text or ""):
+                await _pay(ctx, salon, st, services, tz, chat, lang, st.get("phone") or mpesa.normalize_msisdn(msg.sender), msg.text)
+                return
+            if mpesa.looks_like_phone_attempt(msg.text or ""):
+                await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, "invalid_phone"))
+                return
+            quick_held = rule_extract(msg.text or "", now.date(), services, st.get("state", "held"))
+            if quick_held.intent == "cancel":
+                pass
+            elif quick_held.intent in ("price_list", "hours", "greeting"):
+                if quick_held.intent == "price_list":
+                    note = ""
+                    if int(salon["deposit_kes"]) > 0 and await payments.account(ctx.pool, salon["id"]):
+                        note = "\n\n" + t(lang, "deposit_note", amount=int(salon["deposit_kes"]))
+                    await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, "prices", lines=menu(services)) + note + "\n\n" + t(lang, "remind_number", service=st.get("service_name") or "your booking", when=st.get("held_when") or "your booked time", stylist=st.get("held_stylist") or "your stylist", amount=st.get("amount") or 0))
+                    return
+                if quick_held.intent == "hours":
+                    await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, "hours", lines=_hours(salon, lang)) + "\n\n" + t(lang, "remind_number", service=st.get("service_name") or "your booking", when=st.get("held_when") or "your booked time", stylist=st.get("held_stylist") or "your stylist", amount=st.get("amount") or 0))
+                    return
+                if quick_held.intent == "greeting":
+                    hello = smalltalk.opener(msg.text) or "Hi"
+                    await _reply(ctx, salon["id"], msg.sender, st, chat, f"{hello} " + t(lang, "welcome", salon=salon["name"], example=example_for(services, lang)) + "\n\n" + t(lang, "remind_number", service=st.get("service_name") or "your booking", when=st.get("held_when") or "your booked time", stylist=st.get("held_stylist") or "your stylist", amount=st.get("amount") or 0))
+                    return
+            elif st.get("phone"):
+                svc_name = next((s["name"] for s in services if s["id"] == st.get("service_id")), st.get("service_name") or "your booking")
+                when = st.get("held_when") or "your booked time"
+                stylist = st.get("held_stylist") or "your stylist"
+                await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, "already_held", service=svc_name, when=when, stylist=stylist))
+                return
+            elif quick_held.intent != "cancel":
+                svc_name = st.get("service_name") or "your booking"
+                when = st.get("held_when") or "your booked time"
+                stylist = st.get("held_stylist") or "your stylist"
+                await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, "remind_number", service=svc_name, when=when, stylist=stylist, amount=st.get("amount") or 0))
+                return
 
     # Button taps and a bare number while slots are on offer need no model at all.
     if msg.reply_id and msg.reply_id.startswith("slot:") and msg.reply_id[5:].isdigit():
@@ -199,13 +309,13 @@ async def _handle(ctx, msg: Message) -> None:
     elif guard.injection(msg.text):
         log.warning("prompt-injection attempt from %s: no model call", mask(msg.sender))
         await guard.strike(ctx.pool, msg.sender, "injection")
-        await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, "off_topic", salon=salon["name"]))     # the same reply as any off-topic message: it does not say what was detected
+        await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, "off_topic", salon=salon["name"], example=example_for(services, lang)))     # the same reply as any off-topic message: it does not say what was detected
         return
     else:
         where = screen.route(msg.text, services, st.get("state", "idle"), now.date())
         if where == "off":
-            log.info("screened out: nothing to do with a salon (%d characters), no model call", len(msg.text))
-            await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, "off_topic", salon=salon["name"]))
+            log.info("screened out: nothing to do with a salon (%d chars) text=%r", len(msg.text), (msg.text or "")[:120])
+            await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, "off_topic", salon=salon["name"], example=example_for(services, lang)))
             return
         quick = rule_extract(msg.text, now.date(), services, st.get("state", "idle"))
         if where == "rules" or quick.intent == "greeting":
@@ -237,11 +347,11 @@ async def _handle(ctx, msg: Message) -> None:
     elif ex.intent == "hours":
         await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, "hours", lines=_hours(salon, lang)))
     elif ex.intent == "greeting":
-        await _reply(ctx, salon["id"], msg.sender, st, chat, f"{hello or smalltalk.opener('hi')} " + t(lang, "welcome", salon=salon["name"]))
+        await _reply(ctx, salon["id"], msg.sender, st, chat, f"{hello or smalltalk.opener('hi')} " + t(lang, "welcome", salon=salon["name"], example=example_for(services, lang)))
     elif ex.intent in ("book", "choose_slot"):
-        await _book(*env, ex=ex)
+        await _book(*env, ex=ex, tap_id=tap_id)
     else:
-        await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, "fallback"))
+        await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, "fallback", example=example_for(services, lang)))
 
 
 async def _hear(ctx, msg: Message, lang: str) -> str | None:
@@ -334,9 +444,9 @@ async def _offer(ctx, salon, st, service, day, window, at, tz, now, chat, lang, 
     await _reply_buttons(ctx, salon["id"], chat.to, state, chat, body, [(f"slot:{i}", when_label(s.starts_at, tz).replace(",", "")[:20]) for i, s in enumerate(slots)])
 
 
-async def _book(ctx, salon, client, st, services, tz, now, chat, lang, ex: Extraction) -> None:
+async def _book(ctx, salon, client, st, services, tz, now, chat, lang, ex: Extraction, tap_id: str | None = None) -> None:
     if ex.intent == "choose_slot":
-        await _choose(ctx, salon, client, st, services, tz, now, chat, lang, ex.choice or 0)
+        await _choose(ctx, salon, client, st, services, tz, now, chat, lang, ex.choice or 0, tap_id=tap_id)
         return
     if st.get("state") == "held" and st.get("booking_id"):  # starting over: do not keep blocking the old slot
         await release(ctx.pool, st["booking_id"])
@@ -368,15 +478,15 @@ async def _book(ctx, salon, client, st, services, tz, now, chat, lang, ex: Extra
     await _offer(ctx, salon, st, service, day, window, at, tz, now, chat, lang)
 
 
-async def _choose(ctx, salon, client, st, services, tz, now, chat, lang, choice: int) -> None:
+async def _choose(ctx, salon, client, st, services, tz, now, chat, lang, choice: int, tap_id: str | None = None) -> None:
     slots = st.get("slots") or []
     if st.get("state") != "offered" or not 1 <= choice <= len(slots):
-        await _reply(ctx, salon["id"], chat.to, st, chat, t(lang, "fallback"))
+        await _reply(ctx, salon["id"], chat.to, st, chat, t(lang, "fallback", example=example_for(services, lang)))
         return
     service = next((s for s in services if s["id"] == st["service_id"]), None)
     pick = slots[choice - 1]
     if service is None:
-        await _reply(ctx, salon["id"], chat.to, st, chat, t(lang, "fallback"))
+        await _reply(ctx, salon["id"], chat.to, st, chat, t(lang, "fallback", example=example_for(services, lang)))
         return
     old = st.get("booking_id")
     if old:
@@ -409,7 +519,7 @@ async def _choose(ctx, salon, client, st, services, tz, now, chat, lang, choice:
                                      service=service["name"], when=when, stylist=pick["staff_name"]))
         return
     held = t(lang, "held", service=service["name"], when=when, stylist=pick["staff_name"], mins=ctx.settings.hold_minutes)
-    state = {"state": "held", "booking_id": booking_id, "amount": amount, "history": st.get("history", [])}
+    state = {"state": "held", "booking_id": booking_id, "amount": amount, "service_id": service["id"], "service_name": service["name"], "held_at": datetime.now(tz).isoformat(), "held_when": when, "held_stylist": pick["staff_name"], "history": st.get("history", []), "last_tap": {"id": tap_id or f"slot:{choice-1}", "at": datetime.now(tz).isoformat()}}
     phone = mpesa.normalize_msisdn(chat.to)
     if phone is None:
         await _save(ctx, salon["id"], chat.to, state)
@@ -428,7 +538,7 @@ async def _prompt(ctx, salon, booking_id: str, phone: str, amount: int, lang: st
     return t(lang, "stk_wait" if result == "wait" else "stk_sent", amount=amount, phone=phone)
 
 
-async def _pay(ctx, salon, st, services, tz, chat, lang, phone: str | None) -> None:
+async def _pay(ctx, salon, st, services, tz, chat, lang, phone: str | None, msg_text: str | None = None) -> None:
     """The customer sent a number, or said "pay": (re)send the deposit prompt for the booking being held."""
     row = await ctx.pool.fetchrow(
         "SELECT b.status, sv.price_kes FROM bookings b JOIN services sv ON sv.id=b.service_id WHERE b.id=$1::uuid", st["booking_id"])
@@ -440,5 +550,11 @@ async def _pay(ctx, salon, st, services, tz, chat, lang, phone: str | None) -> N
     if phone is None:
         await _reply(ctx, salon["id"], chat.to, st, chat, t(lang, "ask_number", amount=amount))
         return
-    await _save(ctx, salon["id"], chat.to, {**st, "phone": phone})
-    await _reply(ctx, salon["id"], chat.to, st, chat, await _prompt(ctx, salon, st["booking_id"], phone, amount, lang))
+    if re.search(r"paid|done|sent|tuma|nimelipa|nimesha", msg_text or "", re.I):
+        pending = await ctx.pool.fetchval("SELECT 1 FROM payments WHERE booking_id=$1::uuid AND status='pending' AND checkout_request_id IS NOT NULL AND created_at > now() - interval '3 minutes'", st["booking_id"])
+        if pending:
+            new_state_pending = {**st, "phone": phone} if phone else st
+            await _reply(ctx, salon["id"], chat.to, new_state_pending, chat, t(lang, "stk_wait", amount=amount, phone=phone))
+            return
+    new_state = {**st, "phone": phone}
+    await _reply(ctx, salon["id"], chat.to, new_state, chat, await _prompt(ctx, salon, st["booking_id"], phone, amount, lang))

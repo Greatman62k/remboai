@@ -78,6 +78,11 @@ async def _check_ops_key(ctx, provided: str | None, request: Request) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     s = get_settings()
+    # re-apply log config once env is loaded so LOG_LEVEL/LOG_FORMAT/LOG_FILE take effect with redaction
+    try:
+        logs.setup(getattr(s, "log_level", "INFO"), getattr(s, "log_format", "text"), getattr(s, "log_file", ""))
+    except Exception:
+        pass
     startup_checks(s)
     pool = await make_pool(s.database_url, max_size=s.db_pool_max)
     for name in await migrate(pool):

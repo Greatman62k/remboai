@@ -60,20 +60,34 @@ async def main() -> int:
         else:
             sid = await pool.fetchval("INSERT INTO staff (salon_id, name) VALUES ($1::uuid,$2) RETURNING id::text", salon, name)
         staff.append(sid)
+    def infer_category(n: str) -> str:
+        l = n.lower()
+        if any(k in l for k in ("fade", "taper", "cut", "shave", "beard", "shape up", "line up", "crew", "buzz", "caesar", "afro", "kinyozi", "nyoa", "nyoh")):
+            return "barbering"
+        if any(k in l for k in ("braid", "loc", "dread", "twist", "cornrow", "wig", "weave", "knotless", "box", "suka", "sok", "nywele", "rasta")):
+            return "braids"
+        if any(k in l for k in ("nail", "mani", "pedi", "kucha", "gel", "akriliki")):
+            return "nails"
+        if any(k in l for k in ("makeup", "make up", "lash", "lashez", "brow", "kope", "nyusi", "vipodozi", "facial", "poda")):
+            return "makeup"
+        if any(k in l for k in ("massage", "spa", "facial", "steaming", "treatment", "scrub", "tiba", "kanda", "oga")):
+            return "other"
+        return "hair"
     for spec in a.service:
         parts = spec.split(":")
         name, price, mins = parts[0], int(parts[1]), int(parts[2])
         aliases = [x.strip() for x in parts[3].split(",")] if len(parts) > 3 else []
+        cat = infer_category(name)
         sid = await pool.fetchval(
             "SELECT id::text FROM services WHERE salon_id=$1::uuid AND lower(name)=lower($2) ORDER BY id LIMIT 1", salon, name)
         if sid:
             await pool.execute(
-                "UPDATE services SET name=$2, aliases=$3, duration_min=$4, price_kes=$5, active=true WHERE id=$1::uuid",
-                sid, name, aliases, mins, price)
+                "UPDATE services SET name=$2, aliases=$3, duration_min=$4, price_kes=$5, active=true, category=$6 WHERE id=$1::uuid",
+                sid, name, aliases, mins, price, cat)
         else:
             sid = await pool.fetchval(
-                "INSERT INTO services (salon_id,name,aliases,duration_min,price_kes) VALUES ($1::uuid,$2,$3,$4,$5) RETURNING id::text",
-                salon, name, aliases, mins, price)
+                "INSERT INTO services (salon_id,name,aliases,duration_min,price_kes,category) VALUES ($1::uuid,$2,$3,$4,$5,$6) RETURNING id::text",
+                salon, name, aliases, mins, price, cat)
         for st in staff:
             await pool.execute("INSERT INTO staff_services VALUES ($1::uuid,$2::uuid) ON CONFLICT DO NOTHING", st, sid)
     print(f"salon {a.name} ready with {len(staff)} stylist(s) and {len(a.service)} service(s)")

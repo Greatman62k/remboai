@@ -29,12 +29,52 @@ class RedactingFormatter(logging.Formatter):
         return redact(super().format(record))
 
 
-def setup(level: int = logging.INFO) -> None:
-    fmt = "%(asctime)s %(levelname)s %(name)s %(message)s"
-    logging.basicConfig(level=level, format=fmt)
-    for name in ("", "uvicorn", "uvicorn.access", "uvicorn.error"):
-        for handler in logging.getLogger(name).handlers:
-            handler.setFormatter(RedactingFormatter(fmt))
+def _level(name: str) -> int:
+    return {"DEBUG": logging.DEBUG, "INFO": logging.INFO, "WARNING": logging.WARNING, "ERROR": logging.ERROR}.get((name or "").upper(), logging.INFO)
+
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        import json as _json
+        payload = {
+            "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S%z"),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": redact(record.getMessage()),
+        }
+        if record.exc_info and record.exc_info[0] is not None:
+            payload["exc"] = redact(self.formatException(record.exc_info))
+        return _json.dumps(payload, ensure_ascii=False)
+
+
+def setup(level: int | str = logging.INFO, fmt: str = "text", log_file: str = "") -> None:
+    if isinstance(level, str):
+        level = _level(level)
+    text_fmt = "%(asctime)s %(levelname)s %(name)s %(message)s"
+    use_json = (fmt or "text").lower() == "json"
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    if log_file:
+        try:
+            from logging.handlers import RotatingFileHandler
+            fh = RotatingFileHandler(log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8")
+            handlers.append(fh)
+        except Exception:
+            pass
+    formatter: logging.Formatter = JsonFormatter() if use_json else RedactingFormatter(text_fmt)
+    for h in handlers:
+        h.setFormatter(formatter)
+    root = logging.getLogger()
+    root.handlers.clear()
+    for h in handlers:
+        root.addHandler(h)
+    root.setLevel(level)
+    for name in ("uvicorn", "uvicorn.access", "uvicorn.error"):
+        lg = logging.getLogger(name)
+        lg.handlers.clear()
+        for h in handlers:
+            lg.addHandler(h)
+        lg.setLevel(level)
+        lg.propagate = False
     for noisy in ("httpx", "httpcore"):        # they print every URL they request
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
