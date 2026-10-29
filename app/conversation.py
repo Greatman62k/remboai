@@ -10,7 +10,7 @@ import re
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-from . import mpesa, owner, payments, smalltalk
+from . import guard, mpesa, owner, payments, screen, smalltalk
 from .availability import DAY_KEYS, Slot, choose, day_slots
 from .bookings import busy_times, hold_slot, release
 from .llm import Extraction, Result, rule_extract
@@ -118,7 +118,7 @@ async def _handle(ctx, msg: Message) -> None:
             await chat.text(t(lang, "voice_failed"))
             return
         await chat.text(t(lang, "voice_heard", text=heard))  # say what was understood, so a misheard word can be corrected
-        msg = dataclasses.replace(msg, kind="text", text=heard, reply_id=None)
+        msg = dataclasses.replace(msg, kind="text", text=guard.clean(heard), reply_id=None)
     if msg.kind == "image" and msg.media_id and ctx.vision is not None and ctx.vision.enabled:
         services = await _catalog(ctx, salon["id"])
         service = await _see(ctx, msg, services)
@@ -151,8 +151,22 @@ async def _handle(ctx, msg: Message) -> None:
         res = Result(Extraction(intent="choose_slot", choice=int(msg.reply_id[5:]) + 1, language=lang), "button")
     elif msg.text.strip() in ("1", "2", "3") and st.get("state") == "offered":
         res = Result(Extraction(intent="choose_slot", choice=int(msg.text.strip()), language=lang), "button")
+    elif guard.injection(msg.text):
+        log.warning("prompt-injection attempt from %s: no model call", mask(msg.sender))
+        await guard.strike(ctx.pool, msg.sender, "injection")
+        await chat.text(t(lang, "off_topic", salon=salon["name"]))     # the same reply as any off-topic message: it does not say what was detected
+        return
     else:
-        res = await ctx.llm.extract(msg.text, today=now.date(), services=services, state=st.get("state", "idle"))
+        where = screen.route(msg.text, services, st.get("state", "idle"), now.date())
+        if where == "off":
+            log.info("screened out: nothing to do with a salon (%d characters), no model call", len(msg.text))
+            await chat.text(t(lang, "off_topic", salon=salon["name"]))
+            return
+        quick = rule_extract(msg.text, now.date(), services, st.get("state", "idle"))
+        if where == "rules" or quick.intent == "greeting":     # prices, hours, cancel, greetings, a bare day or time: answered for free
+            res = Result(quick, "rules")
+        else:
+            res = await ctx.llm.extract(msg.text, today=now.date(), services=services, state=st.get("state", "idle"))
     ex = res.ex
     log.info("understood intent=%s via %s %s %dms", ex.intent, res.source, res.model, res.ms)
     if ex.intent != "other" and ex.language != lang:
@@ -169,7 +183,10 @@ async def _handle(ctx, msg: Message) -> None:
     if ex.intent == "cancel":
         await _cancel(*env)
     elif ex.intent == "price_list":
-        await chat.text(t(lang, "prices", lines=menu(services)))
+        note = ""
+        if int(salon["deposit_kes"]) > 0 and await payments.account(ctx.pool, salon["id"]):
+            note = "\n\n" + t(lang, "deposit_note", amount=int(salon["deposit_kes"]))
+        await chat.text(t(lang, "prices", lines=menu(services)) + note)
     elif ex.intent == "hours":
         await chat.text(t(lang, "hours", lines=_hours(salon, lang)))
     elif ex.intent == "greeting":
@@ -309,6 +326,12 @@ async def _choose(ctx, salon, client, st, services, tz, now, chat, lang, choice:
     old = st.get("booking_id")
     if old:
         await release(ctx.pool, old)
+    active = await ctx.pool.fetchval(
+        "SELECT count(*) FROM bookings WHERE client_id=$1::uuid AND status IN ('held','confirmed') AND starts_at > now()", client["id"])
+    if ctx.settings.max_active_bookings and active >= ctx.settings.max_active_bookings:   # stops one person hoarding the diary
+        await _save(ctx, salon["id"], chat.to, {})
+        await chat.text(t(lang, "too_many_bookings", n=active, salon=salon["name"]))
+        return
     booking_id = await hold_slot(
         ctx.pool, salon_id=salon["id"], staff_id=pick["staff_id"], service_id=service["id"], client_id=client["id"],
         starts_at=datetime.fromisoformat(pick["starts_at"]), ends_at=datetime.fromisoformat(pick["ends_at"]), minutes=ctx.settings.hold_minutes)
