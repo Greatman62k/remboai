@@ -16,7 +16,9 @@ Working: signed WhatsApp webhook, booking conversation (English / Swahili / Shen
 ```bash
 cp .env.example .env          # fill in your own values
 docker compose up --build     # Postgres + the app on :8080
-python -m pytest -q           # tests (database tests need TEST_DATABASE_URL)
+docker compose -f docker-compose.test.yml -p remboai-test up -d --wait
+TEST_DATABASE_URL=postgresql://rembo_test:rembo_test@127.0.0.1:55432/rembo_test python -m pytest -q
+docker compose -f docker-compose.test.yml -p remboai-test down
 ```
 Testing the whole thing end to end: docs/E2E_TEST.md. `python scripts/doctor.py` checks the whole set-up (WhatsApp token, models, M-Pesa, public URL) and says what to fix.
 
@@ -28,6 +30,8 @@ Testing the whole thing end to end: docs/E2E_TEST.md. `python scripts/doctor.py`
 - `app/mpesa.py` Daraja client; `app/payments.py` deposits: request, idempotent settlement, refund parking, reconciliation sweeper
 - `app/vision.py` hairstyle photo -> one of the salon's services; `app/voice.py` voice notes -> text; `deploy/modal_asr.py` the speech service; `deploy/` production compose, Caddy, backups
 - `app/ownerapi.py` + `app/web/` the owner JSON API and web page
+- `app/lexicon.json` + `app/lexicon.py` English/Swahili/Sheng vocabulary as data; see `docs/LEXICON.md`
+- `app/screen.py`, `app/guard.py`, `app/budget.py`, `app/logs.py` screening, safety limits, and secret-safe logging
 - `app/owner.py` the owner's chat commands, time off, daily summary
 - `app/telegram.py` Telegram as a second channel (`tg:<id>` addresses, polling or webhook); `app/inbound.py` the channel-independent entry point; see docs/TELEGRAM.md
 - `scripts/seed_salon.py` create a salon with stylists and services
