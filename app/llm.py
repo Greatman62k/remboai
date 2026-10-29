@@ -15,7 +15,7 @@ from typing import Literal
 import httpx
 from pydantic import BaseModel, ValidationError
 
-from . import smalltalk
+from . import lexicon, smalltalk
 from .timeparse import parse_day, parse_time, parse_window
 
 log = logging.getLogger("rembo.llm")
@@ -97,18 +97,22 @@ def _coerce(d: dict) -> Extraction:
     return Extraction(**d)
 
 
+_LX = lexicon.load()
+_SW_MARKERS, _CANCEL, _PRICE, _HOURS = (_LX.pattern(c) for c in ("sw_markers", "cancel", "price", "hours"))
+
+
 def rule_extract(text: str, today: date, services: list[dict], state: str = "idle") -> Extraction:
     """Keyword fallback. It fills the same form, so the conversation (which remembers earlier answers) still completes a booking."""
     t = text.lower().strip()
-    sw = bool(re.search(r"\b(niaje|mambo|habari|sasa|hujambo|jambo|vipi|bei|ghairi|nataka|kesho|leo|asubuhi|mchana|jioni|saa|tafadhali|mko|nipee)\b", t))
+    sw = bool(_SW_MARKERS.search(t))
     lang = "sw" if sw else "en"
     if state == "offered" and re.fullmatch(r"[1-3]", t):
         return Extraction(intent="choose_slot", choice=int(t), language=lang)
-    if re.search(r"\b(cancel|ghairi|sitaki)\b", t):
+    if _CANCEL.search(t):
         return Extraction(intent="cancel", language=lang)
-    if re.search(r"\b(price|prices|bei|how much|pesa ngapi|ngapi)\b", t) and not re.search(r"\bsaa\s+ngapi\b", t):
+    if _PRICE.search(t) and not re.search(r"\bsaa\s+ngapi\b", t):
         return Extraction(intent="price_list", language=lang)
-    if re.search(r"\b(hours|opening|closing|saa ngapi|mnafunga|mko wazi)\b", t):
+    if _HOURS.search(t):
         return Extraction(intent="hours", language=lang)
     svc = next((s["name"] for s in services if any(k and re.search(rf"\b{re.escape(k.lower())}\b", t) for k in [s["name"], *s.get("aliases", [])])), None)
     day, window, at = parse_day(t, today), parse_window(t), parse_time(t)
@@ -124,8 +128,8 @@ def rule_extract(text: str, today: date, services: list[dict], state: str = "idl
 
 
 class Extractor:
-    def __init__(self, http: httpx.AsyncClient, settings):
-        self.http, self.s = http, settings
+    def __init__(self, http: httpx.AsyncClient, settings, budget=None):
+        self.http, self.s, self.budget = http, settings, budget
 
     def endpoints(self) -> list[tuple[str, str, str, int]]:
         e = [(self.s.llm_base_url, self.s.llm_api_key, self.s.llm_model, 2)]
@@ -147,6 +151,8 @@ class Extractor:
 
     async def extract(self, text: str, *, today: date, services: list[dict], state: str) -> Result:
         names = [s["name"] for s in services]
+        if self.budget is not None and not await self.budget.take("text"):
+            return Result(sanitize(rule_extract(text, today, services, state), today), "keywords")   # today's ceiling is reached
         for base, key, model, attempts in self.endpoints():
             for attempt in range(attempts):
                 t0 = clock.perf_counter()

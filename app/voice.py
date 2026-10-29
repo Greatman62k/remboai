@@ -21,8 +21,8 @@ class Transcript:
 
 
 class Transcriber:
-    def __init__(self, http: httpx.AsyncClient, settings):
-        self.http, self.s = http, settings
+    def __init__(self, http: httpx.AsyncClient, settings, budget=None):
+        self.http, self.s, self.budget = http, settings, budget
 
     @property
     def enabled(self) -> bool:
@@ -30,7 +30,7 @@ class Transcriber:
 
     async def transcribe(self, audio: bytes, mime: str, lang: str | None) -> Transcript | None:
         """lang is an Omnilingual code such as 'swh_Latn', or None to let the model decide."""
-        if not self.enabled:
+        if not self.enabled or (self.budget is not None and not await self.budget.take("voice")):
             return None
         t0 = clock.perf_counter()
         try:

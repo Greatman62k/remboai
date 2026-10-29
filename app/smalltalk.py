@@ -1,10 +1,12 @@
 """Greetings and 'how are you', answered by plain rules so they work even when no model is reachable."""
 import re
 
-_HELLO = re.compile(r"^\W*(?P<w>hi+|hello+|hallo|hey+|howdy|yo|niaje|mambo|habari|sasa|hujambo|jambo|vipi|shikamoo|salaam|hii|"
-                    r"good\s+(?:morning|afternoon|evening|day))\b", re.I)
-_HOW = re.compile(r"\b(how\s*(?:are|r)\s*(?:you|u)|how'?s\s+it\s+going|what'?s\s+up|habari\s+yako|hali\s+yako|u\s*poa|uko\s+(?:aje|vipi|poa)|u\s*sawa|mambo\s+vipi)\b", re.I)
-_SW = {"niaje", "mambo", "habari", "sasa", "hujambo", "jambo", "vipi", "shikamoo", "salaam", "hii"}
+from . import lexicon
+
+_LX = lexicon.load()
+_HELLO = re.compile(r"^\W*(?P<w>" + (_LX.alternation("greetings") or "(?!)") + r")\b", re.I)
+_HOW = _LX.pattern("how_are_you")
+_SW = _LX.words("greetings", ("sw", "sheng"))
 
 
 def detect(text: str) -> tuple[str | None, bool]:
