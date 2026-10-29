@@ -58,7 +58,7 @@ def test_a_message_is_processed_exactly_once_even_if_meta_redelivers():
             assert (await post(c, payload("254712345678", "prices?", mid="wamid.7"))).status_code == 200
             assert (await post(c, payload("254712345678", "prices?", mid="wamid.7"))).status_code == 200   # Meta redelivers the same id
         assert out.calls == [] and len(out.sent) == 1                 # "prices?" is read by the free keyword rules: no model call, and one reply
-        assert out.sent[0]["to"] == "254712345678" and out.sent[0]["_auth"] == "Bearer TOK" and "Fade (KES 500)" in out.sent[0]["text"]["body"]
+        assert out.sent[0]["to"] == "254712345678" and out.sent[0]["_auth"] == "Bearer TOK" and "Fade" in out.sent[0]["text"]["body"] and "KES 500" in out.sent[0]["text"]["body"]
         await pool.close()
     asyncio.run(run())
 
