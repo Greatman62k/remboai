@@ -169,22 +169,47 @@ async def announce(ctx, s: Settlement) -> None:
         s.salon_id, s.client_wa_id, s.booking_id)
 
 
+async def _account_for_checkout(pool, checkout_id: str):
+    row = await pool.fetchrow("SELECT p.salon_id FROM payments p WHERE p.checkout_request_id=$1", checkout_id)
+    if row is None:
+        return None
+    return await pool.fetchrow("SELECT kind, shortcode, party_b, account_ref FROM salon_payment WHERE salon_id=$1::uuid", row["salon_id"])
+
+
+async def settle_with_verification(ctx, cb) -> str | None:
+    if getattr(getattr(ctx, "settings", None), "mpesa_verify_callbacks", False) and cb.raw is not None and "Body" in cb.raw:
+        acct = await _account_for_checkout(ctx.pool, cb.checkout_request_id)
+        if acct is not None:
+            verified = await ctx.daraja.stk_query(dict(acct), cb.checkout_request_id)
+            if verified is None:
+                log.warning("callback for %s not verifiable yet; left pending for sweeper", cb.checkout_request_id)
+                return "unknown"
+            if verified.code != cb.code:
+                log.error("callback says %s but Daraja says %s for %s; trusting Daraja", cb.code, verified.code, cb.checkout_request_id)
+            orig = cb
+            verified_raw = __import__("dataclasses").replace(verified, raw=orig.raw)
+            if orig.code == verified.code:
+                verified_raw = __import__("dataclasses").replace(verified_raw, receipt=orig.receipt, amount=orig.amount)
+            verified_raw = __import__("dataclasses").replace(verified_raw, phone=orig.phone)
+            cb = verified_raw
+    status, settlement = await settle(ctx.pool, cb, "callback")
+    if status == "settled" and settlement:
+        await announce(ctx, settlement)
+    return status
+
+
 async def process_callback(ctx, payload: dict) -> None:
-    """Runs after the 200 has gone back to Safaricom."""
     out = mpesa.parse_callback(payload)
-    await ctx.pool.execute("INSERT INTO mpesa_callbacks (checkout_request_id, body) VALUES ($1, $2::jsonb)",
-                           out.checkout_request_id if out else None, json.dumps(payload))
+    await ctx.pool.execute("INSERT INTO mpesa_callbacks (checkout_request_id, body) VALUES ($1, $2::jsonb)", out.checkout_request_id if out else None, json.dumps(payload))
     if out is None:
         log.warning("M-Pesa callback with an unexpected shape")
         return
-    status, s = await settle(ctx.pool, out, "callback")
-    if status == "unknown":  # the row's checkout id is written a moment after Daraja answers; give it a moment
+    status = await settle_with_verification(ctx, out)
+    if status == "unknown":
         await asyncio.sleep(2)
-        status, s = await settle(ctx.pool, out, "callback")
+        status = await settle_with_verification(ctx, out)
     if status == "unknown":
         log.error("M-Pesa callback for a payment we do not know: %s code=%s receipt=%s", out.checkout_request_id, out.code, out.receipt)
-    elif s:
-        await announce(ctx, s)
 
 
 async def reconcile(ctx) -> int:
