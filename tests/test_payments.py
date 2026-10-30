@@ -67,10 +67,10 @@ def test_successful_payment_confirms_the_booking_once_even_if_safaricom_repeats_
         async with client() as c:
             await to_pay(c, out, pool)
             assert (await deliver(c, callback("ws_CO_1"), secret="wrong")).status_code == 404
-            assert await pool.fetchval("SELECT status FROM payments") == "pending"          # a forged callback changes nothing
+            assert await pool.fetchval("SELECT status FROM payments") == "pending"
             r = await deliver(c, callback("ws_CO_1"))
             assert r.json() == {"ResultCode": 0, "ResultDesc": "Accepted"}
-            await deliver(c, callback("ws_CO_1"))                                          # Safaricom retries
+            await deliver(c, callback("ws_CO_1"))
         b = await pool.fetchrow("SELECT status, hold_expires_at FROM bookings")
         assert b["status"] == "confirmed" and b["hold_expires_at"] is None
         p = await pool.fetchrow("SELECT status, mpesa_receipt, settled_via FROM payments")
@@ -78,7 +78,7 @@ def test_successful_payment_confirms_the_booking_once_even_if_safaricom_repeats_
         mine = [x for x in out.bodies(A) if "200" in x and "QAB1CD2EF3" in x]
         assert len(mine) == 1 and "booked" in mine[0].lower() and "Fade" in mine[0]
         assert len(out.bodies(OWNER)) == 1 and out.bodies(OWNER)[0].startswith("New booking: Cust, Fade")
-        assert await pool.fetchval("SELECT count(*) FROM mpesa_callbacks") == 2              # both kept for audit
+        assert await pool.fetchval("SELECT count(*) FROM mpesa_callbacks") == 2
         assert await pool.fetchval("SELECT state FROM conversations") in ("{}", {})
         await pool.close()
     asyncio.run(run())
@@ -93,12 +93,12 @@ def test_a_cancelled_prompt_keeps_the_hold_and_pay_tries_again_then_succeeds():
             await deliver(c, callback("ws_CO_1", code=1032))
             assert "cancelled" in out.bodies(A)[-1].lower()
             assert await pool.fetchval("SELECT status FROM bookings") == "held"
-            await post(c, payload(A, "pay", mid="r1"))                                   # no model call needed
+            await post(c, payload(A, "pay", mid="r1"))
             assert len(out.stk) == 2 and "sent an M-Pesa request" in out.bodies(A)[-1]
             await deliver(c, callback("ws_CO_2", receipt="R2"))
         assert await pool.fetchval("SELECT status FROM bookings") == "confirmed"
         assert sorted(await pool.fetch("SELECT status FROM payments ORDER BY created_at"), key=lambda r: r["status"])[0]["status"] == "failed"
-        assert len(out.calls) == 1                                                       # only the first booking message used the model
+        assert len(out.calls) == 1
         await pool.close()
     asyncio.run(run())
 
@@ -111,7 +111,7 @@ def test_sending_a_different_mpesa_number_prompts_that_number_and_a_rapid_repeat
             await to_pay(c, out, pool)
             await post(c, payload(A, "0722 333 444", mid="n1"))
             assert out.stk[-1]["PhoneNumber"] == "254722333444" and len(out.stk) == 2
-            await post(c, payload(A, "0722 333 444", mid="n2"))                          # prompt still on its way: do not stack another
+            await post(c, payload(A, "0722 333 444", mid="n2"))
             assert len(out.stk) == 2 and "still on its way" in out.bodies(A)[-1]
         await pool.close()
     asyncio.run(run())
@@ -123,7 +123,7 @@ def test_a_late_payment_after_the_hold_expired_still_gets_the_slot_if_it_is_free
         pool, out, salon = await build(DSN)
         async with client() as c:
             await to_pay(c, out, pool)
-            await pool.execute("UPDATE bookings SET status='expired'")                   # hold lapsed while the customer was away
+            await pool.execute("UPDATE bookings SET status='expired'")
             await deliver(c, callback("ws_CO_1"))
         assert await pool.fetchval("SELECT status FROM bookings") == "confirmed"
         assert await pool.fetchval("SELECT status FROM payments") == "paid"
@@ -139,7 +139,7 @@ def test_a_late_payment_for_a_slot_someone_else_took_is_parked_for_refund_not_lo
         async with client() as c:
             await to_pay(c, out, pool)
             await pool.execute("UPDATE bookings SET status='expired'")
-            await to_pay(c, out, pool, who=B, mid="c")                                   # B is offered and takes the same slot
+            await to_pay(c, out, pool, who=B, mid="c")
             assert await pool.fetchval("SELECT count(*) FROM bookings WHERE status='held'") == 1
             await deliver(c, callback("ws_CO_1", receipt="LATE1"))
         p = await pool.fetchrow("SELECT status, mpesa_receipt FROM payments WHERE checkout_request_id='ws_CO_1'")
@@ -185,17 +185,17 @@ def test_missed_callbacks_are_settled_by_asking_daraja():
         async with client() as c:
             await to_pay(c, out, pool)
             ctx = c._transport.app.state.ctx
-            assert await payments.reconcile(ctx) == 0                                    # too fresh to chase
+            assert await payments.reconcile(ctx) == 0
             await pool.execute("UPDATE payments SET created_at = now() - interval '2 minutes'")
-            assert await payments.reconcile(ctx) == 0                                    # Daraja: still being processed
+            assert await payments.reconcile(ctx) == 0
             assert await pool.fetchval("SELECT status FROM payments") == "pending"
             out.queries["ws_CO_1"] = {"ResultCode": "0", "ResultDesc": "The service request is processed successfully."}
             assert await payments.reconcile(ctx) == 1
-            assert await payments.reconcile(ctx) == 0                                    # already settled
+            assert await payments.reconcile(ctx) == 0
         p = await pool.fetchrow("SELECT status, settled_via, mpesa_receipt FROM payments")
         assert (p["status"], p["settled_via"], p["mpesa_receipt"]) == ("paid", "query", None)
         assert await pool.fetchval("SELECT status FROM bookings") == "confirmed"
-        assert "200" in out.bodies(A)[-1] and "booked" in out.bodies(A)[-1].lower()  # no receipt known from a query
+        assert "200" in out.bodies(A)[-1] and "booked" in out.bodies(A)[-1].lower()
         await pool.close()
     asyncio.run(run())
 
@@ -211,7 +211,7 @@ def test_a_prompt_nobody_answers_is_written_off_but_a_late_success_still_wins():
             assert await payments.reconcile(ctx) == 1
             assert await pool.fetchval("SELECT status FROM payments") == "failed"
             assert "request timed out" in out.bodies(A)[-1]
-            await deliver(c, callback("ws_CO_1", receipt="LATEOK"))                      # the callback finally arrives
+            await deliver(c, callback("ws_CO_1", receipt="LATEOK"))
         assert await pool.fetchval("SELECT status FROM payments") == "paid"
         assert await pool.fetchval("SELECT status FROM bookings") == "confirmed"
         await pool.close()
@@ -289,8 +289,9 @@ def test_a_sender_flooding_the_number_is_cut_off_so_model_credits_are_safe():
         async with client() as c:
             for i in range(12):
                 await post(c, payload(A, "prices?", mid=f"f{i}"))
-            await post(c, payload(B, "prices?", mid="other"))                            # somebody else is unaffected
-        assert len(out.to(A)) == 5 and len(out.to(B)) == 1                                # 5 a minute are answered, the rest ignored
+            await post(c, payload(B, "prices?", mid="other"))
+        assert len(out.to(A)) == 6 and len(out.to(B)) == 1
+        assert "very quickly" in out.bodies(A)[-1] and "haraka" in out.bodies(A)[-1]
         await pool.close()
     asyncio.run(run())
 
@@ -323,9 +324,115 @@ def test_doctor_reports_what_works_and_says_what_to_fix():
         assert checks["configuration"].ok and checks["database"].ok
         assert checks["salon 'Zuri Cuts' WhatsApp"].ok and "Zuri Cuts" in checks["salon 'Zuri Cuts' WhatsApp"].detail
         assert checks["model muse-spark-1.3"].ok and "intent=book service=Fade" in checks["model muse-spark-1.3"].detail
-        assert not checks["salon 'Zuri Cuts' deposits"].ok and checks["salon 'Zuri Cuts' deposits"].warn      # deposit set, no till
+        assert not checks["salon 'Zuri Cuts' deposits"].ok and checks["salon 'Zuri Cuts' deposits"].warn
         assert checks["photo matching muse-spark-1.3"].ok and "red" in checks["photo matching muse-spark-1.3"].detail
         assert checks["M-Pesa"].ok and checks["M-Pesa mode"].warn and checks["model failover"].warn
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
+def test_concurrent_duplicate_payments_park_the_loser_for_refund():
+    async def run():
+        from app.payments import settle
+        pool, out, salon = await build(DSN)
+        async with client() as c:
+            await to_pay(c, out, pool)
+            booking = await pool.fetchval("SELECT id::text FROM bookings")
+            await pool.execute(
+                "INSERT INTO payments (booking_id, salon_id, phone, amount_kes, checkout_request_id, source_message_id) "
+                "VALUES ($1::uuid, $2::uuid, $3, 200, 'ws_CO_2', 'x')",
+                booking, salon, A)
+            first = parse_callback(callback("ws_CO_1", receipt="FIRST"))
+            second = parse_callback(callback("ws_CO_2", receipt="SECOND"))
+            got = await asyncio.gather(settle(pool, first, "callback"), settle(pool, second, "callback"))
+            assert sorted(s for s, _ in got) == ["settled", "settled"]
+        rows = {r["mpesa_receipt"]: (r["status"], r["refund_reason"]) for r in await pool.fetch("SELECT mpesa_receipt, status, refund_reason FROM payments")}
+        assert rows == {"FIRST": ("paid", None), "SECOND": ("needs_refund", "duplicate")}
+        review = await pool.fetchrow("SELECT reason, payment_reviews.status, expected_amount, received_amount FROM payment_reviews JOIN payments ON payments.id=payment_reviews.payment_id WHERE payments.mpesa_receipt='SECOND'")
+        assert (review["reason"], review["status"], review["expected_amount"], review["received_amount"]) == ("payment_unresolved", "refund_due", 200, 200)
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
+def test_overpayment_is_parked_for_refund_not_kept():
+    async def run():
+        pool, out, salon = await build(DSN)
+        await pool.execute("UPDATE salons SET owner_wa_id=$1", OWNER)
+        async with client() as c:
+            await to_pay(c, out, pool)
+            await deliver(c, callback("ws_CO_1", receipt="BIG", amount=500))
+        p = await pool.fetchrow("SELECT status, refund_reason FROM payments")
+        assert (p["status"], p["refund_reason"]) == ("needs_refund", "overpaid")
+        assert "more than the deposit" in out.bodies(A)[-1] and "will refund you" in out.bodies(A)[-1]
+        assert "Refund needed: KES 200" in out.bodies(OWNER)[-1] and "more than the deposit" in out.bodies(OWNER)[-1]
+        assert await pool.fetchval("SELECT reason FROM payment_reviews") == "amount_mismatch"
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
+def test_customer_cancel_parks_a_paid_deposit_for_refund():
+    async def run():
+        pool, out, salon = await build(DSN)
+        await pool.execute("UPDATE salons SET owner_wa_id=$1", OWNER)
+        async with client() as c:
+            await to_pay(c, out, pool)
+            await deliver(c, callback("ws_CO_1"))
+            assert await pool.fetchval("SELECT status FROM payments") == "paid"
+            out.script["cancel it"] = {"intent": "cancel"}
+            await post(c, payload(A, "cancel it", mid="c1"))
+            assert "cancelled" in out.bodies(A)[-1].lower()
+        p = await pool.fetchrow("SELECT status, refund_reason, announced_at FROM payments")
+        assert (p["status"], p["refund_reason"]) == ("needs_refund", "cancelled") and p["announced_at"] is not None
+        assert await pool.fetchval("SELECT status FROM payment_reviews") == "refund_due"
+        assert await pool.fetchval("SELECT count(*) FROM reminder_jobs WHERE status='pending'") == 0
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
+def test_callback_success_with_details_survives_a_disagreeing_status_query():
+    async def run():
+        pool, out, salon = await build(DSN, mpesa_verify_callbacks=True)
+        async with client() as c:
+            await to_pay(c, out, pool)
+            out.queries["ws_CO_1"] = {"ResultCode": 1032, "ResultDesc": "Request cancelled by user"}
+            await deliver(c, callback("ws_CO_1", receipt="REAL", amount=200))
+        p = await pool.fetchrow("SELECT status, mpesa_receipt FROM payments")
+        assert (p["status"], p["mpesa_receipt"]) == ("paid", "REAL")
+        assert await pool.fetchval("SELECT status FROM bookings") == "confirmed"
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
+def test_a_repeat_failure_refreshes_the_recorded_reason_instead_of_keeping_stale_data():
+    async def run():
+        from app.payments import settle
+        pool, out, salon = await build(DSN)
+        async with client() as c:
+            await to_pay(c, out, pool)
+            await deliver(c, callback("ws_CO_1", code=1037))
+        status, _ = await settle(pool, parse_callback(callback("ws_CO_1", code=1)), "query")
+        assert status == "seen"
+        p = await pool.fetchrow("SELECT status, result_code FROM payments")
+        assert (p["status"], p["result_code"]) == ("failed", 1)
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
+def test_query_success_settles_when_the_callback_said_it_failed():
+    async def run():
+        pool, out, salon = await build(DSN, mpesa_verify_callbacks=True)
+        async with client() as c:
+            await to_pay(c, out, pool)
+            out.queries["ws_CO_1"] = {"ResultCode": 0, "ResultDesc": "The service request is processed successfully."}
+            await deliver(c, callback("ws_CO_1", code=1032))
+        assert await pool.fetchval("SELECT status FROM payments") == "paid"
+        assert await pool.fetchval("SELECT status FROM bookings") == "confirmed"
         await pool.close()
     asyncio.run(run())
 

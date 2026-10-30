@@ -276,4 +276,28 @@ def test_install_wires_middleware():
     app = FastAPI()
     hardening = __import__("app.hardening", fromlist=["install"])
     hardening.install(app)
-    assert len(app.user_middleware) >= 2
+    assert len(app.user_middleware) >= 3
+
+
+def test_client_ip_keeps_ipv6_hosts_whole():
+    from app.hardening import _client_ip
+    def scope(fwd, direct="10.0.0.5"):
+        return {"client": (direct, 1), "headers": [(b"x-forwarded-for", fwd.encode())]}
+    assert _client_ip(scope("2001:db8::1", "10.0.0.5"), "10.0.0.0/8") == "2001:db8::1"
+    assert _client_ip(scope("[2001:db8::1]:4123", "10.0.0.5"), "10.0.0.0/8") == "2001:db8::1"
+    assert _client_ip(scope("203.0.113.7:4123", "10.0.0.5"), "10.0.0.0/8") == "203.0.113.7"
+    assert _client_ip(scope("203.0.113.7", "10.0.0.5"), "10.0.0.0/8") == "203.0.113.7"
+    assert _client_ip(scope("2001:db8::1", "198.51.100.9"), "10.0.0.0/8") == "198.51.100.9"
+
+
+def test_ops_key_message_matches_the_check():
+    from app.hardening import startup_checks
+    from types import SimpleNamespace
+    s = SimpleNamespace(mpesa_env="production", mpesa_callback_secret="x" * 16, wa_app_secret="x" * 16,
+                        wa_verify_token="verifyme", mpesa_verify_callbacks=True, ops_api_key="a" * 64,
+                        token_encryption_key="", ingress_rate_burst=1, ingress_rate_global=1, ingress_rate_window_s=1)
+    try:
+        startup_checks(s)
+        assert False, "weak production key must refuse to start"
+    except RuntimeError as e:
+        assert "64" in str(e) and "8 distinct" in str(e)

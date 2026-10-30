@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-from app.whatsapp import parse_messages
+from app.channels.whatsapp import parse_messages
 from tests.harness import PID, build, client, open_day, payload, post
 
 DSN = os.environ.get("TEST_DATABASE_URL")
@@ -34,7 +34,7 @@ def test_a_voice_note_becomes_a_booking_conversation_and_the_customer_is_told_wh
         assert "Nafasi za mapema za Fade" in out.bodies(A)[1]
         [call] = out.asr
         assert call["auth"] == "Bearer asrtok" and call["type"] == "audio/ogg" and call["bytes"] == b"OggS-fake-voice-note"
-        assert call["lang"] is None                                                         # a new customer: the model works out the language
+        assert call["lang"] is None
         await pool.close()
     asyncio.run(run())
 
@@ -63,13 +63,13 @@ def test_when_recognition_fails_the_customer_is_asked_to_retry_and_nothing_is_bo
             assert ("could not" in out.bodies(A)[-1].lower() or "couldn't" in out.bodies(A)[-1].lower()) and "make it out" in out.bodies(A)[-1].lower()
             out.asr_down = False
             out.asr_text = "   "
-            await post(c, voice(mid="v2"))                                                  # silence or noise: an empty transcript
+            await post(c, voice(mid="v2"))
             assert ("could not" in out.bodies(A)[-1].lower() or "couldn't" in out.bodies(A)[-1].lower()) and "make it out" in out.bodies(A)[-1].lower()
             out.media_gone = True
-            await post(c, voice(mid="v3"))                                                  # Meta no longer has the file
+            await post(c, voice(mid="v3"))
             assert ("could not" in out.bodies(A)[-1].lower() or "couldn't" in out.bodies(A)[-1].lower()) and "make it out" in out.bodies(A)[-1].lower()
             out.media_gone, out.media_size = False, 5_000_000
-            await post(c, voice(mid="v4"))                                                  # far too long for a voice note
+            await post(c, voice(mid="v4"))
             assert ("could not" in out.bodies(A)[-1].lower() or "couldn't" in out.bodies(A)[-1].lower()) and "make it out" in out.bodies(A)[-1].lower() and len(out.asr) == 1
         assert await pool.fetchval("SELECT count(*) FROM bookings") == 0
         await pool.close()

@@ -1,7 +1,7 @@
 import hashlib
 import hmac
 
-from app import whatsapp as wa
+from app.channels import whatsapp as wa
 
 
 def sig(body: bytes, secret: str = "s3cret") -> str:
@@ -11,8 +11,8 @@ def sig(body: bytes, secret: str = "s3cret") -> str:
 def test_signature_accepts_only_the_exact_bytes_and_secret():
     body = b'{"a": 1}'
     assert wa.verify_signature(body, sig(body), "s3cret")
-    assert not wa.verify_signature(body + b" ", sig(body), "s3cret")      # one byte changed
-    assert not wa.verify_signature(body, sig(body, "other"), "s3cret")   # wrong key
+    assert not wa.verify_signature(body + b" ", sig(body), "s3cret")
+    assert not wa.verify_signature(body, sig(body, "other"), "s3cret")
     assert not wa.verify_signature(body, None, "s3cret")
     assert not wa.verify_signature(body, "sha1=abc", "s3cret")
 
@@ -26,7 +26,7 @@ def test_parses_text_and_button_replies_and_skips_malformed():
     p = payload(
         {"from": "254700000001", "id": "m1", "type": "text", "text": {"body": " nataka fade "}},
         {"from": "254700000001", "id": "m2", "type": "interactive", "interactive": {"button_reply": {"id": "slot:1", "title": "Sat 12:00"}}},
-        {"from": "254700000001", "type": "text", "text": {"body": "no id"}},          # malformed: ignored
+        {"from": "254700000001", "type": "text", "text": {"body": "no id"}},
         {"from": "254700000001", "id": "m3", "type": "audio", "audio": {"id": "X"}},
     )
     got = wa.parse_messages(p)
