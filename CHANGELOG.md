@@ -2,58 +2,63 @@
 
 Everything in this repository was written during the Meta Global AI Developer Hackathon (building period Oct 27 - Nov 4, 2026).
 
-## Oct 27
-- Project skeleton, MIT licence, configuration from environment variables.
-- Migration runner and first migration (inbound message dedupe).
-- WhatsApp Cloud API module: signature verification, payload parsing, text sending, delivery-failure explanations.
-- Signed, idempotent webhook that echoes the message back.
-- Booking core: salons, stylists, services, clients, bookings with a database exclusion constraint against double booking.
-- Availability on a 30 minute grid, per-stylist slot holds under an advisory lock, hold expiry.
-- Language-model client with a primary and a failover endpoint (Meta Model API, Muse Spark Open) and a keyword-rule fallback that fills the same form.
-- English and Swahili messages; Swahili clock parsing (saa nane = 14:00); greetings and "how are you" answered, then the request carries on.
-- Conversation memory in Postgres; button taps and slot numbers skip the model.
-- `scripts/seed_salon.py` to set up a salon from the command line.
+## Oct 30 (chat-first rebuild)
 
-## Oct 27 (evening)
-- M-Pesa deposits via Daraja STK push: per-salon payment account (till or paybill) in the database, money goes straight to the salon.
-- Callback route with a secret in the path; every callback stored verbatim for audit; settlement is idempotent.
-- Money states are explicit: late payments re-take a free slot, payments that cannot be honoured (slot taken, booking cancelled, duplicate, under-payment) are parked as `needs_refund` and reported to the customer and the owner.
-- Sweeper: expires holds (but not while a prompt is open), reconciles missed callbacks with STK status queries, writes off silent prompts.
-- Conversation: prompt goes to the chat number automatically; "pay" retries; a typed Kenyan number redirects the prompt; salons with no till confirm without a deposit.
-- 16 wire-level payment tests with a fake Daraja.
+278 tests, all passing.
 
-## Oct 27 (night)
-- Owner tools over WhatsApp, matched by exact commands in code (no model): `today`, `tomorrow`, `bookings friday`, `block friday 14:00-16:00`, `unblock friday`, `cancel 2`, `summary`, `help`, with Swahili equivalents.
-- Time off table; customers are never offered blocked time, and a slot offered just before a block is refused when tapped.
-- Owner cancels a booking: the customer is told (with a refund note if a deposit was paid) and the owner is told whom to refund.
-- End-of-day summary to the owner once per local day (tomorrow's bookings, today's deposits).
-- 7 owner tests.
-- Per-sender rate limit (default 20 messages a minute) so nobody can burn model credits.
-- `scripts/doctor.py`: one command that checks configuration, database, each salon's WhatsApp number, each model endpoint, Daraja and the public URL, and says what to fix.
+### Chat onboarding
+- Onboarding registers a salon in minutes with no model in the decision path: name with twin check, barbershop-or-salon type with matching examples, one or many stylists, priced services with times, opening hours, live invite link.
+- Interruptions steer instead of being stored as names; BACK/CANCEL work on every step and name the previous task; corrections ("Fade 600") and plain-language changes ("i want to change time", "they are ok") return to the summary.
+- Guessed times are marked `(~)` and never re-asked when the owner already gave them; a bare time belongs to the only service.
+- Plain sentences register too ("i want to register a business", "nataka kusajili saluni yangu"), in either language.
 
-## Oct 28
-- Owner web page (mobile first, plain HTML/JS, strict CSP): bookings by day with cancel, services, time off, opening hours, deposit, stylists, refunds to send.
-- Passwordless sign-in: the owner sends `link` on WhatsApp, gets a single-use 15 minute URL; sessions are stored hashed; cookie writes need a CSRF header.
-- The page is a thin client of a JSON owner API (`docs/OWNER_API.md`), which a native Kotlin app can use unchanged.
-- Refunds: payments that cannot be honoured are shown to the owner with the reason until he marks them done.
-- 8 API tests, including proof that one salon cannot read or change another's data.
-- Deployment: production Docker Compose with automatic HTTPS (Caddy), server hardening script, nightly backups, `/ready` health check, `docs/DEPLOY.md`.
-- Voice notes: downloaded from Meta, transcribed by Meta's open-source Omnilingual ASR running on our own Modal GPU service (`deploy/modal_asr.py`), then handled like typed text; the bot says what it heard. Audio is never stored.
-- 5 voice tests (fake speech service), `doctor` checks the speech service.
-- Photo matching: a customer sends a hairstyle photo, Muse Spark (vision) suggests which of the salon's services it needs, code validates the suggestion against the menu (price and time come from the menu), and the booking carries on, with a caption such as "kesho mchana" continuing straight to slots. Doubtful, off-menu or non-hair photos are never guessed at. Photos are never stored.
-- `doctor` shows the model a plain red square to prove image input works; 8 vision tests.
+### One bot, many salons
+- One central WhatsApp number and one Telegram bot serve any number of salons (migrations 021, 022). Customers arrive by invite link or QR sticker with the business code prefilled, or pick their business; owners with one salon land in it.
+- Tenant data stays salon-scoped (bookings, clients, payments, reminders, owner commands), proven by a cross-salon test.
+- New `/id` command returns the sender's address for owner setup.
 
+### Conversation hospitality
+- Pleasantries ("thanks", "sawa", "perfect", "ok") get warm replies in the writer's language with no model call, never the off-topic lecture.
+- The reply language follows each message instead of sticking after one Swahili greeting; neutral words never flip it alone.
+- Customer invite links are built per channel in one module (`app/channels/invites.py`); the owner `invite` command returns the link any time, and `scripts/invite_qr.py` prints the QR sticker.
+- The bot introduces itself as whoever the sender reached: a linked sender meets the booking assistant for their business, anyone else meets RemboAI itself with plain REGISTER steps for owners. `help`/`msaada` explains use in non-technical words, in either language, and asking mid-booking loses nothing.
+- Pumping the shared bot with chatter no longer re-sends the business list every time: after two lists it answers a one-line nudge and records an abuse strike, feeding the existing ingress block.
+- A bot with no businesses answers as RemboAI, tells senders their id, and registers the first business by chat; repeat chatter gets a one-line REGISTER nudge, and every exchange is kept in `stranger_state` so it stays checkable. `doctor.py` treats the fresh-bot state as ready, not broken.
+- Returning customers get one welcome ("Welcome back! What would you like to book?") instead of two; owners asking "who are you" meet the assistant; bare "id" works; the cancel notice covers booking from another number.
+- Platform control hub (`app/platform.py`): the `PLATFORM_OWNER_ID` address runs shops, stats, off/on, del with typed YES confirm, and warn from chat; strangers never reach it.
+- Business lifecycle (`app/lifecycle.py`, migration 024): no booking for 7 days warns the owner, day 13 warns finally, day 14 deletes the salon and everything in it; any booking or KEEP cancels the countdown, and the daily loop runs the sweep.
 
-## Oct 28 (Telegram)
-- Telegram as a second channel on the same engine, because a WhatsApp Business account cannot message until Meta business verification completes. Bots need no verification and no public URL while testing (long polling).
-- Customers and owners are `tg:<chat id>` addresses; a channel hub routes every send by address, so deposits, reminders, owner alerts and the daily summary reach the right app.
-- Inline keyboards for slot buttons, voice notes and photos through the same speech and vision pipelines, `/start`, `/id` (shows the id to use as `--owner`), shared contacts.
-- Webhook mode with a secret header (constant-time check, closed when no secret is set) or polling; polling backs off on errors and removes any webhook first.
-- Found by tests: a Telegram button tap carried no text, which the conversation treats as unreadable; the tapped button's label is now used, as WhatsApp does.
-- 10 Telegram tests with a fake Bot API. 76 tests in total.
-- End-to-end test guide and Telegram set-up guide.
+### Owner operations and model gateway (built earlier in the week, first recorded here)
+- Late pushes return the day's new schedules; cancel or move any customer by id or number with only the affected customer told; away-day blocks notify without cancelling; post-visit follow-ups check attendance and alert the owner on a miss.
+- Model gateway with labeled backends, tunable breaker, call logging and reasoning strip, plus `/model-info` and a 40-item eval corpus.
+
+### Removed
+- The owner web page, its API, and web setup are deleted ahead of remboai.co.ke; chat is the only setup. Dead routes left the proxy allowlist and metrics labels with them.
+
+### Housekeeping
+- Channel code grouped into `app/channels`, model code into `app/ai`; comment-only lines stripped from all Python files; weak secrets rotated; docs rewritten for the chat-first product with private notes moved out of the commit path.
 
 ## Oct 29
+
+### Audit fixes
+- Reminders now send: the channel hub has `send_template` (it was missing, the error was swallowed and the free-text fallback is refused outside WhatsApp's 24-hour window); the salon's token is decrypted before use; template parameters follow `reminder_templates.variables`; failed sends are retried with backoff; overlapping runs cannot double-send; `REMINDER_TEMPLATE_24H/2H` are read.
+- An hour next to a phone number ("saa 7 0712345678") is no longer glued into the number, so the M-Pesa prompt cannot go to a stranger.
+- A paid, known payment is never filed as unmatched because Daraja's status query was down; the sweeper settles it later and saves the receipt from the stored callback.
+- Messages are handled at least once (completion is recorded after handling, a crash leaves the message open for the queue's retry); README no longer says "exactly once".
+- Database pool: jobs no longer pin a connection for a lock; their lease is renewed by a heartbeat, and concurrent jobs are capped by the pool size.
+- Date/time: a declined today ("leo siwezi, kesho ...") is not today; `15.11` and `Ksh 1.50` are not clock times; `saa 8 mchana` is understood.
+- Injection filter no longer flags the name "Dan"; "losing hair" and "police station" no longer hand the customer to the owner.
+- Handoff really pauses the bot now (the state was never saved: missing `wa_id`, then overwritten), and honours `HANDOFF_HOURS`.
+- A non-ASCII signature header gets 403 (was 500); no header can crash the body-limit or IP middleware; dead webhook jobs are purged; two unused settings removed.
+
+### Retry safety, locks and tokens (migration 016)
+- The per-sender lock is a lease row (`sender_locks`), not a session advisory lock: handling a message no longer pins a pooled connection through the model call and the sends. Nothing holds one connection while waiting for another, so the pool cannot deadlock; a cap on concurrent jobs only stops a burst from starving the sweeper.
+- One customer's messages are handled in the order they were sent (`webhook_jobs.ordering_key`): a message waits for an earlier one from the same sender that is retrying, and is released if that one is parked as dead.
+- A retried message starts from the conversation as its first attempt found it (`inbound_messages.state_before`, dropped when the message completes) and repeats nothing: sends and owner alerts are remembered per message (`outbound_log`), and slot holds, cancellations, M-Pesa prompts and abuse strikes are keyed by the message that caused them. A prompt that died between its database row and Daraja's answer is closed rather than sent twice.
+- A settled payment is announced even if announcing failed the first time (`payments.announced_at`); payments settled before this release are treated as announced.
+- The salon's own WhatsApp token (decrypted) is used for every send and media download, with the platform token as the fallback (`outbound.salon_token`); all sends go through `outbound`.
+
+### Model budgets, screen, guardrails, vocabulary
 - Found in the first real run: Docker's `env_file` keeps `# comment` text as part of a value, so the example `.env` produced a malformed `PUBLIC_BASE_URL` and a bad `ASR_URL`. Comments in `.env.example` now sit on their own lines, settings strip inline comments whichever way the file is loaded, and `doctor` reports a malformed URL instead of crashing.
 - `doctor` shows the vision model a 256 px red square instead of 16 px (tiny images are padded or rescaled by vision encoders). Request format confirmed against Meta's image-understanding docs.
 - 4 more tests (80 total).
@@ -65,3 +70,57 @@ Everything in this repository was written during the Meta Global AI Developer Ha
 - Fixed: "kesho kutwa" (the day after tomorrow) was read as tomorrow; "day after tomorrow" now works too. 7 tests (108 total).
 - Vocabulary filled in with another tool's help (about 2,000 English, Swahili and Sheng entries across salon, barbershop, nails and spa services, booking, price, hours, cancel, greetings, days and parts of the day, and Swahili/Sheng injection phrases). Reviewed with `scripts/check_lexicon.py`, which removes generic words automatically (people slang, "am"/"pm" as parts of the day, money slang) and reports which example messages the lists get wrong; `--write` saves a cleaned copy.
 - Screen now has three routes instead of two: strong salon words go to the model; prices, hours, cancel, greetings and bare days or times go to the free keyword rules (no model call); everything else gets the pointer. A message the rules cannot read but that has a specific price, payment, hours or cancel word still gets one model try. The price reply now mentions the deposit. 112 tests.
+
+## Oct 28
+
+### Owner web page, API and deployment
+- Owner web page (mobile first, plain HTML/JS, strict CSP): bookings by day with cancel, services, time off, opening hours, deposit, stylists, refunds to send.
+- Passwordless sign-in: the owner sends `link` on WhatsApp, gets a single-use 15 minute URL; sessions are stored hashed; cookie writes need a CSRF header.
+- The page is a thin client of a JSON owner API (`docs/OWNER_API.md`), which a native Kotlin app can use unchanged.
+- Refunds: payments that cannot be honoured are shown to the owner with the reason until he marks them done.
+- 8 API tests, including proof that one salon cannot read or change another's data.
+- Deployment: production Docker Compose with automatic HTTPS (Caddy), server hardening script, nightly backups, `/ready` health check, `docs/DEPLOY.md`.
+- Voice notes: downloaded from Meta, transcribed by Meta's open-source Omnilingual ASR running on our own Modal GPU service (`deploy/modal_asr.py`), then handled like typed text; the bot says what it heard. Audio is never stored.
+- 5 voice tests (fake speech service), `doctor` checks the speech service.
+- Photo matching: a customer sends a hairstyle photo, Muse Spark (vision) suggests which of the salon's services it needs, code validates the suggestion against the menu (price and time come from the menu), and the booking carries on, with a caption such as "kesho mchana" continuing straight to slots. Doubtful, off-menu or non-hair photos are never guessed at. Photos are never stored.
+- `doctor` shows the model a plain red square to prove image input works; 8 vision tests.
+
+### Telegram channel
+- Telegram as a second channel on the same engine, because a WhatsApp Business account cannot message until Meta business verification completes. Bots need no verification and no public URL while testing (long polling).
+- Customers and owners are `tg:<chat id>` addresses; a channel hub routes every send by address, so deposits, reminders, owner alerts and the daily summary reach the right app.
+- Inline keyboards for slot buttons, voice notes and photos through the same speech and vision pipelines, `/start`, `/id` (shows the id to use as `--owner`), shared contacts.
+- Webhook mode with a secret header (constant-time check, closed when no secret is set) or polling; polling backs off on errors and removes any webhook first.
+- Found by tests: a Telegram button tap carried no text, which the conversation treats as unreadable; the tapped button's label is now used, as WhatsApp does.
+- 10 Telegram tests with a fake Bot API. 76 tests in total.
+- End-to-end test guide and Telegram set-up guide.
+
+## Oct 27
+
+### Skeleton, booking core, model client
+- Project skeleton, MIT licence, configuration from environment variables.
+- Migration runner and first migration (inbound message dedupe).
+- WhatsApp Cloud API module: signature verification, payload parsing, text sending, delivery-failure explanations.
+- Signed, idempotent webhook that echoes the message back.
+- Booking core: salons, stylists, services, clients, bookings with a database exclusion constraint against double booking.
+- Availability on a 30 minute grid, per-stylist slot holds under an advisory lock, hold expiry.
+- Language-model client with a primary and a failover endpoint (Meta Model API, Muse Spark Open) and a keyword-rule fallback that fills the same form.
+- English and Swahili messages; Swahili clock parsing (saa nane = 14:00); greetings and "how are you" answered, then the request carries on.
+- Conversation memory in Postgres; button taps and slot numbers skip the model.
+- `scripts/seed_salon.py` to set up a salon from the command line.
+
+### M-Pesa deposits
+- M-Pesa deposits via Daraja STK push: per-salon payment account (till or paybill) in the database, money goes straight to the salon.
+- Callback route with a secret in the path; every callback stored verbatim for audit; settlement is idempotent.
+- Money states are explicit: late payments re-take a free slot, payments that cannot be honoured (slot taken, booking cancelled, duplicate, under-payment) are parked as `needs_refund` and reported to the customer and the owner.
+- Sweeper: expires holds (but not while a prompt is open), reconciles missed callbacks with STK status queries, writes off silent prompts.
+- Conversation: prompt goes to the chat number automatically; "pay" retries; a typed Kenyan number redirects the prompt; salons with no till confirm without a deposit.
+- 16 wire-level payment tests with a fake Daraja.
+
+### Owner tools over chat
+- Owner tools over WhatsApp, matched by exact commands in code (no model): `today`, `tomorrow`, `bookings friday`, `block friday 14:00-16:00`, `unblock friday`, `cancel 2`, `summary`, `help`, with Swahili equivalents.
+- Time off table; customers are never offered blocked time, and a slot offered just before a block is refused when tapped.
+- Owner cancels a booking: the customer is told (with a refund note if a deposit was paid) and the owner is told whom to refund.
+- End-of-day summary to the owner once per local day (tomorrow's bookings, today's deposits).
+- 7 owner tests.
+- Per-sender rate limit (default 20 messages a minute) so nobody can burn model credits.
+- `scripts/doctor.py`: one command that checks configuration, database, each salon's WhatsApp number, each model endpoint, Daraja and the public URL, and says what to fix.

@@ -54,4 +54,4 @@ Put `ASR_URL=<url>/transcribe` and the same `ASR_TOKEN` in `.env`, restart the a
 - Logs: `docker compose -f deploy/docker-compose.prod.yml logs --since 1h app`. Look for `DELIVERY FAILED` (Meta delivery problems, with the reason), `REFUND NEEDED` (money to return), `rate limit`.
 
 ## 8. Before you demo
-Send `link` from the owner number and open the page. Book a fade from a customer number, pay the prompt, and watch the booking appear. Cancel it from the page and confirm the customer is told.
+Send `invite` from the owner number to get the customer link. Book a fade from a customer number, pay the prompt, and watch the booking appear. Cancel it with `cancel 1` and confirm the customer is told.

@@ -18,8 +18,8 @@ not a phone number, so the bot asks "which M-Pesa number?" before the deposit pr
    (`TELEGRAM_WEBHOOK_SECRET` required). Force one with `TELEGRAM_MODE=poll|webhook`.
 
 ## Make yourself the owner
-Open your bot, send `/id`, and it replies `Your Telegram id: tg:123456789`. Use that as `--owner tg:123456789`.
-Then `today`, `summary`, `link`, `block friday 14:00-16:00` and the rest work from Telegram.
+Open your bot, send `/id`, and it replies with your id (`tg:123456789`). Use that as `--owner tg:123456789`.
+Then `today`, `summary`, `invite`, `block friday 14:00-16:00` and the rest work from Telegram. `invite` returns the customer link for the salon: share it, or print it as a QR sticker with `scripts/invite_qr.py`.
 
 ## Notes
 - Only private chats are served; groups and channels are ignored.

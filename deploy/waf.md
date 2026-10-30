@@ -23,7 +23,7 @@ sysctl net.ipv4.tcp_syncookies
 
 `deploy/Caddyfile`:
 - `max_header_size 8KiB`, `read_body 15s/5s`, `request_body 256KiB`, `max_conns_per_host 48`.
-- `@app` allowlist: only `/health /ready /webhook /mpesa/callback/* /ops/* /setup/*` proxied, else `404`.
+- `@app` allowlist: only `/health /ready /webhook /mpesa/callback/* /ops/*` proxied, else `404`.
 - `app` is `read_only + tmpfs /tmp + cap_drop ALL + no-new-privileges + no-access-log`.
 
 `app/hardening.py`:

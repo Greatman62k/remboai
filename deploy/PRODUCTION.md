@@ -12,7 +12,7 @@ openssl rand -hex 24  # POSTGRES_PASSWORD, REDIS_PASSWORD
 
 Set `MPESA_ENV=production`, `MPESA_VERIFY_CALLBACKS=true`, `PUBLIC_BASE_URL=https://$DOMAIN`, strong `OPS_API_KEY`/`TOKEN_ENCRYPTION_KEY`, `DOMAIN`, `POSTGRES_PASSWORD`, `REDIS_PASSWORD`.
 
-Migrate existing DB in order: 009_durable_queue.sql, 010_unmatched.sql, 011_salon_tokens.sql. Fresh volumes run automatically.
+Migrations apply on start, in filename order; never skip or reorder them. Fresh volumes run automatically.
 
 Encrypt legacy tokens:
 ```
@@ -32,6 +32,6 @@ Start:
 docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env up -d --build
 ```
 
-Verify `https://$DOMAIN/health`, set Meta webhook to `https://$DOMAIN/webhook`, Daraja callback `https://$DOMAIN/mpesa/callback/<secret>`, test `POST /ops/salon-setup-invites` with `X-Ops-Key`.
+Verify `https://$DOMAIN/health`, set Meta webhook to `https://$DOMAIN/webhook`, Daraja callback `https://$DOMAIN/mpesa/callback/<secret>`, then register a salon from chat with `/start register`.
 
 Ops key must be 64+ hex with distinct chars; callback secret 16+ with distinct chars; token key 64 hex; ingress 120/600/60 until load test.

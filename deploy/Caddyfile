@@ -23,7 +23,7 @@
     request_body {
         max_size 256KiB
     }
-    @app path /health /webhook /mpesa/callback/* /ops/* /setup/*
+    @app path /health /webhook /mpesa/callback/* /ops/*
     handle @app {
         reverse_proxy app:8080 {
             transport http {
