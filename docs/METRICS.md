@@ -22,7 +22,7 @@ curl -H "X-Ops-Key: $OPS_API_KEY" https://$DOMAIN/metrics
 
 ## Dashboard
 
-Import `deploy/grafana/dashboards/rembo.json` into Grafana. Prometheus scrape:
+No Grafana dashboard ships yet. Prometheus scrape:
 ```yaml
 scrape_configs:
   - job_name: rembo
