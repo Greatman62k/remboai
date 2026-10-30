@@ -45,7 +45,7 @@ def main() -> int:
         bad += len(lx.problems)
     today, menu = date.today(), [{"name": "Fade", "aliases": [], "price_kes": 500}]
     missed = [m for m in lx.examples("on_topic") if route(guard.clean(m), menu, "idle", today) == "off"]
-    leaked = [m for m in lx.examples("off_topic") if route(guard.clean(m), menu, "idle", today) == "model"]   # 'rules' is free: only the model costs money
+    leaked = [m for m in lx.examples("off_topic") if route(guard.clean(m), menu, "idle", today) == "model"]
     if missed:
         print(f"\n{len(missed)} salon messages the screen would TURN AWAY (add the missing word to a topic category):")
         for m in missed:

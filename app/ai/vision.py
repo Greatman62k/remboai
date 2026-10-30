@@ -24,7 +24,7 @@ MIN_CONFIDENCE = 0.5
 
 @dataclass(frozen=True, slots=True)
 class StyleGuess:
-    service: str | None      # whatever the model said; the caller matches it against the menu
+    service: str | None
     style: str
     confidence: float
     model: str
@@ -71,7 +71,7 @@ class StyleMatcher:
             return None
         if self.budget is not None and not await self.budget.take("vision"):
             return None
-        for base, key, model, _ in self._endpoints():
+        for _backend, base, key, model, _ in self._endpoints():
             t0 = clock.perf_counter()
             try:
                 r = await self.http.post(base.rstrip("/") + "/chat/completions", json=self.body(model, build_prompt(services), image, mime, caption),

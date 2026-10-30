@@ -65,10 +65,14 @@ def _client_ip(scope, trusted_cidrs: str) -> str:
     direct = str((scope.get("client") or ("unknown", 0))[0])[:128]
     if not trusted_cidrs:
         return direct
-    headers = dict((k.decode().lower(), v.decode()) for k, v in scope.get("headers", []))
+    headers = dict((k.decode("latin-1").lower(), v.decode("latin-1")) for k, v in scope.get("headers", []))
     fwd = headers.get("x-forwarded-for", "")
     if fwd and _trusted_proxy_match(direct, trusted_cidrs):
-        first = fwd.split(",")[0].strip().split(":")[0]
+        first = fwd.split(",")[0].strip()
+        if first.startswith("["):
+            first = first[1:].split("]")[0]
+        elif first.count(":") == 1:
+            first = first.split(":")[0]
         if first:
             return first[:128]
     return direct
@@ -142,8 +146,7 @@ class BodyLimit:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        headers = dict((k.decode().lower(), v.decode()) for k, v in scope.get("headers", []))
-        length = headers.get("content-length")
+        length = next((v for k, v in scope.get("headers", []) if k.lower() == b"content-length"), None)
         if length is not None:
             try:
                 if int(length) > self.max_bytes:
@@ -184,8 +187,8 @@ class BodyLimit:
         await send({"type": "http.response.body", "body": b"payload too large"})
 
 _PHONE = re.compile(r"(?<![\d])(\+?)(\d{10,13})(?!\d)")
-_SENSITIVE_QUERY = re.compile(r"([?&](?:access_token|token|api[_-]?key|client_secret|password|secret|key)=)([^&\s\"']+)", re.I)
-_SENSITIVE_ASSIGNMENT = re.compile(r"(\b(?:access_token|token|api[_-]?key|client_secret|password|secret)\b[\"']?\s*[:=]\s*[\"']?)([^,;\s&}\"']+)", re.I)
+_SENSITIVE_QUERY = re.compile(r"([?&](?:access_token|token|api[_-]?key|client_secret|password|passkey|secret|key)=)([^&\s\"']+)", re.I)
+_SENSITIVE_ASSIGNMENT = re.compile(r"((?<![A-Za-z0-9])(?:access_token|token|api[_-]?key|client_secret|password|passkey|secret|app_secret|verify_token|webhook_secret)(?![A-Za-z0-9])[\"']?\s*[:=]\s*[\"']?)([^,;\s&}\"']+)", re.I)
 _BEARER_TOKEN = re.compile(r"\b(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}", re.I)
 
 
@@ -245,7 +248,7 @@ def startup_checks(settings) -> list[str]:
     if mpesa_env == "production" and not getattr(settings, "mpesa_verify_callbacks", True):
         problems.append("MPESA_VERIFY_CALLBACKS must be true in production")
     if mpesa_env == "production" and not ops_api_key_ok(settings):
-        problems.append("OPS_API_KEY must be at least 64 characters with at least 16 distinct characters when configured")
+        problems.append("OPS_API_KEY must be at least 64 characters with at least 8 distinct characters when configured")
     token_key = getattr(settings, "token_encryption_key", None)
     if token_key or mpesa_env == "production":
         import re as _re
@@ -265,7 +268,29 @@ def startup_checks(settings) -> list[str]:
     return problems
 
 
+class SecurityHeaders:
+    """Baseline response headers on every route. Handlers that set their own (the owner page) keep them."""
+    HEADERS = ((b"x-content-type-options", b"nosniff"), (b"x-frame-options", b"DENY"), (b"referrer-policy", b"no-referrer"))
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def headed_send(msg):
+            if msg["type"] == "http.response.start":
+                seen = {k.lower() for k, _ in msg.get("headers", [])}
+                msg["headers"] = list(msg.get("headers", [])) + [(k, v) for k, v in self.HEADERS if k not in seen]
+            await send(msg)
+
+        await self.app(scope, receive, headed_send)
+
+
 def install(app) -> None:
     app.add_middleware(BodyLimit)
     app.add_middleware(IngressRateLimit)
+    app.add_middleware(SecurityHeaders)
     install_log_masking()

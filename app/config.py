@@ -12,14 +12,19 @@ class Settings(BaseSettings):
 
     @field_validator("*", mode="before")
     @classmethod
-    def _no_inline_comments(cls, v):
+    def _no_inline_comments(cls, v, info):
         """`KEY=value  # note` is a comment for python-dotenv but part of the value for Docker's env_file. Treat both the same.
-        A value that is only a comment (`KEY=  # note`) becomes empty."""
+        A value that is only a comment (`KEY=  # note`) falls back to the field default instead of failing validation."""
         if isinstance(v, str):
             v = v.strip()
             if v.startswith("#"):
-                return ""
-            return _INLINE_COMMENT.sub("", v)
+                v = ""
+            else:
+                v = _INLINE_COMMENT.sub("", v)
+            if v == "" and info.field_name in cls.model_fields:
+                default = cls.model_fields[info.field_name].get_default(call_default_factory=True)
+                if default is not None:
+                    return default
         return v
 
     database_url: str
@@ -29,24 +34,29 @@ class Settings(BaseSettings):
     wa_access_token: str = ""
     graph_version: str = "v25.0"
 
-    # Language model: any OpenAI-compatible endpoint. Primary first, then the optional failover.
     llm_base_url: str = "https://api.meta.ai/v1"
     llm_api_key: str = ""
     llm_model: str = "muse-spark-1.3"
-    llm_json_mode: str = "none"          # none | json_object | json_schema
-    llm_reasoning_effort: str = "minimal"  # "" to omit
+    llm_json_mode: str = "none"
+    llm_reasoning_effort: str = "minimal"
     llm_system_role: str = "developer"
     llm_timeout_s: float = 8.0
-    # Daily ceilings on metered calls (0 = no limit). Past a ceiling the feature degrades instead of spending more.
     llm_daily_limit: int = 3000
     vision_daily_limit: int = 300
     voice_daily_limit: int = 500
-    per_sender_daily_limit: int = 300     # messages one person can send in a day
-    strike_limit: int = 3                 # abuse signals in 24 hours before a sender is ignored (0 = never)
-    max_active_bookings: int = 3          # upcoming bookings and holds one customer can have at once
+    per_sender_daily_limit: int = 300
+    strike_limit: int = 3
+    platform_owner_id: str = ""
+    max_active_bookings: int = 3
     llm_fallback_base_url: str = ""
     llm_fallback_api_key: str = ""
     llm_fallback_model: str = ""
+    llm_backend: str = "meta_api"
+    llm_fallback_backend: str = ""
+    llm_quantization: str = ""
+    llm_host: str = ""
+    llm_breaker_trips: int = 3
+    llm_breaker_cooldown_s: int = 60
 
     hold_minutes: int = 10
     asr_url: str = ""
@@ -62,11 +72,11 @@ class Settings(BaseSettings):
     ingress_rate_global: int = 600
     ingress_rate_window_s: int = 60
 
-    # Telegram: a second channel for the same receptionist (no business verification needed). Empty token = off.
-    telegram_bot_token: str = ""        # from @BotFather
-    telegram_mode: str = "auto"         # auto = webhook when PUBLIC_BASE_URL is https, otherwise long polling | poll | webhook
-    telegram_webhook_secret: str = ""    # random string Telegram echoes back in a header
+    telegram_bot_token: str = ""
+    telegram_mode: str = "auto"
+    telegram_webhook_secret: str = ""
 
+    central_whatsapp_number: str = ""
     mpesa_env: str = "sandbox"
     mpesa_consumer_key: str = ""
     mpesa_consumer_secret: str = ""
@@ -81,11 +91,8 @@ class Settings(BaseSettings):
     webhook_retention_days: int = 30
     inbound_retention_days: int = 90
     handoff_hours: float = 4.0
-    confirm_exact_booking: bool = True
-    unpaid_hold_limit: int = 3
     webhook_workers: int = 4
     db_pool_max: int = 10
-    salon_setup_invite_hours: int = 168
     trusted_proxy_cidrs: str = ""
     metrics_enabled: bool = True
     reminder_enabled: bool = True
@@ -93,8 +100,8 @@ class Settings(BaseSettings):
     reminder_template_2h: str = "reminder_2h"
 
     log_level: str = "INFO"
-    log_format: str = "text"             # text | json
-    log_file: str = ""                   # e.g. /data/logs/app.log - empty = stdout only
+    log_format: str = "text"
+    log_file: str = ""
 
 
 @lru_cache

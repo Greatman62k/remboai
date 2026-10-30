@@ -16,7 +16,6 @@ NAIROBI = ZoneInfo("Africa/Nairobi")
 HOSTS = {"sandbox": "https://sandbox.safaricom.co.ke", "production": "https://api.safaricom.co.ke"}
 TXN_TYPE = {"till": "CustomerBuyGoodsOnline", "paybill": "CustomerPayBillOnline"}
 
-# Result codes worth explaining to a customer in their own words.
 CODE_CANCELLED, CODE_INSUFFICIENT, CODE_WRONG_PIN, CODE_TIMEOUT = 1032, 1, 2001, 1037
 
 _MSISDN = re.compile(r"^(?:\+?254|0)?([71]\d{8})$")
@@ -29,21 +28,19 @@ def normalize_msisdn(text: str) -> str | None:
     return "254" + m.group(1) if m else None
 
 
-_EXTRACT = re.compile(r"(?:\+?254|0)?[71]\d{8}")
+_SEP = r"[\s\-().]"
+_EXTRACT = re.compile(rf"(?<!\d)(?:\+?254{_SEP}?|0)?[71](?:{_SEP}?\d){{8}}(?!\d)")
 
 
 def extract_msisdn(text: str) -> str | None:
-    """Find a Kenyan number anywhere inside free text, like 'my number is 0712345678'."""
+    """Find a Kenyan number anywhere inside free text, like 'my number is 0712345678' or 'saa 7 0712 345 678'.
+    Returns None rather than guess when the digits do not add up to exactly one whole number."""
     if not text:
         return None
-    cleaned = re.sub(r"[\s\-().]", "", text)
-    # search in cleaned version for any embedded candidate
-    for m in _EXTRACT.finditer(cleaned):
-        cand = m.group(0)
-        norm = normalize_msisdn(cand)
+    for m in _EXTRACT.finditer(text):
+        norm = normalize_msisdn(m.group(0))
         if norm:
             return norm
-    # also try original text with spaces removed per candidate
     return None
 
 

@@ -4,6 +4,7 @@ import re
 import unicodedata
 
 from . import lexicon
+from .channels import outbound
 
 MAX_TEXT = 1000
 MAX_NAME = 40
@@ -19,7 +20,8 @@ _INJECTION = re.compile(
     r"(instructions?|rules?|prompts?|guidelines?|directions?|context)|"
     r"(system|developer|hidden|initial|original)\W+(prompt|message|instructions?)|"
     r"(reveal|show|print|repeat|leak|tell me)\W+(me\W+)?(your\W+|the\W+)*(prompt|instructions?|rules|secrets?|api\W?keys?|tokens?|passwords?|configuration|config)|"
-    r"you\W+are\W+(now\W+(a|an|the|my|dan|in|free|unrestricted)\b|no\W+longer\W)|\bact\W+as\W+(a|an|the)?\W*\w+|pretend\W+(to\W+be|you\W+are)|jailbreak|\bDAN\b|developer\W+mode|"
+    r"you\W+are\W+(now\W+(a|an|the|my|dan|in|free|unrestricted)\b|no\W+longer\W)|\bact\W+as\W+(a|an|the)?\W*\w+|pretend\W+(to\W+be|you\W+are)|jailbreak|"
+    r"\bdo\W+anything\W+now\b|\bDAN\W+(mode|prompt|jailbreak|version)\b|\byou\W+are\W+(?-i:DAN)\b|developer\W+mode|"
     r"<\|?(system|im_start|im_end|assistant)\|?>|\[/?(INST|SYS)\]|^\W*(system|assistant|developer)\s*:", re.I | re.M)
 
 _REPLIES = {
@@ -54,9 +56,11 @@ _REPLIES = {
 _SENSITIVE = [
     ("emergency", "en", r"\b(emergency|ambulance|suicide|suicidal|kill myself|want to die|hurt myself|self[- ]harm)\b"),
     ("emergency", "sw", r"\b(dharura|nataka kufa|najiua|kujiua)\b"),
-    ("legal", "en", r"\b(lawyer|lawsuit|police|sue you|consumer protection)\b|\breport (you|the salon)\b"),
-    ("legal", "sw", r"\b(wakili|mahakama|polisi|nitakushtaki)\b"),
-    ("medical", "en", r"\b(allergic|infection|bleeding|blister|chemical burn|hair falling out|fainted|can'?t breathe|losing hair)\b|\brash(?![- ]free)\b"),
+    ("legal", "en", r"\b(lawyer|lawsuit|sue you|consumer protection)\b|\breport (you|the salon)\b|\bpolice\b(?!\W+(?:station|post|barracks|lines?)\b)|"
+                    r"\b(?:report(?:ing)?|call(?:ing)?|tak(?:e|ing))\b(?:\W+\w+){0,3}?\W+(?:to\W+)?(?:the\W+)?police\b"),
+    ("legal", "sw", r"\b(wakili|mahakama|nitakushtaki)\b|(?<!kituo cha )\bpolisi\b"),
+    ("medical", "en", r"\b(allergic|infection|bleeding|blister|chemical burn|fainted|can'?t breathe)\b|\brash(?![- ]free)\b|"
+                      r"\bhair\W+(?:\w+\W+){0,2}?(?:falling|coming)\W+out\W+after\b|\b(?:losing|lost)\W+(?:my\W+)?hair\W+after\b"),
     ("medical", "sw", r"\b(mzio|nimeungua|nimevimba|uvimbe)\b"),
     ("payment_dispute", "en", r"\b(refunds?(?!\s+polic)|reversal|chargeback|charged twice|deducted|overcharged|scam|scammed)\b|paid but|money (was )?taken"),
     ("payment_dispute", "sw", r"\b(nirudishie|rudisha pesa|nimekatwa|imekatwa|tapeli|wezi)\b|nimelipa lakini"),
@@ -106,7 +110,7 @@ async def hand_off(ctx, salon: dict, client: dict, lang: str, category: str, tex
     log = logging.getLogger("rembo.guard")
     try:
         await ctx.pool.execute(
-            "INSERT INTO handoffs (salon_id, client_id, category, message) VALUES ($1::uuid,$2::uuid,$3,$4)",
+            "INSERT INTO handoffs (salon_id, client_id, category, message) VALUES ($1::uuid,$2::uuid,$3,$4) ON CONFLICT (client_id) WHERE status = 'open' DO NOTHING",
             salon["id"], client["id"], category, text[:1000],
         )
     except Exception:
@@ -117,9 +121,7 @@ async def hand_off(ctx, salon: dict, client: dict, lang: str, category: str, tex
             wa_id = client.get("wa_id") or ""
             who = client.get("name") or f"+{wa_id}"
             body = f"Needs a human ({category.replace('_',' ')}): {who}\nChat: https://wa.me/{wa_id}\nThey said: \"{(text or '')[:200]}\"\nReply \"resolve {wa_id}\" when done."
-            token = salon.get("wa_access_token") or ctx.settings.wa_access_token
-            pid = salon["wa_phone_number_id"]
-            await ctx.wa.send_text(pid, token, owner, body)
+            await outbound.send_text(ctx, salon, owner, body)
         except Exception:
             log.exception("owner notify failed")
     try:
@@ -162,7 +164,8 @@ async def owner_command(ctx, salon: dict, wa_id: str, text: str, send) -> bool:
     return True
 
 async def strike(pool, sender: str, reason: str) -> None:
-    await pool.execute("INSERT INTO abuse_strikes (sender, reason) VALUES ($1, $2)", sender, reason[:60])
+    """One strike per message and reason: handling a message again (a retry) must not count it twice."""
+    await pool.execute("INSERT INTO abuse_strikes (sender, reason, message_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING", sender, reason[:60], outbound.current_message_id())
 
 async def blocked(pool, sender: str, limit: int) -> bool:
     if limit <= 0:

@@ -8,12 +8,12 @@ import re
 from datetime import date
 
 from . import lexicon
-from .llm import rule_extract
+from .ai.llm import rule_extract
 
-MAX_FIRST_MESSAGE = 400   # a long first message is a pasted essay or an injection attempt, not a booking request
+MAX_FIRST_MESSAGE = 400
 
-_STRONG = lexicon.load().pattern(*lexicon.STRONG)      # services, styles, booking words (app/lexicon.json)
-_SPECIFIC = lexicon.load().pattern(*lexicon.SPECIFIC)   # price, payment, hours and cancel words
+_STRONG = lexicon.load().pattern(*lexicon.STRONG)
+_SPECIFIC = lexicon.load().pattern(*lexicon.SPECIFIC)
 
 
 def _menu_hit(text: str, services: list[dict]) -> bool:

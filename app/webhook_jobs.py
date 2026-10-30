@@ -2,15 +2,35 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import Counter
 from contextlib import asynccontextmanager
 
+from . import poolstate
 from .mpesa import parse_callback
 from .payments import settle_with_verification
 
 log = logging.getLogger("rembo.webhooks")
 MAX_ATTEMPTS = 8
 LEASE_SECONDS = 60
+HEARTBEAT_SECONDS = 15
 _QUEUE_LOCK = 1383000578
+
+RESERVED_CONNECTIONS = 2
+
+
+def job_slots(pool) -> asyncio.Semaphore:
+    st = poolstate.state(pool)
+    if "slots" not in st:
+        st["slots"] = asyncio.Semaphore(max(1, pool.get_max_size() - RESERVED_CONNECTIONS))
+    return st["slots"]
+
+
+def ordering_key(provider: str, payload: dict) -> str | None:
+    """Messages from one sender on one number are handled in the order they arrived. Other jobs (M-Pesa callbacks) have no order."""
+    if provider not in ("whatsapp", "telegram"):
+        return None
+    who = payload.get("wa_id") or payload.get("sender")
+    return f"{provider}:{payload.get('phone_number_id') or ''}:{who}" if who else None
 
 
 class QueueCapacityError(Exception):
@@ -21,19 +41,14 @@ class PermanentJobError(Exception):
     pass
 
 
-@asynccontextmanager
-async def _execution_lock(pool, job_id: int):
-    key = -int(job_id)
-    async with pool.acquire() as conn:
-        acquired = bool(await conn.fetchval("SELECT pg_try_advisory_lock($1::bigint)", key))
+async def _heartbeat(pool, job_id: int) -> None:
+    """Keep the lease on a job that is still running, so a slow job (a model call, a Daraja query) is not claimed a second time."""
+    while True:
+        await asyncio.sleep(HEARTBEAT_SECONDS)
         try:
-            yield acquired
-        finally:
-            if acquired:
-                try:
-                    await conn.execute("SELECT pg_advisory_unlock($1::bigint)", key)
-                except Exception:
-                    log.exception("failed to release execution lock for job %s", job_id)
+            await pool.execute("UPDATE webhook_jobs SET locked_until=now()+($2 * interval '1 second') WHERE id=$1 AND status='processing'", job_id, LEASE_SECONDS)
+        except Exception:
+            log.warning("could not renew the lease on job %s", job_id)
 
 
 async def enqueue_jobs(pool, provider: str, events: list[tuple[str, dict]], *, max_pending: int = 10000, max_pending_per_sender: int = 100) -> None:
@@ -50,21 +65,27 @@ async def enqueue_jobs(pool, provider: str, events: list[tuple[str, dict]], *, m
         pending_count = await conn.fetchval("SELECT count(*) FROM webhook_jobs WHERE status IN ('pending','processing')")
         if int(pending_count or 0) + len(pending) > max(1, int(max_pending)):
             raise QueueCapacityError("global webhook queue capacity reached")
-        if provider == "whatsapp":
-            for eid, payload in pending.items():
-                wa_id = payload.get("wa_id") or payload.get("sender")
-                if wa_id:
-                    c = await conn.fetchval("SELECT count(*) FROM webhook_jobs WHERE provider='whatsapp' AND status IN ('pending','processing') AND payload->>'wa_id'=$1", str(wa_id))
-                    if int(c or 0) >= max(1, int(max_pending_per_sender)):
-                        raise QueueCapacityError(f"per-sender queue capacity reached for {wa_id}")
+        if provider in ("whatsapp", "telegram"):
+            limit = max(1, int(max_pending_per_sender))
+            batch = Counter((p.get("wa_id") or p.get("sender") or "") for p in pending.values())
+            for sender, n in batch.items():
+                if not sender:
+                    continue
+                c = await conn.fetchval(
+                    "SELECT count(*) FROM webhook_jobs WHERE provider=$1 AND status IN ('pending','processing') "
+                    "AND (payload->>'wa_id'=$2 OR payload->>'sender'=$2)", provider, str(sender))
+                if int(c or 0) + n > limit:
+                    raise QueueCapacityError(f"per-sender queue capacity reached for {sender}")
         for eid, payload in pending.items():
-            await conn.execute("INSERT INTO webhook_jobs (provider, event_id, payload) VALUES ($1,$2,$3)", provider, eid, payload)
+            await conn.execute("INSERT INTO webhook_jobs (provider, event_id, payload, ordering_key) VALUES ($1,$2,$3,$4)", provider, eid, payload, ordering_key(provider, payload))
 
 
 async def claim_next(pool):
     async with pool.acquire() as conn, conn.transaction():
         row = await conn.fetchrow(
-            "SELECT * FROM webhook_jobs WHERE status IN ('pending','processing') AND (locked_until IS NULL OR locked_until < now()) AND available_at <= now() ORDER BY available_at, id LIMIT 1 FOR UPDATE SKIP LOCKED"
+            "SELECT j.* FROM webhook_jobs j WHERE j.status IN ('pending','processing') AND (j.locked_until IS NULL OR j.locked_until < now()) AND j.available_at <= now() "
+            "AND (j.ordering_key IS NULL OR NOT EXISTS (SELECT 1 FROM webhook_jobs e WHERE e.ordering_key = j.ordering_key AND e.id < j.id AND e.status IN ('pending','processing'))) "
+            "ORDER BY j.available_at, j.id LIMIT 1 FOR UPDATE OF j SKIP LOCKED"
         )
         if row is None:
             return None
@@ -79,7 +100,7 @@ async def complete_job(pool, job_id: int) -> None:
 
 
 async def dead_job(pool, job_id: int, error: str) -> None:
-    await pool.execute("UPDATE webhook_jobs SET status='dead', locked_until=NULL, last_error=$2, updated_at=now() WHERE id=$1", job_id, error[:2000])
+    await pool.execute("UPDATE webhook_jobs SET status='dead', locked_until=NULL, last_error=$2, completed_at=now(), updated_at=now() WHERE id=$1", job_id, error[:2000])
 
 
 async def retry_job(pool, job: dict, error: Exception) -> None:
@@ -91,7 +112,7 @@ async def retry_job(pool, job: dict, error: Exception) -> None:
 
 
 async def requeue_dead_job(pool, job_id: int) -> bool:
-    r = await pool.execute("UPDATE webhook_jobs SET status='pending', attempts=0, locked_until=NULL, last_error=NULL, available_at=now(), updated_at=now() WHERE id=$1 AND status='dead'", job_id)
+    r = await pool.execute("UPDATE webhook_jobs SET status='pending', attempts=0, locked_until=NULL, last_error=NULL, completed_at=NULL, available_at=now(), updated_at=now() WHERE id=$1 AND status='dead'", job_id)
     return r.endswith("1")
 
 
@@ -103,7 +124,7 @@ async def list_dead_jobs(pool):
 async def _process_claimed_job(ctx, job: dict) -> None:
     if job["provider"] == "whatsapp":
         from .inbound import inbound as handle_inbound
-        from .whatsapp import Message
+        from .channels.whatsapp import Message
         payload = job["payload"] if isinstance(job["payload"], dict) else __import__("json").loads(job["payload"])
         msg = Message(
             id=payload.get("id") or payload.get("wa_message_id") or job["event_id"],
@@ -118,14 +139,14 @@ async def _process_claimed_job(ctx, job: dict) -> None:
         if not msg.sender or not msg.id:
             raise PermanentJobError("invalid whatsapp payload")
         await handle_inbound(ctx, msg)
-        async with ctx.pool.acquire() as conn, conn.transaction():
-            await conn.execute("INSERT INTO inbound_messages (wa_message_id, wa_id) VALUES ($1,$2) ON CONFLICT DO NOTHING", msg.id, msg.sender)
-            await conn.execute("UPDATE webhook_jobs SET status='processed', payload='{}'::jsonb, locked_until=NULL, last_error=NULL, completed_at=now(), updated_at=now() WHERE id=$1", job["id"])
+        await complete_job(ctx.pool, job["id"])
         return
     if job["provider"] == "telegram":
         from .inbound import inbound as handle_inbound
-        from .whatsapp import Message
+        from .channels.whatsapp import Message
         payload = job["payload"] if isinstance(job["payload"], dict) else __import__("json").loads(job["payload"])
+        if not isinstance(payload, dict) or not payload.get("sender"):
+            raise PermanentJobError("invalid telegram payload")
         msg = Message(
             id=payload.get("id") or job["event_id"],
             sender=payload.get("sender") or "",
@@ -145,7 +166,11 @@ async def _process_claimed_job(ctx, job: dict) -> None:
         if cb is None:
             raise PermanentJobError("invalid M-Pesa callback payload")
         outcome = await settle_with_verification(ctx, cb)
-        if outcome is not None and outcome == "unknown":
+        if outcome == "unverified":
+            if job["attempts"] < MAX_ATTEMPTS:
+                raise RuntimeError(f"cannot verify {cb.checkout_request_id} with Daraja yet")
+            log.error("PAYMENT NOT YET VERIFIED: checkout=%s receipt=%s amount=%s; left for the sweeper", cb.checkout_request_id, cb.receipt, cb.amount)
+        elif outcome == "unknown":
             if job["attempts"] < MAX_ATTEMPTS:
                 raise RuntimeError(f"unknown CheckoutRequestID {cb.checkout_request_id}")
             if cb.code == 0:
@@ -160,12 +185,27 @@ async def _process_claimed_job(ctx, job: dict) -> None:
 
 
 async def process_job(ctx, job: dict) -> bool:
-    async with _execution_lock(ctx.pool, job["id"]) as acquired:
-        if not acquired:
-            log.info("skipping job %s: execution lock held", job["id"])
-            return False
-        await _process_claimed_job(ctx, job)
+    """Run one claimed job. Raises if it fails (the caller decides between retry and dead; see run_claimed)."""
+    beat = asyncio.create_task(_heartbeat(ctx.pool, job["id"]))
+    try:
+        async with job_slots(ctx.pool):
+            await _process_claimed_job(ctx, job)
         return True
+    finally:
+        beat.cancel()
+        await asyncio.gather(beat, return_exceptions=True)
+
+
+async def run_claimed(ctx, job: dict) -> None:
+    """process_job plus the failure policy, shared by the background workers and the in-request drain."""
+    try:
+        await process_job(ctx, job)
+    except PermanentJobError as e:
+        await dead_job(ctx.pool, job["id"], str(e))
+        log.error("Webhook job %s/%s rejected: %s", job["provider"], job["event_id"], e)
+    except Exception as e:
+        log.warning("webhook job %s/%s failed on attempt %s: %s", job["provider"], job["event_id"], job["attempts"], e.__class__.__name__)
+        await retry_job(ctx.pool, job, e)
 
 
 async def webhook_worker(ctx) -> None:
@@ -175,13 +215,7 @@ async def webhook_worker(ctx) -> None:
             if job is None:
                 await asyncio.sleep(0.5)
                 continue
-            try:
-                await process_job(ctx, job)
-            except PermanentJobError as e:
-                await dead_job(ctx.pool, job["id"], str(e))
-                log.error("Webhook job %s/%s rejected: %s", job["provider"], job["event_id"], e)
-            except Exception as e:
-                await retry_job(ctx.pool, job, e)
+            await run_claimed(ctx, job)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -190,6 +224,8 @@ async def webhook_worker(ctx) -> None:
 
 
 async def purge_expired_data(pool, webhook_days: int = 30, inbound_days: int = 90) -> dict:
-    w = await pool.fetchval("WITH deleted AS (DELETE FROM webhook_jobs WHERE status IN ('processed','dead') AND completed_at < now() - ($1 * interval '1 day') RETURNING 1) SELECT count(*) FROM deleted", webhook_days)
+    w = await pool.fetchval("WITH deleted AS (DELETE FROM webhook_jobs WHERE status IN ('processed','dead') AND COALESCE(completed_at, updated_at) < now() - ($1 * interval '1 day') RETURNING 1) SELECT count(*) FROM deleted", webhook_days)
     i = await pool.fetchval("WITH deleted AS (DELETE FROM inbound_messages WHERE received_at < now() - ($1 * interval '1 day') RETURNING 1) SELECT count(*) FROM deleted", inbound_days)
-    return {"webhook_jobs": int(w or 0) if isinstance(w, int) else 0, "inbound_messages": int(i or 0) if isinstance(i, int) else 0}
+    o = await pool.fetchval("WITH deleted AS (DELETE FROM outbound_log WHERE sent_at < now() - ($1 * interval '1 day') RETURNING 1) SELECT count(*) FROM deleted", inbound_days)
+    await pool.execute("DELETE FROM sender_locks WHERE locked_until < now() - interval '1 day'")
+    return {"webhook_jobs": int(w or 0) if isinstance(w, int) else 0, "inbound_messages": int(i or 0) if isinstance(i, int) else 0, "outbound_log": int(o or 0) if isinstance(o, int) else 0}

@@ -32,14 +32,18 @@ class RateLimiter:
             return 1
 
     async def check_sender(self, salon_id: str, wa_id: str) -> str:
-        n = await self._incr(f"rl:b:{salon_id}:{wa_id}", self.window)
-        if n > self.burst:
-            return "notify" if n == self.burst + 1 else "drop"
-        d = await self._incr(f"rl:d:{salon_id}:{wa_id}", 86400)
-        if d > self.daily:
-            return "notify" if d == self.daily + 1 else "drop"
+        if self.burst > 0:
+            n = await self._incr(f"rl:b:{salon_id}:{wa_id}", self.window)
+            if n > self.burst:
+                return "notify" if n == self.burst + 1 else "drop"
+        if self.daily > 0:
+            d = await self._incr(f"rl:d:{salon_id}:{wa_id}", 86400)
+            if d > self.daily:
+                return "notify" if d == self.daily + 1 else "drop"
         return "ok"
 
     async def llm_allowed(self, salon_id: str) -> bool:
+        if self.llm_daily <= 0:
+            return True
         day = datetime.now(timezone.utc).strftime("%Y%m%d")
         return await self._incr(f"rl:llm:{salon_id}:{day}", 172800) <= self.llm_daily

@@ -16,7 +16,10 @@ class Budget:
 
     async def take(self, kind: str) -> bool:
         """Count one call. False means today's ceiling is reached and the call must not be made."""
-        limit = self.limits.get(kind, 0)
+        if kind not in self.limits:
+            log.error("unknown budget kind %r: denying the call", kind)
+            return False
+        limit = self.limits[kind]
         if limit <= 0:
             return True
         try:

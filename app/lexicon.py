@@ -13,37 +13,35 @@ from functools import lru_cache
 from pathlib import Path
 
 log = logging.getLogger("rembo.lexicon")
-PATH = Path(os.environ.get("LEXICON_PATH") or Path(__file__).with_name("lexicon.json"))   # LEXICON_PATH: try a file before replacing the shipped one
+PATH = Path(os.environ.get("LEXICON_PATH") or Path(__file__).with_name("lexicon.json"))
 LANGS = ("en", "sw", "sheng")
-STRONG = ("services_styles", "booking_words")                      # a message with one of these may go to the model
-WEAK = ("request_words", "price_payment_words", "hours_cancel_words")   # these alone: the free keyword rules first (request words never reach the model alone)
+STRONG = ("services_styles", "booking_words")
+WEAK = ("request_words", "price_payment_words", "hours_cancel_words")
 SPECIFIC = ("price_payment_words", "hours_cancel_words")
 TOPIC = STRONG + WEAK
 _ENTRY = re.compile(r"^[^\W_][\w '.\-]{0,38}[*+]?$")
-# Words that appear in nearly every message: as "salon words" they would let everything through.
 STOP = {"a", "an", "the", "and", "or", "is", "are", "am", "i", "me", "my", "you", "your", "it", "to", "of", "in", "on", "at", "for", "with", "yes", "no", "ok", "okay",
         "na", "ya", "wa", "kwa", "ni", "la", "za", "kwa", "hii", "hiyo", "huu", "huo", "hapa", "pale", "sana", "tu", "pia", "ama", "au", "kama", "ndio", "hapana", "sawa", "mimi", "wewe",
         "we", "yeye", "sisi", "ana", "ina", "iko", "yako", "yangu", "wako", "wangu", "kuna", "bado", "ila", "lakini", "pamoja", "sasa", "bro", "boss", "mze", "msee", "bruh", "man"}
 
 
-# Extra words refused per kind of category. A word can be right in one list and wrong in another ("open" is fine for hours, wrong for services).
 _STOP_STRONG = {"top", "sides", "side", "lines", "line", "linez", "dem", "gal", "toto", "masa", "mathee", "mokoro", "mamii", "mamaa", "msupa", "empress", "mpoa", "ngeus", "baba",
                 "dawa", "rangi", "kutengeneza", "fundi", "weka", "panga", "hifadhi", "mbao", "kibao", "blow", "stim", "trit", "kutembelea", "nikam", "nikuje", "nakuja", "nitafika",
                 "sai", "kach", "chapaa", "ganji", "moni", "bokette", "mukuchu", "kichele", "maziwa", "cash", "rate", "fee", "charge", "change", "open", "push", "pisha", "futa", "muda", "masaa"}
 _STOP_WEAK = {"muda", "masaa", "push", "pisha", "futa", "change", "cash", "rate", "fee", "charge", "sai", "kach", "chapaa", "ganji", "moni", "bokette", "mukuchu",
               "kichele", "maziwa"}
-_STOP_DATE = {"am", "a m", "pm", "p m", "eve"}                       # meridiem markers are not parts of the day: "I am" is not morning
+_STOP_DATE = {"am", "a m", "pm", "p m", "eve"}
 _STOP_BY_CATEGORY = {c: _STOP_STRONG for c in STRONG} | {c: _STOP_WEAK for c in ("price_payment_words", "hours_cancel_words")} | {c: _STOP_DATE for c in ("today", "tomorrow", "day_after_tomorrow", "morning", "afternoon", "evening",
                       "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")} | {
-    "sw_markers": {"fresh", "freshi", "jo", "form", "fom", "bana"},   # ordinary English words would flip the replies to Swahili
+    "sw_markers": {"fresh", "freshi", "jo", "form", "fom", "bana"},
     "greetings": {"morning", "afternoon", "evening", "wazi", "sema"}}
 
 
 @dataclass
 class Lexicon:
     data: dict
-    problems: list[str] = field(default_factory=list)     # something wrong with the file: malformed entries, unknown lists
-    removed: list[str] = field(default_factory=list)      # words refused automatically because they are too generic: nothing to fix
+    problems: list[str] = field(default_factory=list)
+    removed: list[str] = field(default_factory=list)
 
     def entries(self, category: str, langs=LANGS) -> list[str]:
         block = self.data.get(category) or {}
