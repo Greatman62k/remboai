@@ -1,7 +1,7 @@
 import pytest
 from app.token_crypto import encrypt_token, decrypt_token, valid_encryption_key, PREFIX
 
-KEY = "a"*64  # 32 bytes hex, valid (distinct >=1 but our check only regex, so ok)
+KEY = "a"*64
 BAD_KEY = "short"
 
 def test_valid_key():

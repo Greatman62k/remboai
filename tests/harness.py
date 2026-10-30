@@ -11,13 +11,13 @@ import httpx
 from app import db
 from app.config import Settings
 from app.ctx import Ctx
-from app.llm import Extractor
+from app.ai.llm import Extractor
 from app.main import app
 from app.mpesa import Daraja
-from app.telegram import Channels, Telegram
-from app.vision import StyleMatcher
-from app.voice import Transcriber
-from app.whatsapp import WhatsApp
+from app.channels.telegram import Channels, Telegram
+from app.ai.vision import StyleMatcher
+from app.ai.voice import Transcriber
+from app.channels.whatsapp import WhatsApp
 
 NBO = ZoneInfo("Africa/Nairobi")
 PID, SECRET = "PID1", "s3cret"
@@ -28,28 +28,31 @@ class Outside:
 
     def __init__(self):
         self.sent: list[dict] = []
+        self.refused: list[dict] = []
         self.script: dict[str, dict] = {}
-        self.down: set[str] = set()      # hostnames that return 503
-        self.calls: list[str] = []       # hostnames of model calls
-        self.asr: list[dict] = []        # speech-recognition requests received
+        self.down: set[str] = set()
+        self.calls: list[str] = []
+        self.asr: list[dict] = []
         self.asr_text = "nataka fade kesho mchana"
         self.asr_down = False
-        self.media_gone = False          # Meta no longer has the voice note
+        self.media_gone = False
         self.media_size = 20_000
         self.media_mime = "audio/ogg; codecs=opus"
-        self.vision: list[dict] = []     # image requests the model received
+        self.vision: list[dict] = []
         self.vision_answer = {"service": "Fade", "style": "low skin fade", "confidence": 0.9}
-        self.tg: list[dict] = []         # Telegram Bot API calls: {"method", **payload}
-        self.tg_updates: list[dict] = []   # what getUpdates will hand out
-        self.stk: list[dict] = []        # STK pushes Daraja received
-        self.stk_fails = False           # make Daraja refuse pushes
-        self.queries: dict[str, dict] = {}   # checkout id -> status query answer (absent: "still processing")
+        self.tg: list[dict] = []
+        self.tg_updates: list[dict] = []
+        self.stk: list[dict] = []
+        self.stk_fails = False
+        self.queries: dict[str, dict] = {}
+        self.refuse_text = False
+        self.refuse_all = False
 
     def handler(self, req: httpx.Request) -> httpx.Response:
         host = req.url.host
         if host == "api.telegram.org":
             return self.telegram(req)
-        if host == "graph.facebook.com" and req.method == "GET":        # media lookup: where is voice note X?
+        if host == "graph.facebook.com" and req.method == "GET":
             if self.media_gone:
                 return httpx.Response(404, json={"error": {"code": 100}})
             return httpx.Response(200, json={"url": f"https://lookaside.fbsbx.com/m/{req.url.path.rsplit('/', 1)[1]}", "mime_type": self.media_mime,
@@ -62,10 +65,14 @@ class Outside:
             self.asr.append({"auth": req.headers["authorization"], "type": req.headers["content-type"], "lang": req.url.params.get("lang"), "bytes": req.content})
             return httpx.Response(200, json={"text": self.asr_text})
         if host == "graph.facebook.com":
-            self.sent.append(json.loads(req.content) | {"_auth": req.headers["authorization"]})
+            sent = json.loads(req.content) | {"_auth": req.headers["authorization"]}
+            if self.refuse_all or (self.refuse_text and sent.get("type") == "text"):
+                self.refused.append(sent)
+                return httpx.Response(400, json={"error": {"code": 131047, "message": "Re-engagement message"}})
+            self.sent.append(sent)
             return httpx.Response(200, json={"messages": [{"id": "x"}]})
         if req.url.path.endswith("/chat/completions") and isinstance(json.loads(req.content)["messages"][-1]["content"], list):
-            body = json.loads(req.content)                       # a photo: content is a list of text and image parts
+            body = json.loads(req.content)
             image = next(p for p in body["messages"][-1]["content"] if p["type"] == "image_url")["image_url"]["url"]
             self.vision.append({"host": host, "model": body["model"], "image": image, "prompt": body["messages"][0]["content"]})
             if host in self.down:
@@ -84,7 +91,7 @@ class Outside:
         return httpx.Response(404)
 
     def telegram(self, req: httpx.Request) -> httpx.Response:
-        if req.url.path.startswith("/file/bot"):                    # a voice note or photo being downloaded
+        if req.url.path.startswith("/file/bot"):
             return httpx.Response(200, content=b"TG-FILE-BYTES")
         method = req.url.path.rsplit("/", 1)[1]
         body = json.loads(req.content or b"{}")

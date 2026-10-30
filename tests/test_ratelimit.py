@@ -68,3 +68,17 @@ async def test_no_redis_fallback():
     r = RateLimiter(None, S())
     assert await r.check_sender("sid", "2547") == "ok"
     assert await r.llm_allowed("salon") is True
+
+
+@pytest.mark.asyncio
+async def test_zero_means_no_limit():
+    redis = FakeRedis()
+    class S:
+        rate_burst = 0
+        rate_window_s = 60
+        rate_daily = 0
+        llm_daily_per_salon = 0
+    r = RateLimiter(redis, S())
+    for _ in range(5):
+        assert await r.check_sender("sid", "2547") == "ok"
+        assert await r.llm_allowed("salon") is True

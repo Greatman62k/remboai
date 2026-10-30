@@ -73,7 +73,7 @@ def test_a_follow_up_answer_in_the_middle_of_a_booking_is_not_screened():
         out.script["fade"] = {"intent": "book", "service": "Fade", "date": None, "window": None}
         out.script["friday afternoon"] = {"intent": "book", "service": None, "date": open_day().isoformat(), "window": "afternoon"}
         async with client() as c:
-            await post(c, payload(A, "fade", mid="m1"))                    # the bot now asks when
+            await post(c, payload(A, "fade", mid="m1"))
             before = len(out.calls)
             await post(c, payload(A, "friday afternoon", mid="m2"))
             assert len(out.calls) == before + 1
@@ -97,9 +97,9 @@ def test_routing_sends_only_strong_salon_words_to_the_paid_model():
     r = lambda text, state="idle": route(text, MENU, state, D)
     assert r("fade kesho") == "model" and r("silk press") == "model" and r("nataka kusuka knotless") == "model" and r("I need a haircut") == "model"
     assert r("hi") == "rules" and r("niaje") == "rules" and r("kesho saa nane") == "rules" and r("how much") == "rules" and r("saa ngapi mnafunga") == "rules"
-    assert r("what is the price of Bitcoin today") == "rules"          # free: the keyword rules answer with the price list, no model call
+    assert r("what is the price of Bitcoin today") == "rules"
     assert r("nipee loan ya mia tano") == "off" and r("nifanyie homework ya math") == "off" and r("I am hungry") == "off"
-    assert r("when are you open") == "model" and r("I want to change my appointment") == "model"   # rules cannot read it, but it has specific words
+    assert r("when are you open") == "model" and r("I want to change my appointment") == "model"
     assert r("anything at all", state="asking") == "model"
 
 

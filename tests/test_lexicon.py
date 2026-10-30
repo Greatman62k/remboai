@@ -17,7 +17,7 @@ MENU = [{"name": "Fade", "aliases": [], "price_kes": 500}]
 
 def test_the_shipped_file_loads_cleanly_and_its_examples_behave():
     lx = load()
-    assert lx.problems == [] and lx.removed == []          # the shipped file is already clean
+    assert lx.problems == [] and lx.removed == []
     for m in lx.examples("on_topic"):
         assert route(guard.clean(m), MENU, "idle", D) != "off", m
     for m in lx.examples("off_topic"):
@@ -38,8 +38,8 @@ def test_markers_make_word_starts_and_repeated_letters_and_phrases_match_flexibl
     p = lx.pattern("x")
     for text in ("nyoaji", "NYOA", "hiii", "lineup? no: line   up", "hows it going", "how's it going"):
         assert p.search(text), text
-    assert not p.search("hit") and not p.search("pinyoa")                    # whole words only
-    assert build({}).pattern("anything").search("fade") is None              # an empty category matches nothing
+    assert not p.search("hit") and not p.search("pinyoa")
+    assert build({}).pattern("anything").search("fade") is None
 
 
 def test_new_words_extend_the_screen_without_touching_code():
@@ -73,13 +73,13 @@ def test_the_checker_script_accepts_the_shipped_file_and_rejects_a_bad_one(tmp_p
 
 def test_generic_words_are_refused_in_the_lists_where_they_would_do_harm():
     lx = build({"services_styles": {"en": ["spa"], "sw": ["dawa", "fundi", "weka"], "sheng": ["top", "dem", "baba", "kutengeneza"]},
-                "hours_cancel_words": {"en": ["open"], "sw": [], "sheng": []},                       # fine here: it only reaches the free rules
+                "hours_cancel_words": {"en": ["open"], "sw": [], "sheng": []},
                 "morning": {"en": ["morning", "am", "pm"], "sw": [], "sheng": []},
                 "sw_markers": {"en": [], "sw": ["kesho"], "sheng": ["fresh", "maze"]},
                 "greetings": {"en": ["hi+", "evening"], "sw": ["niaje"], "sheng": ["sema"]}})
     assert lx.entries("services_styles") == ["spa"]
     assert lx.entries("hours_cancel_words") == ["open"]
-    assert lx.entries("morning") == ["morning"]                    # "I am" must never read as morning
+    assert lx.entries("morning") == ["morning"]
     assert lx.entries("sw_markers") == ["kesho", "maze"] and lx.entries("greetings") == ["hi+", "niaje"]
 
 

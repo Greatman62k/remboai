@@ -10,7 +10,7 @@ import pytest
 
 from app import db
 from app.main import app
-from app.whatsapp import WhatsApp
+from app.channels.whatsapp import WhatsApp
 
 DSN = os.environ.get("TEST_DATABASE_URL")
 needs_db = pytest.mark.skipif(not DSN, reason="needs TEST_DATABASE_URL")
@@ -29,6 +29,18 @@ def text_payload(text="nataka fade", mid="wamid.1"):
 
 def web(app_):
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app_), base_url="http://t")
+
+
+def test_responses_carry_baseline_security_headers():
+    async def run():
+        app.state.settings = SETTINGS
+        async with web(app) as c:
+            r = await c.get("/health")
+            assert r.status_code == 200
+            assert r.headers["x-content-type-options"] == "nosniff"
+            assert r.headers["x-frame-options"] == "DENY"
+            assert r.headers["referrer-policy"] == "no-referrer"
+    asyncio.run(run())
 
 
 def test_verification_handshake_and_forged_requests():
@@ -56,8 +68,8 @@ def test_a_message_is_processed_exactly_once_even_if_meta_redelivers():
         out.script["prices?"] = {"intent": "price_list"}
         async with client() as c:
             assert (await post(c, payload("254712345678", "prices?", mid="wamid.7"))).status_code == 200
-            assert (await post(c, payload("254712345678", "prices?", mid="wamid.7"))).status_code == 200   # Meta redelivers the same id
-        assert out.calls == [] and len(out.sent) == 1                 # "prices?" is read by the free keyword rules: no model call, and one reply
+            assert (await post(c, payload("254712345678", "prices?", mid="wamid.7"))).status_code == 200
+        assert out.calls == [] and len(out.sent) == 1
         assert out.sent[0]["to"] == "254712345678" and out.sent[0]["_auth"] == "Bearer TOK" and "Fade" in out.sent[0]["text"]["body"] and "KES 500" in out.sent[0]["text"]["body"]
         await pool.close()
     asyncio.run(run())
@@ -71,10 +83,10 @@ def test_migrations_apply_once_and_in_order(tmp_path):
         (tmp_path / "001_a.sql").write_text("CREATE TABLE a (x int);")
         (tmp_path / "002_b.sql").write_text("CREATE TABLE b (y int);")
         assert await db.migrate(pool, tmp_path) == ["001_a.sql", "002_b.sql"]
-        assert await db.migrate(pool, tmp_path) == []                        # nothing is applied twice
+        assert await db.migrate(pool, tmp_path) == []
         (tmp_path / "003_bad.sql").write_text("CREATE TABLE c (z int); SELECT * FROM missing_table;")
         with pytest.raises(Exception):
             await db.migrate(pool, tmp_path)
-        assert await pool.fetchval("SELECT to_regclass('c')") is None        # a failed migration leaves no half-applied table
+        assert await pool.fetchval("SELECT to_regclass('c')") is None
         await pool.close()
     asyncio.run(run())

@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-from app.budget import Budget
+from app.ai.budget import Budget
 from tests.harness import PID, app, build, client, open_day, payload, post, tg_update, post_tg
 
 DSN = os.environ.get("TEST_DATABASE_URL")
@@ -40,8 +40,8 @@ def test_past_the_text_ceiling_the_model_is_not_called_and_keyword_rules_still_a
             await post(c, payload(A, "fade kesho", mid="m1"))
             await post(c, payload(A, "hello there", mid="m2"))
             await post(c, payload("254711000002", "hi, i need a haircut", mid="m3"))
-        assert len(out.calls) == 1                                  # only the first message reached the model
-        assert len(out.bodies(A)) == 2 and len(out.bodies("254711000002")) == 1   # everyone still got an answer
+        assert len(out.calls) == 1
+        assert len(out.bodies(A)) == 2 and len(out.bodies("254711000002")) == 1
         await pool.close()
     asyncio.run(run())
 
@@ -56,7 +56,7 @@ def test_past_the_photo_ceiling_the_customer_gets_the_menu_and_no_model_call_is_
             await post(c, photo(A, "p1"))
             await post(c, photo("254711000002", "p2"))
         assert len(out.vision) == 1
-        assert "Fade" in out.bodies("254711000002")[-1]             # the menu, so the customer can type what they want
+        assert "Fade" in out.bodies("254711000002")[-1]
         await pool.close()
     asyncio.run(run())
 
@@ -76,15 +76,22 @@ def test_past_the_voice_ceiling_the_customer_is_asked_to_type_and_the_speech_ser
     asyncio.run(run())
 
 
+def test_an_unknown_kind_is_denied_not_given_a_free_pass():
+    async def run():
+        b = Budget(None, __import__("types").SimpleNamespace(llm_daily_limit=5, vision_daily_limit=5, voice_daily_limit=5))
+        assert await b.take("telepathy") is False
+    asyncio.run(run())
+
+
 @needs_db
 def test_one_person_cannot_send_more_than_the_daily_message_limit():
     async def run():
         pool, out, salon = await build(DSN, per_sender_daily_limit=3, rate_limit_per_min=100)
         async with client() as c:
             for i in range(3):
-                await post_tg(c, tg_update(100 + i, 5002, "hi"))             # what three messages get answered with
+                await post_tg(c, tg_update(100 + i, 5002, "hi"))
             for i in range(6):
                 await post_tg(c, tg_update(i + 1, 5001, "hi"))
-        assert len(out.tg_to("5001")) == len(out.tg_to("5002")) > 0          # the 4th to 6th messages got no answer
+        assert len(out.tg_to("5001")) == len(out.tg_to("5002")) > 0
         await pool.close()
     asyncio.run(run())

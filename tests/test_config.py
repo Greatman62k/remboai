@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def test_inline_comments_are_not_part_of_a_value(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@db/x")
-    monkeypatch.setenv("PUBLIC_BASE_URL", "# https://your-domain, reachable by Safaricom")      # what Docker passes for `KEY=   # note`
+    monkeypatch.setenv("PUBLIC_BASE_URL", "# https://your-domain, reachable by Safaricom")
     monkeypatch.setenv("MPESA_ENV", "sandbox   # sandbox | production")
     monkeypatch.setenv("TELEGRAM_MODE", "auto  # auto | poll | webhook")
     monkeypatch.setenv("ASR_URL", "https://x.modal.run/transcribe")
@@ -20,7 +20,16 @@ def test_a_hash_inside_a_value_is_kept(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgresql://u:pa#ss@db/x")
     monkeypatch.setenv("LLM_API_KEY", "abc#def")
     s = Settings(_env_file=None)
-    assert s.database_url == "postgresql://u:pa#ss@db/x" and s.llm_api_key == "abc#def"        # only ` #` after whitespace starts a comment
+    assert s.database_url == "postgresql://u:pa#ss@db/x" and s.llm_api_key == "abc#def"
+
+
+def test_a_comment_only_value_falls_back_to_the_default(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@db/x")
+    monkeypatch.setenv("HOLD_MINUTES", "  # hold window in minutes")
+    monkeypatch.setenv("LOG_LEVEL", "")
+    s = Settings(_env_file=None)
+    assert s.hold_minutes == 10
+    assert s.log_level == "INFO"
 
 
 def test_the_example_env_file_has_no_value_lines_with_trailing_comments():
