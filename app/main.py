@@ -8,27 +8,27 @@ from uuid import UUID
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from . import hardening, logs
-from .budget import Budget
+from .ai.budget import Budget
 from .config import get_settings
 from .ctx import Ctx
 from .db import make_pool, migrate
 from .hardening import safe_equals, startup_checks
 from .inbound import inbound
-from .llm import Extractor
-from .mpesa import Daraja
-from .payments import process_callback, run_sweeper
-from .telegram import Channels, Telegram, parse_update, run_poller
-from .vision import StyleMatcher
-from .voice import Transcriber
-from .whatsapp import Message, WhatsApp, explain, mask, parse_failures, parse_messages, verify_signature
-from .ownerapi import router as owner_api
+from .ai.llm import Extractor
+from .mpesa import Daraja, parse_callback
+from .payments import run_sweeper
+from .channels.telegram import Channels, Telegram, parse_update, run_poller
+from .ai.vision import StyleMatcher
+from .ai.voice import Transcriber
+from .channels.whatsapp import Message, WhatsApp, explain, mask, parse_failures, parse_messages, verify_signature
+
 from .webhook_jobs import QueueCapacityError, enqueue_jobs, webhook_worker, list_dead_jobs, requeue_dead_job, purge_expired_data
 from .metrics import observe_request, render as metrics_render, update_queue_depth
-from .onboarding import verify_onboarding_schema, create_setup_invite, get_setup_invite, csrf_for_token, parse_setup_form, complete_setup_invite, setup_headers, setup_form, setup_complete_page, setup_unavailable_page, InviteConflict, InviteUnavailable, OnboardingError
+
 from .token_crypto import verify_stored_tokens
 
 logs.setup()
@@ -43,11 +43,6 @@ local n = redis.call('INCR', KEYS[1])
 if n == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
 return n
 """
-
-class OpsInviteRequest(BaseModel):
-    wa_phone_number_id: str = Field(min_length=1, max_length=128)
-    wa_business_number: str = Field(min_length=7, max_length=32)
-    expires_hours: int | None = Field(default=None, ge=1, le=30*24)
 
 async def _check_ops_key(ctx, provided: str | None, request: Request) -> None:
     expected = getattr(ctx.settings, "ops_api_key", "") or ""
@@ -78,7 +73,6 @@ async def _check_ops_key(ctx, provided: str | None, request: Request) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     s = get_settings()
-    # re-apply log config once env is loaded so LOG_LEVEL/LOG_FORMAT/LOG_FILE take effect with redaction
     try:
         logs.setup(getattr(s, "log_level", "INFO"), getattr(s, "log_format", "text"), getattr(s, "log_file", ""))
     except Exception:
@@ -87,7 +81,6 @@ async def lifespan(app: FastAPI):
     pool = await make_pool(s.database_url, max_size=s.db_pool_max)
     for name in await migrate(pool):
         log.info("applied migration %s", name)
-    await verify_onboarding_schema(pool)
     await verify_stored_tokens(pool, s)
     http = httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=3.0))
     wa = WhatsApp(http, s.graph_version)
@@ -107,7 +100,7 @@ async def lifespan(app: FastAPI):
                 pass
             redis_client = None
     budget = Budget(pool, s)
-    llm = Extractor(http, s, budget)
+    llm = Extractor(http, s, budget, pool)
     tg = Telegram(http, s.telegram_bot_token) if s.telegram_bot_token else None
     app.state.ctx = Ctx(s, pool, Channels(wa, tg), llm, redis_client, Daraja(http, s), Transcriber(http, s, budget), StyleMatcher(http, s, llm.endpoints, budget))
     app.state.redis = redis_client
@@ -159,6 +152,11 @@ async def _retention_loop(ctx):
             await asyncio.sleep(24*3600)
             await purge_expired_data(ctx.pool, webhook_days=ctx.settings.webhook_retention_days, inbound_days=ctx.settings.inbound_retention_days)
             try:
+                from .lifecycle import sweep
+                await sweep(ctx)
+            except Exception:
+                log.exception("lifecycle sweep failed")
+            try:
                 from .reminders import run_reminders
                 await run_reminders(ctx)
             except Exception:
@@ -170,7 +168,23 @@ async def _retention_loop(ctx):
 
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 hardening.install(app)
-app.include_router(owner_api)
+
+_METRICS_EXACT = {"/health", "/ready", "/metrics", "/webhook", "/telegram/webhook",
+                  "/ops/payment-reviews", "/ops/unmatched-payments", "/ops/webhook-jobs/dead"}
+_METRICS_PREFIXES = (("/mpesa/callback/", "/mpesa/callback/{secret}"),
+                     ("/ops/webhook-jobs/", "/ops/webhook-jobs/{job_id}"),
+                     ("/ops/payment-reviews/", "/ops/payment-reviews/{review_id}"),
+                     ("/ops/unmatched-payments/", "/ops/unmatched-payments/{payment_id}"))
+
+def route_name(path: str) -> str:
+    """Templated route for metrics labels. Raw paths must never become labels: /mpesa/callback/<secret>
+    carries a secret, and anything else unlisted is scanner noise."""
+    if path in _METRICS_EXACT:
+        return path
+    for prefix, name in _METRICS_PREFIXES:
+        if path.startswith(prefix):
+            return name
+    return "other"
 
 @app.middleware("http")
 async def metrics_middleware(request: Request, call_next):
@@ -178,34 +192,21 @@ async def metrics_middleware(request: Request, call_next):
     start = _t.time()
     response = await call_next(request)
     try:
-        route = request.url.path
-        if route.startswith("/metrics"):
-            route = "/metrics"
-        elif route.startswith("/health") or route.startswith("/ready"):
-            route = "/health"
-        observe_request(request.method, route, response.status_code, _t.time() - start)
+        observe_request(request.method, route_name(request.url.path), response.status_code, _t.time() - start)
     except Exception:
         pass
     return response
-WEB = Path(__file__).parent / "web"
-PAGE_HEADERS = {"Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'", "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY"}
-
-@app.get("/owner")
-@app.get("/owner/login/{token}")
-async def owner_page(token: str = ""):
-    return FileResponse(WEB / "owner.html", headers=PAGE_HEADERS)
-
-@app.get("/owner/static/{name}")
-async def owner_static(name: str):
-    files = {"owner.js": "text/javascript", "owner.css": "text/css"}
-    ctype = files.get(name)
-    if ctype is None:
-        raise HTTPException(404)
-    return FileResponse(WEB / name, media_type=ctype, headers=PAGE_HEADERS)
-
 @app.get("/health")
 async def health():
     return {"ok": True}
+
+@app.get("/model-info")
+async def model_info(request: Request):
+    """Which model backend is active, for open-weights prize verification."""
+    s = request.app.state.ctx.settings
+    return {"backend": getattr(s, "llm_backend", "primary"), "model": s.llm_model,
+            "fallback_backend": getattr(s, "llm_fallback_backend", "") or None, "fallback_model": s.llm_fallback_model or None,
+            "quantization": getattr(s, "llm_quantization", "") or None, "host": getattr(s, "llm_host", "") or None}
 
 @app.get("/ready")
 async def ready(request: Request):
@@ -223,20 +224,13 @@ async def verify(request: Request):
         return PlainTextResponse(q.get("hub.challenge", ""))
     raise HTTPException(403)
 
-async def handle(app: FastAPI, msg: Message) -> None:
-    await inbound(app.state.ctx, msg)
-
 async def _drain(ctx):
-    from .webhook_jobs import claim_next, process_job
+    from .webhook_jobs import claim_next, run_claimed
     while True:
         job = await claim_next(ctx.pool)
         if job is None:
             break
-        try:
-            await process_job(ctx, job)
-        except Exception:
-            from .webhook_jobs import retry_job
-            await retry_job(ctx.pool, job, Exception("drain failed"))
+        await run_claimed(ctx, job)
 
 @app.post("/webhook")
 async def receive(request: Request, bg: BackgroundTasks):
@@ -255,7 +249,6 @@ async def receive(request: Request, bg: BackgroundTasks):
     events = []
     for msg in parse_messages(payload):
         events.append((msg.id, {"id": msg.id, "sender": msg.sender, "phone_number_id": msg.phone_number_id, "kind": msg.kind, "text": msg.text, "media_id": msg.media_id, "name": msg.name, "reply_id": msg.reply_id, "wa_id": msg.sender}))
-        bg.add_task(handle, request.app, msg)
     if events:
         try:
             await enqueue_jobs(request.app.state.pool, "whatsapp", events, max_pending=request.app.state.settings.webhook_max_pending, max_pending_per_sender=request.app.state.settings.webhook_max_pending_per_sender)
@@ -280,13 +273,12 @@ async def mpesa_callback(secret: str, request: Request, bg: BackgroundTasks):
     except ValueError:
         payload = None
     if isinstance(payload, dict):
+        out = parse_callback(payload)
         try:
-            from app.mpesa import parse_callback
-            out = parse_callback(payload)
             await request.app.state.pool.execute("INSERT INTO mpesa_callbacks (checkout_request_id, body) VALUES ($1, $2)", out.checkout_request_id if out else None, payload)
         except Exception:
             pass
-        event_id = hashlib.sha256(raw).hexdigest()
+        event_id = out.checkout_request_id if out and out.checkout_request_id else hashlib.sha256(raw).hexdigest()
         try:
             await enqueue_jobs(request.app.state.pool, "mpesa", [(event_id, payload)], max_pending=request.app.state.settings.webhook_max_pending, max_pending_per_sender=request.app.state.settings.webhook_max_pending_per_sender)
         except QueueCapacityError:
@@ -294,7 +286,7 @@ async def mpesa_callback(secret: str, request: Request, bg: BackgroundTasks):
         except Exception:
             log.exception("enqueue mpesa failed")
             raise HTTPException(500)
-        await _drain(request.app.state.ctx)
+        bg.add_task(_drain, request.app.state.ctx)
     return {"ResultCode": 0, "ResultDesc": "Accepted"}
 
 @app.post("/telegram/webhook")
@@ -320,7 +312,6 @@ async def telegram_webhook(request: Request, bg: BackgroundTasks):
             await enqueue_jobs(request.app.state.pool, "telegram", events, max_pending=request.app.state.settings.webhook_max_pending, max_pending_per_sender=request.app.state.settings.webhook_max_pending_per_sender)
         except QueueCapacityError:
             raise HTTPException(429)
-        bg.add_task(handle, request.app, msg)
         bg.add_task(_drain, request.app.state.ctx)
     return {"ok": True}
 
@@ -331,26 +322,33 @@ async def payment_reviews(request: Request, x_ops_key: str | None = Header(defau
     rows = await ctx.pool.fetch("SELECT * FROM payment_reviews WHERE status IN ('pending_review','refund_due') ORDER BY created_at")
     return {"items": [dict(r) for r in rows]}
 
-@app.post("/ops/salon-setup-invites")
-async def create_invite(body: OpsInviteRequest, request: Request, x_ops_key: str | None = Header(default=None)):
-    ctx = request.app.state.ctx
-    await _check_ops_key(ctx, x_ops_key, request)
-    try:
-        token, invite = await create_setup_invite(ctx.pool, body.wa_phone_number_id, body.wa_business_number, body.expires_hours or ctx.settings.salon_setup_invite_hours if hasattr(ctx.settings, 'salon_setup_invite_hours') else 168)
-    except InviteConflict as e:
-        raise HTTPException(409, str(e))
-    except OnboardingError as e:
-        raise HTTPException(422, str(e))
-    base = ctx.settings.public_base_url.rstrip('/') if ctx.settings.public_base_url else ''
-    url = f"{base}/setup/{token}" if base else f"/setup/{token}"
-    return {"token": token, "url": url, "expires_at": invite.expires_at.isoformat()}
-
 @app.get("/ops/unmatched-payments")
 async def unmatched_payments(request: Request, x_ops_key: str | None = Header(default=None)):
     ctx = request.app.state.ctx
     await _check_ops_key(ctx, x_ops_key, request)
     rows = await ctx.pool.fetch("SELECT * FROM unmatched_payments WHERE status='open' ORDER BY created_at DESC")
     return {"items": [dict(r) for r in rows]}
+
+class UnmatchedResolveBody(BaseModel):
+    resolution_note: str | None = None
+
+@app.post("/ops/unmatched-payments/{payment_id}/resolve")
+async def resolve_unmatched(payment_id: str, body: UnmatchedResolveBody, request: Request, x_ops_key: str | None = Header(default=None)):
+    """Close an unmatched payment once the money has been dealt with (refunded or matched by hand)."""
+    ctx = request.app.state.ctx
+    await _check_ops_key(ctx, x_ops_key, request)
+    try:
+        uid = UUID(payment_id)
+    except ValueError:
+        raise HTTPException(422, "Invalid unmatched payment ID")
+    row = await ctx.pool.fetchrow("SELECT status FROM unmatched_payments WHERE id=$1::uuid", str(uid))
+    if row is None:
+        raise HTTPException(404, "Unmatched payment not found")
+    if row["status"] != "open":
+        raise HTTPException(409, "Unmatched payment has already been resolved")
+    await ctx.pool.execute("UPDATE unmatched_payments SET status='resolved', resolution_note=$2, resolved_at=now() WHERE id=$1::uuid",
+                           str(uid), body.resolution_note)
+    return {"id": str(uid), "status": "resolved"}
 
 class ResolveBody(BaseModel):
     action: str = Field(pattern="^(refunded|closed_no_refund)$")
@@ -380,45 +378,6 @@ async def dead_jobs(request: Request, x_ops_key: str | None = Header(default=Non
     ctx = request.app.state.ctx
     await _check_ops_key(ctx, x_ops_key, request)
     return {"items": await list_dead_jobs(ctx.pool)}
-
-@app.get("/setup/{token}")
-async def setup_page(token: str, request: Request):
-    ctx = request.app.state.ctx
-    invite = await get_setup_invite(ctx.pool, token)
-    if invite is None:
-        from fastapi.responses import HTMLResponse
-        return HTMLResponse(setup_unavailable_page(), status_code=404, headers=setup_headers())
-    from fastapi.responses import HTMLResponse
-    return HTMLResponse(setup_form(token, invite.wa_business_number), headers=setup_headers())
-
-@app.post("/setup/{token}")
-async def setup_submit(token: str, request: Request):
-    ctx = request.app.state.ctx
-    invite = await get_setup_invite(ctx.pool, token)
-    if invite is None:
-        from fastapi.responses import HTMLResponse
-        return HTMLResponse(setup_unavailable_page(), status_code=404, headers=setup_headers())
-    form_data = await request.form()
-    form = dict(form_data)
-    if form.get("csrf") != csrf_for_token(token):
-        raise HTTPException(403, "Invalid CSRF token")
-    try:
-        setup = parse_setup_form(form, invite.wa_business_number)
-    except OnboardingError as e:
-        from fastapi.responses import HTMLResponse
-        return HTMLResponse(setup_form(token, invite.wa_business_number, error=str(e), values=form), status_code=422, headers=setup_headers())
-    try:
-        salon = await complete_setup_invite(ctx.pool, token, setup)
-    except InviteConflict as e:
-        from fastapi.responses import HTMLResponse
-        return HTMLResponse(setup_form(token, invite.wa_business_number, error=str(e), values=form), status_code=409, headers=setup_headers())
-    except OnboardingError as e:
-        from fastapi.responses import HTMLResponse
-        if not await get_setup_invite(ctx.pool, token):
-            return HTMLResponse(setup_unavailable_page(), status_code=404, headers=setup_headers())
-        return HTMLResponse(setup_form(token, invite.wa_business_number, error=str(e), values=form), status_code=422, headers=setup_headers())
-    from fastapi.responses import HTMLResponse
-    return HTMLResponse(setup_complete_page(salon), headers=setup_headers())
 
 @app.post("/ops/webhook-jobs/{job_id}/retry")
 async def retry_job(request: Request, job_id: str, x_ops_key: str | None = Header(default=None)):

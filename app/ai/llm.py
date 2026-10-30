@@ -15,8 +15,8 @@ from typing import Literal
 import httpx
 from pydantic import BaseModel, ValidationError
 
-from . import lexicon, smalltalk
-from .timeparse import parse_day, parse_time, parse_window
+from app import lexicon, smalltalk
+from app.timeparse import parse_day, parse_time, parse_window
 
 log = logging.getLogger("rembo.llm")
 
@@ -37,7 +37,7 @@ class Extraction(BaseModel):
 @dataclass
 class Result:
     ex: Extraction
-    source: str        # "model" | "keywords"
+    source: str
     model: str = ""
     ms: int = 0
 
@@ -142,15 +142,63 @@ def rule_extract(text: str, today: date, services: list[dict], state: str = "idl
     return Extraction(intent="other", language=lang)
 
 
+_BREAKER: dict[str, dict] = {}
+
+
+def _breaker_open(label: str, settings) -> bool:
+    b = _BREAKER.get(label)
+    if not b:
+        return False
+    import time as _t
+    if _t.monotonic() < b["rest_until"]:
+        return True
+    return False
+
+
+def _breaker_note(label: str, ok: bool, settings) -> None:
+    import time as _t
+    trips = max(1, int(getattr(settings, "llm_breaker_trips", 3) or 3))
+    cooldown = max(1, int(getattr(settings, "llm_breaker_cooldown_s", 60) or 60))
+    b = _BREAKER.setdefault(label, {"fails": 0, "rest_until": 0.0})
+    if ok:
+        b["fails"] = 0
+        b["rest_until"] = 0.0
+    else:
+        b["fails"] += 1
+        if b["fails"] >= trips:
+            b["rest_until"] = _t.monotonic() + cooldown
+            log.error("model backend %s tripped: resting %ds after %d failures", label, cooldown, b["fails"])
+
+
+_REASONING = re.compile(r"<think>.*?</think>", re.S | re.I)
+
+
+def strip_reasoning(content: str) -> str:
+    """Reasoning text must never reach a customer or the JSON parser."""
+    return _REASONING.sub("", content or "").strip()
+
+
 class Extractor:
-    def __init__(self, http: httpx.AsyncClient, settings, budget=None):
-        self.http, self.s, self.budget = http, settings, budget
+    def __init__(self, http: httpx.AsyncClient, settings, budget=None, pool=None):
+        self.http, self.s, self.budget, self.pool = http, settings, budget, pool
 
     def endpoints(self) -> list[tuple[str, str, str, int]]:
-        e = [(self.s.llm_base_url, self.s.llm_api_key, self.s.llm_model, 2)]
+        primary = getattr(self.s, "llm_backend", "") or "primary"
+        e = [(primary, self.s.llm_base_url, self.s.llm_api_key, self.s.llm_model, 2)]
         if self.s.llm_fallback_base_url and self.s.llm_fallback_model:
-            e.append((self.s.llm_fallback_base_url, self.s.llm_fallback_api_key, self.s.llm_fallback_model, 1))
+            e.append((getattr(self.s, "llm_fallback_backend", "") or primary,
+                      self.s.llm_fallback_base_url, self.s.llm_fallback_api_key, self.s.llm_fallback_model, 1))
         return e
+
+    async def _log_call(self, backend: str, model: str, ms: int, ok: bool, tokens_in: int | None = None, tokens_out: int | None = None) -> None:
+        if self.pool is None:
+            return
+        try:
+            await self.pool.execute(
+                "INSERT INTO model_calls (backend, model, step, tokens_in, tokens_out, latency_ms, ok) VALUES ($1,$2,'extract',$3,$4,$5,$6)",
+                backend, model, tokens_in, tokens_out, ms, ok)
+        except Exception:
+            log.warning("could not log a model call")
 
     def _body(self, model: str, text: str, today: date, services: list[str], state: str, history: list[dict] | None = None) -> dict:
         body: dict = {"model": model, "messages": [
@@ -168,15 +216,26 @@ class Extractor:
         names = [s["name"] for s in services]
         if self.budget is not None and not await self.budget.take("text"):
             return Result(sanitize(rule_extract(text, today, services, state), today), "keywords")
-        for base, key, model, attempts in self.endpoints():
+        for backend, base, key, model, attempts in self.endpoints():
+            if _breaker_open(backend, self.s):
+                log.warning("model backend %s resting after failures; trying the next one", backend)
+                continue
             for attempt in range(attempts):
                 t0 = clock.perf_counter()
                 try:
                     r = await self.http.post(base.rstrip("/") + "/chat/completions", json=self._body(model, text, today, names, state, history),
                                              headers={"Authorization": f"Bearer {key}"}, timeout=self.s.llm_timeout_s)
                     r.raise_for_status()
-                    ex = sanitize(_coerce(_json_from(r.json()["choices"][0]["message"]["content"])), today)
-                    return Result(ex, "model", model, int((clock.perf_counter() - t0) * 1000))
+                    body = r.json()
+                    content = strip_reasoning(body["choices"][0]["message"]["content"])
+                    ex = sanitize(_coerce(_json_from(content)), today)
+                    ms = int((clock.perf_counter() - t0) * 1000)
+                    usage = body.get("usage") or {}
+                    _breaker_note(backend, True, self.s)
+                    await self._log_call(backend, model, ms, True, usage.get("prompt_tokens"), usage.get("completion_tokens"))
+                    return Result(ex, "model", model, ms)
                 except (httpx.HTTPError, KeyError, IndexError, ValueError, ValidationError) as e:
                     log.warning("model %s attempt %s failed: %s", model, attempt + 1, e.__class__.__name__)
+                    _breaker_note(backend, False, self.s)
+                    await self._log_call(backend, model, int((clock.perf_counter() - t0) * 1000), False)
         return Result(sanitize(rule_extract(text, today, services, state), today), "keywords")

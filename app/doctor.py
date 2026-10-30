@@ -9,10 +9,10 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from .llm import Extractor, _coerce, _json_from, sanitize
-from .vision import StyleMatcher, make_png
+from .ai.llm import Extractor, _coerce, _json_from, sanitize
+from .ai.vision import StyleMatcher, make_png
 from .mpesa import Daraja, MpesaError
-from .whatsapp import explain
+from .channels.whatsapp import explain
 
 
 @dataclass
@@ -20,14 +20,14 @@ class Check:
     name: str
     ok: bool
     detail: str
-    warn: bool = False   # a problem that does not stop a demo
+    warn: bool = False
 
 
 async def run_checks(s, http: httpx.AsyncClient, pool) -> list[Check]:
     out: list[Check] = []
     add = lambda *a, **k: out.append(Check(*a, **k))  # noqa: E731
 
-    missing = [n for n, v in (("LLM_API_KEY", s.llm_api_key),) if not v]
+    missing = [n for n, v in (("LLM_API_KEY", s.llm_api_key), ("DATABASE_URL", getattr(s, "database_url", ""))) if not v]
     add("configuration", not missing, "required values present" if not missing else "missing in .env: " + ", ".join(missing))
 
     salons = []
@@ -41,7 +41,7 @@ async def run_checks(s, http: httpx.AsyncClient, pool) -> list[Check]:
     except Exception as e:  # noqa: BLE001
         add("database", False, f"{e.__class__.__name__}: {e}")
     if not salons:
-        add("salon", False, "no salon yet: run scripts/seed_salon.py")
+        add("salon", True, "no salon yet: message the bot REGISTER to set up the first business (or run scripts/seed_salon.py)")
 
     for sl in salons:
         label = f"salon '{sl['name']}'"
@@ -75,7 +75,8 @@ async def run_checks(s, http: httpx.AsyncClient, pool) -> list[Check]:
             add("telegram", bool(me), f"bot @{me.get('username')} (id {me.get('id')})" if me else "Telegram refused the token (check TELEGRAM_BOT_TOKEN)")
             linked = any(sl.get("tg_bot_id") == f"tg:{me.get('id')}" for sl in salons) if me else False
             if me:
-                add("telegram salon", linked, "a salon is linked to this bot" if linked else f"no salon uses this bot: seed with --telegram-bot-id {me.get('id')}")
+                add("telegram salon", True, "a salon is linked to this bot" if linked else "no salon uses this bot yet: chat registration will link the first one",
+                    warn=not linked)
         except (httpx.HTTPError, ValueError) as e:
             add("telegram", False, f"could not reach Telegram: {e.__class__.__name__}")
     else:
@@ -83,7 +84,7 @@ async def run_checks(s, http: httpx.AsyncClient, pool) -> list[Check]:
 
     ext = Extractor(http, s)
     today = datetime.now(ZoneInfo("Africa/Nairobi")).date()
-    for base, key, model, _ in ext.endpoints():
+    for _backend, base, key, model, _ in ext.endpoints():
         t0 = clock.perf_counter()
         try:
             r = await http.post(base.rstrip("/") + "/chat/completions", json=ext._body(model, "nataka fade kesho mchana", today, ["Fade"], "idle"),
@@ -96,13 +97,12 @@ async def run_checks(s, http: httpx.AsyncClient, pool) -> list[Check]:
                 + ("" if good else " (unexpected: check the model name and prompt)"))
         except Exception as e:  # noqa: BLE001
             add(f"model {model}", False, f"{e.__class__.__name__}: {str(e)[:120]}")
-    # Photo matching: show the model a plain red square. If it says red, images reach it in the format we send.
     matcher = StyleMatcher(http, s, ext.endpoints)
     if not matcher.enabled:
         add("photo matching", False, "switched off (VISION_ENABLED=false or no LLM_API_KEY)", warn=True)
-    for base, key, model, _ in ext.endpoints() if matcher.enabled else []:
+    for _backend, base, key, model, _ in ext.endpoints() if matcher.enabled else []:
         try:
-            body = matcher.body(model, 'Reply with ONE JSON object: {"color": <the main colour of the image, one word>}', make_png((220, 20, 20), 256), "image/png")   # 256 px: tiny images are padded or rescaled by vision encoders
+            body = matcher.body(model, 'Reply with ONE JSON object: {"color": <the main colour of the image, one word>}', make_png((220, 20, 20), 256), "image/png")
             r = await http.post(base.rstrip("/") + "/chat/completions", json=body, headers={"Authorization": f"Bearer {key}"}, timeout=s.llm_timeout_s * 2)
             r.raise_for_status()
             answer = str(_json_from(r.json()["choices"][0]["message"]["content"]).get("color", ""))
@@ -123,7 +123,7 @@ async def run_checks(s, http: httpx.AsyncClient, pool) -> list[Check]:
         add("voice notes", False, "ASR_URL not set: voice notes get a 'please type' reply (deploy/modal_asr.py)", warn=True)
 
     try:
-        from .budget import Budget
+        from .ai.budget import Budget
         used = await Budget(pool, s).today()
         add("daily limits", True, f"text {used.get('text', 0)}/{s.llm_daily_limit or 'no limit'}, photos {used.get('vision', 0)}/{s.vision_daily_limit or 'no limit'}, "
                                   f"voice {used.get('voice', 0)}/{s.voice_daily_limit or 'no limit'} today; {s.per_sender_daily_limit or 'no'} messages per person per day")
@@ -144,6 +144,6 @@ async def run_checks(s, http: httpx.AsyncClient, pool) -> list[Check]:
         try:
             r = await http.get(s.public_base_url.rstrip("/") + "/health", timeout=5)
             add("public URL", r.status_code == 200, f"{s.public_base_url}/health answered {r.status_code}")
-        except (httpx.HTTPError, ValueError) as e:   # ValueError: not a URL at all
+        except (httpx.HTTPError, ValueError) as e:
             add("public URL", False, f"{s.public_base_url!r} is not reachable from here ({e.__class__.__name__}): it must look like https://your-domain")
     return out

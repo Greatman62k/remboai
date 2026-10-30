@@ -34,7 +34,7 @@ def day_slots(day: date, open_hours: dict, tz: ZoneInfo, duration: timedelta, st
                 end = t + duration
                 if all(end <= b0 or t >= b1 for b0, b1 in busy.get(s["id"], [])):
                     out.append(Slot(s["id"], s["name"], t, end))
-                    break  # one stylist per start time is enough
+                    break
         t += STEP
     return out
 

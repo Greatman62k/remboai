@@ -7,14 +7,14 @@ import logging
 import re
 
 _PATTERNS = [
-    (re.compile(r"/bot\d+:[A-Za-z0-9_-]{20,}"), "/bot<redacted>"),                       # Telegram bot token in a URL
-    (re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{30,}\b"), "<telegram-token>"),                    # ... or on its own
-    (re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}"), r"\1 <redacted>"),      # Authorization headers
-    (re.compile(r"\bEAA[A-Za-z0-9]{20,}"), "<meta-token>"),                                # Meta access tokens
+    (re.compile(r"/bot\d+:[A-Za-z0-9_-]{20,}"), "/bot<redacted>"),
+    (re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{30,}\b"), "<telegram-token>"),
+    (re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}"), r"\1 <redacted>"),
+    (re.compile(r"\bEAA[A-Za-z0-9]{20,}"), "<meta-token>"),
     (re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"), "<api-key>"),
-    (re.compile(r"(?i)(access_token|api[_-]?key|client_secret|app_secret|hub\.verify_token|password|passkey)=[^&\s\"']+"), r"\1=<redacted>"),
-    (re.compile(r"/mpesa/callback/[^\s\"'?]+"), "/mpesa/callback/<redacted>"),             # the callback secret is the path
-    (re.compile(r"/owner/login/[^\s\"'?]+"), "/owner/login/<redacted>"),                   # single-use sign-in token
+    (re.compile(r"(?i)(access_token|api[_-]?key|client_secret|app_secret|secret|token|hub\.verify_token|password|passkey)=[^&\s\"']+"), r"\1=<redacted>"),
+    (re.compile(r"/mpesa/callback/[^\s\"'?]+"), "/mpesa/callback/<redacted>"),
+    (re.compile(r"/owner/login/[^\s\"'?]+"), "/owner/login/<redacted>"),
 ]
 
 
@@ -29,8 +29,15 @@ class RedactingFormatter(logging.Formatter):
         return redact(super().format(record))
 
 
+_LEVELS = {"DEBUG": logging.DEBUG, "INFO": logging.INFO, "WARNING": logging.WARNING, "ERROR": logging.ERROR}
+
 def _level(name: str) -> int:
-    return {"DEBUG": logging.DEBUG, "INFO": logging.INFO, "WARNING": logging.WARNING, "ERROR": logging.ERROR}.get((name or "").upper(), logging.INFO)
+    level = _LEVELS.get((name or "").upper())
+    if level is None:
+        import sys as _sys
+        _sys.stderr.write(f"rembo: unknown LOG_LEVEL {name!r}; using INFO\n")
+        return logging.INFO
+    return level
 
 
 class JsonFormatter(logging.Formatter):
@@ -75,6 +82,6 @@ def setup(level: int | str = logging.INFO, fmt: str = "text", log_file: str = ""
             lg.addHandler(h)
         lg.setLevel(level)
         lg.propagate = False
-    for noisy in ("httpx", "httpcore"):        # they print every URL they request
+    for noisy in ("httpx", "httpcore"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 

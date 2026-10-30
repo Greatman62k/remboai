@@ -22,7 +22,7 @@ def render():
 
 async def update_queue_depth(pool):
     try:
-        n = await pool.fetchval("SELECT count(*) FROM webhook_jobs WHERE status IN ('pending','processing')")
+        n = await pool.fetchval("SELECT count(*) FROM webhook_jobs WHERE status = 'pending'")
         webhook_queue_depth.set(int(n or 0))
     except Exception:
         pass

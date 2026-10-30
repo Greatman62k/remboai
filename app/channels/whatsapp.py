@@ -10,7 +10,6 @@ import httpx
 
 log = logging.getLogger("rembo.wa")
 
-# What Meta's error codes mean in practice, so a failed delivery can be diagnosed from the log alone.
 ERROR_HINTS = {
     190: "access token expired or invalid; a temporary token lasts about 24 hours, create a permanent system-user token",
     10: "token lacks whatsapp_business_messaging permission",
@@ -41,8 +40,12 @@ def verify_signature(raw: bytes, header: str | None, app_secret: str) -> bool:
     """X-Hub-Signature-256 is 'sha256=' + HMAC-SHA256 of the exact request bytes, keyed by the app secret."""
     if not header or not header.startswith("sha256="):
         return False
-    want = hmac.new(app_secret.encode(), raw, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(want, header[7:])
+    try:
+        given = header[7:].encode("ascii")
+    except UnicodeEncodeError:
+        return False
+    want = hmac.new(app_secret.encode(), raw, hashlib.sha256).hexdigest().encode("ascii")
+    return hmac.compare_digest(want, given)
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,7 +57,7 @@ class Message:
     kind: str
     text: str
     reply_id: str | None = None
-    media_id: str | None = None   # voice notes: what to download from Meta
+    media_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

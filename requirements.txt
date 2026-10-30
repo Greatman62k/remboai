@@ -9,3 +9,4 @@ cryptography==44.0.3
 prometheus-client==0.21.0
 pytest==9.1.1
 pytest-asyncio==1.4.1
+qrcode[pil]==8.2

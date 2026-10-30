@@ -19,6 +19,27 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app import db  # noqa: E402
 
 
+def parse_till(spec: str) -> tuple[str, str, str]:
+    """HEADOFFICE:TILL -> (kind, shortcode, party_b). Raises ValueError with a usable message."""
+    parts = (spec or "").split(":")
+    if len(parts) != 2 or not all(p.strip() for p in parts):
+        raise ValueError("--till must look like HEADOFFICE:TILL, e.g. --till 0712345678:5012345")
+    return "till", parts[0].strip(), parts[1].strip()
+
+
+def parse_service(spec: str) -> tuple[str, int, int, list[str]]:
+    """NAME:PRICE_KES:MINUTES[:alias,alias] -> (name, price, minutes, aliases). Raises ValueError."""
+    parts = (spec or "").split(":")
+    if len(parts) < 3 or not parts[0].strip():
+        raise ValueError(f"--service must look like NAME:PRICE:MINUTES[:aliases], got {spec!r}")
+    try:
+        price, mins = int(parts[1]), int(parts[2])
+    except ValueError:
+        raise ValueError(f"--service price and minutes must be numbers, got {spec!r}")
+    aliases = [x.strip() for x in parts[3].split(",")] if len(parts) > 3 else []
+    return parts[0].strip(), price, mins, [a for a in aliases if a]
+
+
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--name", required=True)
@@ -31,12 +52,19 @@ async def main() -> int:
     ap.add_argument("--paybill")
     ap.add_argument("--owner", help="owner's WhatsApp number (2547...) or Telegram id (tg:123456789, send /id to the bot to find it)")
     a = ap.parse_args()
+    try:
+        till = parse_till(a.till) if a.till else None
+        services = [parse_service(s) for s in a.service]
+    except ValueError as e:
+        ap.error(str(e))
     pool = await db.make_pool(os.environ["DATABASE_URL"])
     await db.migrate(pool)
     if not (a.phone_number_id or a.telegram_bot_id):
         sys.exit("give --phone-number-id (WhatsApp) and/or --telegram-bot-id")
     wa_id, tg_id = a.phone_number_id, f"tg:{a.telegram_bot_id}" if a.telegram_bot_id else None
-    salon = await pool.fetchval("SELECT id::text FROM salons WHERE wa_phone_number_id=$1 OR tg_bot_id=$2", wa_id, tg_id)
+    salon = await pool.fetchval(
+        "SELECT id::text FROM salons WHERE (wa_phone_number_id=$1 OR tg_bot_id=$2) AND lower(name)=lower($3) ORDER BY created_at, id LIMIT 1",
+        wa_id, tg_id, a.name)
     if salon:
         await pool.execute(
             "UPDATE salons SET name=$2, deposit_kes=$3, owner_wa_id=COALESCE($4, owner_wa_id), wa_phone_number_id=COALESCE($5, wa_phone_number_id), "
@@ -45,8 +73,8 @@ async def main() -> int:
         salon = await pool.fetchval(
             "INSERT INTO salons (name, wa_phone_number_id, tg_bot_id, deposit_kes, owner_wa_id) VALUES ($1,$2,$3,$4,$5) RETURNING id::text",
             a.name, wa_id, tg_id, a.deposit, a.owner)
-    if a.till or a.paybill:
-        kind, shortcode, party_b = ("till", *a.till.split(":")) if a.till else ("paybill", a.paybill, a.paybill)
+    if till or a.paybill:
+        kind, shortcode, party_b = till if till else ("paybill", a.paybill, a.paybill)
         await pool.execute(
             "INSERT INTO salon_payment (salon_id, kind, shortcode, party_b) VALUES ($1::uuid,$2,$3,$4) "
             "ON CONFLICT (salon_id) DO UPDATE SET kind=EXCLUDED.kind, shortcode=EXCLUDED.shortcode, party_b=EXCLUDED.party_b",
@@ -73,10 +101,7 @@ async def main() -> int:
         if any(k in l for k in ("massage", "spa", "facial", "steaming", "treatment", "scrub", "tiba", "kanda", "oga")):
             return "other"
         return "hair"
-    for spec in a.service:
-        parts = spec.split(":")
-        name, price, mins = parts[0], int(parts[1]), int(parts[2])
-        aliases = [x.strip() for x in parts[3].split(",")] if len(parts) > 3 else []
+    for name, price, mins, aliases in services:
         cat = infer_category(name)
         sid = await pool.fetchval(
             "SELECT id::text FROM services WHERE salon_id=$1::uuid AND lower(name)=lower($2) ORDER BY id LIMIT 1", salon, name)
