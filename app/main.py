@@ -165,6 +165,16 @@ async def _reminder_loop(ctx):
             if getattr(ctx.settings, 'reminder_enabled', True):
                 from .reminders import run_reminders
                 await run_reminders(ctx)
+                try:
+                    from .waitlist import sweep_expired
+                    await sweep_expired(ctx)
+                except Exception:
+                    log.exception('waitlist sweep failed')
+                try:
+                    from .reminders import release_silent
+                    await release_silent(ctx)
+                except Exception:
+                    log.exception('silent release failed')
         except asyncio.CancelledError:
             raise
         except Exception:
