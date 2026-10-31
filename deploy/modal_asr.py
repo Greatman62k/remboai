@@ -21,12 +21,24 @@ image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("ffmpeg", "libsndfile1")
     .pip_install("omnilingual-asr", "fastapi[standard]")
+    .run_commands(
+        # pyarrow (pulled in by omnilingual-asr) needs NumPy 2, but the resolver lands on 1.26: lift it first
+        """pip install --upgrade "numpy>=2" """,
+        # torchaudio must be built for the same torch version and CUDA as torch itself
+        """V=$(python -c 'import torch;print(torch.__version__.split("+")[0])') && """
+        """CU=$(python -c 'import torch;print(torch.version.cuda.replace(".",""))') && """
+        """echo "torch $V cu$CU" && """
+        """pip install --no-deps --force-reinstall torchaudio==$V --index-url https://download.pytorch.org/whl/cu$CU""",
+        # fail the build, not the first voice note, if the libraries still do not load together
+        """python -c "import torch, torchaudio.functional; print('torch', torch.__version__, 'torchaudio', torchaudio.__version__)" """,
+        """python -c "from omnilingual_asr.models.inference.pipeline import ASRInferencePipeline; print('pipeline imports ok')" """,
+    )
     .env({"ASR_MODEL": MODEL})
 )
 weights = modal.Volume.from_name("rembo-asr-weights", create_if_missing=True)  # model files are downloaded once, then reused
 
 
-@app.cls(gpu="L4", image=image, volumes={"/root/.cache/fairseq2": weights}, secrets=[modal.Secret.from_name("rembo-asr")],
+@app.cls(gpu=["L4", "A10G", "T4"], image=image, volumes={"/root/.cache/fairseq2": weights}, secrets=[modal.Secret.from_name("rembo-asr")],
          scaledown_window=300, timeout=300)
 class ASR:
     @modal.enter()
@@ -51,7 +63,7 @@ class ASR:
             kwargs = {"lang": [lang]} if lang and "CTC" not in os.environ["ASR_MODEL"] else {}
             return self.pipeline.transcribe([wav], batch_size=1, **kwargs)[0]
 
-    @modal.asgi_app()
+    @modal.asgi_app(requires_proxy_auth=True)
     def web(self):
         import hmac
         import re
@@ -67,8 +79,8 @@ class ASR:
             return {"ok": True, "model": os.environ["ASR_MODEL"]}
 
         @api.post("/transcribe")
-        async def transcribe(request: Request, lang: str | None = None, authorization: str = Header("")):
-            if not hmac.compare_digest(authorization.encode(), f"Bearer {token}".encode()):
+        async def transcribe(request: Request, lang: str | None = None, x_asr_token: str = Header("")):
+            if not hmac.compare_digest(x_asr_token.encode(), token.encode()):
                 raise HTTPException(401)
             if lang is not None and not re.fullmatch(r"[a-z]{3}_[A-Z][a-z]{3}", lang):
                 raise HTTPException(422, "lang looks like swh_Latn")
