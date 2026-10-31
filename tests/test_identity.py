@@ -73,6 +73,36 @@ def test_linked_sender_meets_their_business_assistant():
 
 
 @needs_db
+def test_exact_business_name_binds_without_asking():
+    async def run():
+        pool, out, _salon = await build(DSN)
+        await pool.execute("INSERT INTO salons (name, wa_phone_number_id, slug) VALUES ('Malaika', $1, 'malaika')", PID)
+        E = "254711000005"
+        async with client() as c:
+            await post(c, payload(E, "malaika", mid="f0"))
+            assert await pool.fetchval("SELECT count(*) FROM sender_salon WHERE sender=$1", E) == 1
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
+def test_fuzzy_business_name_asks_before_binding():
+    async def run():
+        pool, out, _salon = await build(DSN)
+        await pool.execute("INSERT INTO salons (name, wa_phone_number_id, slug) VALUES ('Malaika', $1, 'malaika')", PID)
+        E = "254711000006"
+        async with client() as c:
+            await post(c, payload(E, "malaik", mid="f1"))
+            assert "Did you mean Malaika?" in out.bodies(E)[-1]
+            assert await pool.fetchval("SELECT count(*) FROM sender_salon WHERE sender=$1", E) == 0
+            await post(c, payload(E, "YES", mid="f2"))
+            assert await pool.fetchval("SELECT count(*) FROM sender_salon WHERE sender=$1", E) == 1
+            assert "Did you mean" not in out.bodies(E)[-1]
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
 def test_repeated_picker_pumping_gets_a_nudge_and_a_strike():
     async def run():
         pool, out, _salon = await build(DSN)

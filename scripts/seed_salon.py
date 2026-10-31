@@ -49,6 +49,7 @@ async def main() -> int:
     ap.add_argument("--service", action="append", required=True)
     ap.add_argument("--deposit", type=int, default=200)
     ap.add_argument("--till", help="HEADOFFICE:TILL")
+    ap.add_argument("--manual-till", action="store_true", help="till has no Daraja API: deposits go by owner one-tap confirm")
     ap.add_argument("--paybill")
     ap.add_argument("--owner", help="owner's WhatsApp number (2547...) or Telegram id (tg:123456789, send /id to the bot to find it)")
     a = ap.parse_args()
@@ -76,9 +77,9 @@ async def main() -> int:
     if till or a.paybill:
         kind, shortcode, party_b = till if till else ("paybill", a.paybill, a.paybill)
         await pool.execute(
-            "INSERT INTO salon_payment (salon_id, kind, shortcode, party_b) VALUES ($1::uuid,$2,$3,$4) "
-            "ON CONFLICT (salon_id) DO UPDATE SET kind=EXCLUDED.kind, shortcode=EXCLUDED.shortcode, party_b=EXCLUDED.party_b",
-            salon, kind, shortcode, party_b)
+            "INSERT INTO salon_payment (salon_id, kind, shortcode, party_b, manual) VALUES ($1::uuid,$2,$3,$4,$5) "
+            "ON CONFLICT (salon_id) DO UPDATE SET kind=EXCLUDED.kind, shortcode=EXCLUDED.shortcode, party_b=EXCLUDED.party_b, manual=EXCLUDED.manual",
+            salon, kind, shortcode, party_b, bool(a.manual_till and till))
     staff = []
     for name in a.stylist:
         sid = await pool.fetchval(

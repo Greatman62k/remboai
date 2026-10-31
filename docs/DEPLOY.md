@@ -9,7 +9,7 @@ Target: one small VPS (2 GB RAM is plenty), Ubuntu 24.04, a domain you control. 
 4. Create a normal sudo user and disable root and password SSH logins if you plan to keep the server after the event.
 
 ## 2. Configuration
-`cp .env.example .env` and fill it in. Beyond the WhatsApp, model and M-Pesa values you need:
+`cp .env.example .env` and fill it in, then `chmod 600 .env` so only your user can read the secrets. Beyond the WhatsApp, model and M-Pesa values you need:
 - `DOMAIN` the domain above, `PUBLIC_BASE_URL=https://<DOMAIN>`
 - `POSTGRES_PASSWORD` a long random string; `MPESA_CALLBACK_SECRET` another (`openssl rand -hex 24`)
 - `WA_ACCESS_TOKEN` must be a **permanent system-user token** (Meta Business settings > System users). A temporary token dies after about 24 hours and the bot goes silent.
@@ -33,7 +33,7 @@ docker compose -f deploy/docker-compose.prod.yml exec app python scripts/doctor.
 
 ## 5. Connect Meta and Safaricom
 - Meta developer dashboard > WhatsApp > Configuration: callback URL `https://<DOMAIN>/webhook`, verify token = `WA_VERIFY_TOKEN`, subscribe to **messages**.
-- Daraja needs nothing pasted: the callback URL is built from `PUBLIC_BASE_URL` and `MPESA_CALLBACK_SECRET`. For real money, the salon's till must be approved for production (Go Live) and `MPESA_ENV=production` set with the passkey Safaricom issues.
+- Daraja needs nothing pasted: the callback URL is built from `PUBLIC_BASE_URL` and `MPESA_CALLBACK_SECRET`. For real money, the salon's till must be approved for production (Go Live) and `MPESA_ENV=production` set with the passkey Safaricom issues. A till with no Daraja API is seeded with `--till <HEAD_OFFICE>:<TILL> --manual-till`: no STK push goes out, the customer claims amount plus M-Pesa code in chat, and the owner confirms with one tap.
 - While the WhatsApp number is a test number, only recipients added under API Setup > To (maximum 5) can chat with it.
 
 - Telegram (optional): see [TELEGRAM.md](TELEGRAM.md). Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET`; with an https `PUBLIC_BASE_URL` the webhook is registered on start.

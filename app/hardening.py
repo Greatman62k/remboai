@@ -189,6 +189,8 @@ class BodyLimit:
 _PHONE = re.compile(r"(?<![\d])(\+?)(\d{10,13})(?!\d)")
 _SENSITIVE_QUERY = re.compile(r"([?&](?:access_token|token|api[_-]?key|client_secret|password|passkey|secret|key)=)([^&\s\"']+)", re.I)
 _SENSITIVE_ASSIGNMENT = re.compile(r"((?<![A-Za-z0-9])(?:access_token|token|api[_-]?key|client_secret|password|passkey|secret|app_secret|verify_token|webhook_secret)(?![A-Za-z0-9])[\"']?\s*[:=]\s*[\"']?)([^,;\s&}\"']+)", re.I)
+_URL_CREDENTIALS = re.compile(r"(://(?:[^/\s:@]+)?:)([^@\s\"']+)(@)")
+_GENERIC_KEY = re.compile(r"(?i)(?<![A-Za-z0-9_])((?:[A-Za-z0-9_]*_)?key)([\"']?\s*[:=]\s*[\"']?)([^,;\s&}\"']+)")
 _BEARER_TOKEN = re.compile(r"\b(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}", re.I)
 
 
@@ -197,8 +199,10 @@ def mask_phones(text: str) -> str:
 
 
 def redact_log_secrets(text: str) -> str:
+    text = _URL_CREDENTIALS.sub(r"\1[REDACTED]\3", text)
     text = _SENSITIVE_QUERY.sub(r"\1[REDACTED]", text)
     text = _SENSITIVE_ASSIGNMENT.sub(r"\1[REDACTED]", text)
+    text = _GENERIC_KEY.sub(r"\1\2[REDACTED]", text)
     return _BEARER_TOKEN.sub(r"\1[REDACTED]", text)
 
 

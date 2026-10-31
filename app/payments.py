@@ -8,6 +8,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -30,8 +31,28 @@ STALE_AFTER_MIN = 6
 
 
 async def account(pool, salon_id: str) -> dict | None:
-    row = await pool.fetchrow("SELECT kind, shortcode, party_b, account_ref FROM salon_payment WHERE salon_id=$1::uuid", salon_id)
+    row = await pool.fetchrow("SELECT kind, shortcode, party_b, account_ref, manual FROM salon_payment WHERE salon_id=$1::uuid", salon_id)
     return dict(row) if row else None
+
+
+# A claimed M-Pesa code: the 10-letter reference on the customer's M-Pesa message. Letters required,
+# so a phone-number fragment never reads as a code.
+_CODE = re.compile(r"\b(?=[A-Z0-9]*[A-Z])[A-Z0-9]{10}\b")
+# A KES amount: 3 to 6 digits, never part of a longer digit run (phone and till numbers do not match).
+_AMOUNT = re.compile(r"(?<!\d)(\d{3,6})(?!\d)")
+
+MANUAL_HOLD = "30 minutes"
+
+
+def parse_claim(text: str) -> tuple[int | None, str | None, bool]:
+    """Read a manual-till claim: (amount, code, ambiguous). Ambiguous means several different
+    amounts were named; missing parts return None without flagging. Never trusted for money."""
+    upper = (text or "").upper()
+    code = (_CODE.search(upper).group(0) if _CODE.search(upper) else None)
+    found = sorted({int(m.group(1)) for m in _AMOUNT.finditer(upper)})
+    if len(found) > 1:
+        return None, code, True
+    return (found[0] if found else None), code, False
 
 
 def deposit_amount(salon: dict, service: dict) -> int:
@@ -96,6 +117,7 @@ class Settlement:
     stylist: str
     starts_at: datetime
     wa_token: str | None = None
+    settled_via: str = "callback"
 
 
 _DETAIL = (
@@ -320,8 +342,61 @@ async def reconcile(ctx) -> int:
                                   "AND checkout_request_id IS NOT NULL AND settled_at < now() - interval '1 minute' LIMIT 20"):
         await announce_missed(ctx, r["checkout_request_id"])
     await ctx.pool.execute("UPDATE payments SET status='failed', result_desc='never sent', settled_at=now() "
-                           "WHERE status='pending' AND checkout_request_id IS NULL AND created_at < now() - interval '2 minutes'")
+                           "WHERE status='pending' AND checkout_request_id IS NULL AND method='stk' AND created_at < now() - interval '2 minutes'")
     return settled
+
+
+async def record_manual_claim(pool, booking_id: str, salon_id: str, phone: str, amount: int, code: str, ref: str) -> str:
+    """File a manual-till claim as a pending payment. The hold-expiry spares bookings with a fresh
+    pending payment, and confirming is the owner's tap only: this never touches the booking."""
+    return await pool.fetchval(
+        "INSERT INTO payments (booking_id, salon_id, phone, amount_kes, method, mpesa_receipt, claim_ref) "
+        "VALUES ($1::uuid,$2::uuid,$3,$4,'manual',$5,$6) RETURNING id::text",
+        booking_id, salon_id, phone, amount, code, ref[:500])
+
+
+async def confirm_manual_claim(pool, pay_id: str) -> tuple[str, str | None]:
+    """The owner's Yes tap. Idempotent: ('confirmed', booking_id) once, ('already', booking_id) after,
+    ('stale', None) when the claim or the hold is no longer open."""
+    async with pool.acquire() as con:
+        async with con.transaction():
+            p = await con.fetchrow("SELECT booking_id, status, method FROM payments WHERE id=$1::uuid FOR UPDATE", pay_id)
+            if p is None:
+                return "stale", None
+            bid = str(p["booking_id"])
+            if p["status"] == "paid":
+                return "already", bid
+            if p["status"] != "pending" or p["method"] != "manual":
+                return "stale", bid
+            b = await con.fetchrow("SELECT status FROM bookings WHERE id=$1::uuid FOR UPDATE", bid)
+            if b is None or b["status"] != "held":
+                await con.execute("UPDATE payments SET status='failed', result_desc='booking closed before confirm', settled_at=now() WHERE id=$1::uuid", pay_id)
+                return "stale", bid
+            await con.execute("UPDATE payments SET status='paid', settled_via='manual', settled_at=now(), announced_at=NULL WHERE id=$1::uuid", pay_id)
+            await con.execute("UPDATE bookings SET status='confirmed', hold_expires_at=NULL WHERE id=$1::uuid", bid)
+            return "confirmed", bid
+
+
+async def fail_open_manual_claims(pool, booking_id: str, why: str = "booking cancelled") -> int:
+    """A cancelled or released booking drops its waiting manual claims so nothing stays pending forever."""
+    return int((await pool.execute("UPDATE payments SET status='failed', result_desc=$2, settled_at=now() "
+                                   "WHERE booking_id=$1::uuid AND status='pending' AND method='manual'", booking_id, why)).split()[-1])
+
+
+async def decline_manual_claim(pool, pay_id: str) -> tuple[str, str | None]:
+    """The owner's No tap. The booking stays held so the customer can send a better claim."""
+    async with pool.acquire() as con:
+        async with con.transaction():
+            p = await con.fetchrow("SELECT booking_id, status, method FROM payments WHERE id=$1::uuid FOR UPDATE", pay_id)
+            if p is None:
+                return "stale", None
+            bid = str(p["booking_id"])
+            if p["status"] == "paid":
+                return "already", bid
+            if p["status"] != "pending" or p["method"] != "manual":
+                return "stale", bid
+            await con.execute("UPDATE payments SET status='failed', result_desc='declined by salon', settled_at=now() WHERE id=$1::uuid", pay_id)
+            return "declined", bid
 
 
 async def sweep(ctx) -> dict:

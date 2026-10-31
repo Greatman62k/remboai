@@ -156,12 +156,14 @@ async def _cancel(ctx, salon, client, st, services, tz, now, chat, lang) -> None
     if row is None:
         await _reply(ctx, salon["id"], chat.to, st, chat, t(lang, "nothing_to_cancel"))
         return
-    await _save(ctx, salon["id"], chat.to, {})
+    cleared = {"history": st.get("history", [])}
+    await _save(ctx, salon["id"], chat.to, cleared)
     await payments.park_for_cancellation(ctx.pool, row["id"])
+    await payments.fail_open_manual_claims(ctx.pool, row["id"])
     await cancel_reminders(ctx.pool, row["id"])
     paid = await ctx.pool.fetchval("SELECT amount_kes FROM payments WHERE booking_id=$1::uuid AND status IN ('paid','needs_refund')", row["id"])
     key = "cancelled_paid" if paid else "cancelled"
-    await _reply(ctx, salon["id"], chat.to, st, chat, t(lang, key, when=when_label(row["starts_at"], tz), salon=salon["name"]))
+    await _reply(ctx, salon["id"], chat.to, cleared, chat, t(lang, key, when=when_label(row["starts_at"], tz), salon=salon["name"]))
     if paid and salon["owner_wa_id"]:
         await outbound.send_text(ctx, salon, salon["owner_wa_id"],
                                  t("en", "owner_refund", amount=paid,
@@ -186,10 +188,13 @@ async def _late_tap(ctx, salon, client, st, services, tz, now, chat, lang, reply
         await ctx.pool.execute("UPDATE bookings SET status='cancelled', cancel_message_id=$2 WHERE id=$1::uuid AND status IN ('held','confirmed')",
                                row["id"], mid)
         await payments.park_for_cancellation(ctx.pool, row["id"])
+        await payments.fail_open_manual_claims(ctx.pool, row["id"])
         await cancel_reminders(ctx.pool, row["id"])
         paid = await ctx.pool.fetchval("SELECT amount_kes FROM payments WHERE booking_id=$1::uuid AND status IN ('paid','needs_refund')", row["id"])
         key = "cancelled_paid" if paid else "cancelled"
-        await _reply(ctx, salon["id"], chat.to, st, chat, t(lang, key, when=when_label(row["starts_at"], tz), salon=salon["name"]))
+        cleared_late = {"history": st.get("history", [])}
+        await _save(ctx, salon["id"], chat.to, cleared_late)
+        await _reply(ctx, salon["id"], chat.to, cleared_late, chat, t(lang, key, when=when_label(row["starts_at"], tz), salon=salon["name"]))
         if paid and salon["owner_wa_id"]:
             await outbound.send_text(ctx, salon, salon["owner_wa_id"],
                                      t("en", "owner_refund", amount=paid, phone=mpesa.normalize_msisdn(chat.to) or chat.to, ref="",
@@ -225,13 +230,14 @@ async def _visit_tap(ctx, salon, client, st, tz, chat, lang, reply_id: str) -> N
         await _reply(ctx, salon["id"], chat.to, state, chat, t(clang, "visit_thanks", salon=row["salon_name"]))
         return
     await ctx.pool.execute("UPDATE visit_checks SET attended=false, answered_at=now() WHERE booking_id=$1::uuid", bid)
-    await _save(ctx, salon["id"], chat.to, {"history": st.get("history", [])})
+    cleared_visit = {"history": st.get("history", [])}
+    await _save(ctx, salon["id"], chat.to, cleared_visit)
     when = row["starts_at"].astimezone(tz).strftime("%a %d %b, %H:%M") if row["starts_at"] else ""
     if row["owner_wa_id"]:
         await outbound.send_text(ctx, salon, row["owner_wa_id"],
                                  t("en", "owner_visit_missed", client=row["client_name"] or row["phone"], phone="+" + row["phone"],
                                    service=row["service"], when=when))
-    await _reply(ctx, salon["id"], chat.to, st, chat, t(clang, "visit_owner_told"))
+    await _reply(ctx, salon["id"], chat.to, cleared_visit, chat, t(clang, "visit_owner_told"))
 
 
 async def find_slots(ctx, salon, service: dict, day: date, window: str | None, at: time | None, tz, now) -> tuple[list[Slot], bool]:
@@ -295,8 +301,9 @@ async def _book(ctx, salon, client, st, services, tz, now, chat, lang, ex: Extra
         await _reply(ctx, salon["id"], chat.to, st, chat, t(lang, "unknown_service", menu=menu(services)))
         return
     if getattr(ex, "far_date", False):
-        await _save(ctx, salon["id"], chat.to, {"state": "asking", "service_name": service["name"] if service else None, "history": st.get("history", [])})
-        await _reply(ctx, salon["id"], chat.to, st, chat, t(lang, "far_date"))
+        pending_far = {"state": "asking", "service_name": service["name"] if service else None, "history": st.get("history", [])}
+        await _save(ctx, salon["id"], chat.to, pending_far)
+        await _reply(ctx, salon["id"], chat.to, pending_far, chat, t(lang, "far_date"))
         return
     day = date.fromisoformat(ex.date) if ex.date else (date.fromisoformat(mem["date"]) if mem.get("date") else None)
     window = ex.window or mem.get("window")
@@ -394,7 +401,8 @@ async def _move_choice(ctx, salon, client, st, pick, tz, chat, lang) -> None:
         n = await ctx.pool.execute("UPDATE bookings SET staff_id=$2::uuid, starts_at=$3, ends_at=$4 WHERE id=$1::uuid AND status IN ('held','confirmed')",
                                    bid, pick["staff_id"], new_start, new_end)
     except asyncpg.ExclusionViolationError:
-        n = "UPDATE 0"
+        await _reply(ctx, salon["id"], chat.to, st, chat, t(lang, "late_move_taken"))
+        return
     if n == "UPDATE 0":
         await _reply(ctx, salon["id"], chat.to, st, chat, t(lang, "hold_gone"))
         return
@@ -404,8 +412,9 @@ async def _move_choice(ctx, salon, client, st, pick, tz, chat, lang) -> None:
     except Exception:
         log.exception("could not reschedule reminders for moved booking %s", bid)
     service = next((s for s in await _catalog(ctx, salon["id"]) if s["id"] == st["service_id"]), None)
-    await _save(ctx, salon["id"], chat.to, {"history": st.get("history", [])})
-    await _reply(ctx, salon["id"], chat.to, st, chat,
+    cleared_move = {"history": st.get("history", [])}
+    await _save(ctx, salon["id"], chat.to, cleared_move)
+    await _reply(ctx, salon["id"], chat.to, cleared_move, chat,
                  t(lang, "late_moved", service=service["name"] if service else "", when=when_label(new_start, tz), stylist=pick["staff_name"]))
     if salon["owner_wa_id"]:
         await outbound.send_text(ctx, salon, salon["owner_wa_id"],
@@ -414,11 +423,76 @@ async def _move_choice(ctx, salon, client, st, pick, tz, chat, lang) -> None:
 
 
 async def _prompt(ctx, salon, booking_id: str, phone: str, amount: int, lang: str) -> str:
-    """Send the M-Pesa prompt and say what happened."""
+    """Send the M-Pesa prompt and say what happened. A manual till gets no prompt:
+    the customer pays at the till and claims here."""
+    acct = await payments.account(ctx.pool, salon["id"])
+    if acct is not None and acct.get("manual"):
+        return t(lang, "till_how", amount=amount, till=acct["party_b"], salon=salon["name"])
     result = await payments.request_deposit(ctx, salon, booking_id, phone, amount, message_id=outbound.current_message_id())
     if result == "failed":
         return t(lang, "stk_failed")
     return t(lang, "stk_wait" if result == "wait" else "stk_sent", amount=amount, phone=phone)
+
+
+async def _till_claim(ctx, salon, client, st, chat, lang, text: str) -> None:
+    """A manual-till customer wrote back while held. A clean amount-plus-code claim is filed and the
+    owner is asked to confirm with one tap; anything unclear is asked again or passed to review.
+    Pasted SMS text is reference only: a claim never confirms a booking by itself."""
+    bid = st.get("booking_id")
+    row = await ctx.pool.fetchrow(
+        "SELECT b.status, sv.name AS service FROM bookings b JOIN services sv ON sv.id=b.service_id WHERE b.id=$1::uuid", bid)
+    if row is None or row["status"] != "held":
+        await _save(ctx, salon["id"], chat.to, {})
+        await _reply(ctx, salon["id"], chat.to, st, chat, t(lang, "hold_gone"))
+        return
+    amount = st.get("amount") or 0
+    pending = await ctx.pool.fetchrow(
+        "SELECT id::text, amount_kes FROM payments WHERE booking_id=$1::uuid AND status='pending' AND method='manual' ORDER BY created_at DESC LIMIT 1", bid)
+    if pending is not None:
+        await _reply(ctx, salon["id"], chat.to, st, chat, t(lang, "till_still_waiting", salon=salon["name"], amount=pending["amount_kes"]))
+        return
+    claimed, code, ambiguous = payments.parse_claim(text)
+    if ambiguous or (claimed is not None and amount and claimed != amount):
+        await _file_for_review(ctx, salon, st, chat, lang, bid, amount, claimed, code, text)
+        return
+    if claimed is None or code is None:
+        await _reply(ctx, salon["id"], chat.to, st, chat, t(lang, "till_again", amount=amount))
+        return
+    if await ctx.pool.fetchval("SELECT 1 FROM payments WHERE mpesa_receipt=$1", code):
+        await _reply(ctx, salon["id"], chat.to, st, chat, t(lang, "till_code_used"))
+        return
+    pay_id = await payments.record_manual_claim(ctx.pool, bid, salon["id"], mpesa.normalize_msisdn(chat.to) or chat.to,
+                                                claimed, code, text)
+    await ctx.pool.execute(f"UPDATE bookings SET hold_expires_at = GREATEST(hold_expires_at, now() + interval '{payments.MANUAL_HOLD}') "
+                           "WHERE id=$1::uuid AND status='held'", bid)
+    await _reply(ctx, salon["id"], chat.to, st, chat, t(lang, "till_waiting", salon=salon["name"], amount=claimed))
+    if salon.get("owner_wa_id"):
+        await _ask_owner(ctx, salon, st, chat, lang, bid, pay_id, claimed, code, text)
+
+
+async def _file_for_review(ctx, salon, st, chat, lang, bid: str, expected: int, claimed: int | None, code: str | None, text: str) -> None:
+    pay_id = await ctx.pool.fetchval(
+        "INSERT INTO payments (booking_id, salon_id, phone, amount_kes, method, status, mpesa_receipt, claim_ref) "
+        "VALUES ($1::uuid,$2::uuid,$3,$4,'manual','review',$5,$6) RETURNING id::text",
+        bid, salon["id"], mpesa.normalize_msisdn(chat.to) or chat.to, expected or claimed or 1, code, text[:500])
+    reason = "amount_mismatch" if claimed and expected and claimed != expected else "payment_unresolved"
+    await ctx.pool.execute(
+        "INSERT INTO payment_reviews (payment_id, reason, status, expected_amount, received_amount, mpesa_receipt) "
+        "VALUES ($1,$2,'pending_review',$3,$4,$5) ON CONFLICT (payment_id) DO NOTHING",
+        pay_id, reason, expected or 0, claimed, code)
+    await _reply(ctx, salon["id"], chat.to, st, chat, t(lang, "till_review", salon=salon["name"]))
+    if salon.get("owner_wa_id"):
+        await outbound.send_text(ctx, salon, salon["owner_wa_id"],
+                                 t("en", "till_owner_ask", service=st.get("service_name") or "", when=st.get("held_when") or "",
+                                   client=chat.to, amount=claimed or expected, code=code or "?", ref=text[:200]))
+
+
+async def _ask_owner(ctx, salon, st, chat, lang, bid: str, pay_id: str, claimed: int, code: str, text: str) -> None:
+    await outbound.send_buttons(
+        ctx, salon, salon["owner_wa_id"],
+        t("en", "till_owner_ask", service=st.get("service_name") or "", when=st.get("held_when") or "",
+          client=chat.to, amount=claimed, code=code, ref=text[:200]),
+        [(f"till:yes:{pay_id}", "Yes"), (f"till:no:{pay_id}", "No")])
 
 
 async def _pay(ctx, salon, st, services, tz, chat, lang, phone: str | None, msg_text: str | None = None) -> None:

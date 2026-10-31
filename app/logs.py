@@ -7,6 +7,8 @@ import logging
 import re
 
 _PATTERNS = [
+    (re.compile(r"(://(?:[^/\s:@]+)?:)([^@\s\"']+)(@)"), r"\1[REDACTED]\3"),
+    (re.compile(r"(?i)(?<![A-Za-z0-9_])((?:[A-Za-z0-9_]*_)?key)=[^&\s\"']+"), r"\1=<redacted>"),
     (re.compile(r"/bot\d+:[A-Za-z0-9_-]{20,}"), "/bot<redacted>"),
     (re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{30,}\b"), "<telegram-token>"),
     (re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}"), r"\1 <redacted>"),

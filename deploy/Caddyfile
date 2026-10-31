@@ -13,6 +13,8 @@
 }
 
 {$DOMAIN} {
+    # The M-Pesa callback secret travels in the URL: never write those requests to the access log.
+    log_skip /mpesa/callback/*
     encode gzip
     header {
         Strict-Transport-Security "max-age=31536000"
@@ -23,7 +25,7 @@
     request_body {
         max_size 256KiB
     }
-    @app path /health /webhook /mpesa/callback/* /ops/*
+    @app path /health /ready /webhook /telegram/webhook /mpesa/callback/* /ops/*
     handle @app {
         reverse_proxy app:8080 {
             transport http {

@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from . import binding
+from .db import clear_salon_cache
 from .messages import has as has_text, t
 from .smalltalk import FILLER_EXTRA as _FILLER_EXTRA
 from .smalltalk import THANKS_FIRST_WORDS as _THANKS_FIRST_WORDS
@@ -28,6 +29,8 @@ MIN_NAME, MAX_NAME = 2, 60
 
 CANCEL_WORDS = {"cancel", "ghairi", "stop", "acha"}
 BACK_WORDS = {"back", "rudi"}
+_NEVER_A_NAME = {"yes", "yeah", "yep", "no", "nope", "ok", "okay", "hapana"}
+_GREETING_WORDS = {"hi", "hello", "hey", "habari", "hujambo", "jambo", "shikamoo", "mambo", "vipi", "sasa"}
 YES_WORDS = {"yes", "yeah", "yep", "ndiyo", "ndio", "sawa", "ok", "okay"}
 NO_WORDS = {"no", "nope", "hapana", "la"}
 SW_HINTS = re.compile(r"\b(habari|niaje|mambo|nataka|tafadhali|asante|bei|sawa|ndiyo|hapana|ghairi|hamisha|sogeza)\b", re.I)
@@ -68,6 +71,28 @@ def parse_price(value: str) -> int | None:
     return price if MIN_PRICE <= price <= MAX_PRICE else None
 
 
+MAX_DEPOSIT = 100000
+_NO_DEPOSIT = re.compile(r"\b(no|hapana|free|bure|none|bila|sifuna|zero|sifuri)\b", re.I)
+
+
+def parse_deposit(words: str) -> int | None:
+    """A typed deposit amount in KES, 0 for none, or None when the line is not usable.
+    A denial next to a number ('no 200') contradicts itself, so it asks again instead of guessing."""
+    text = (words or "").strip()
+    if not text:
+        return None
+    m = re.search(r"\d[\d,]*", text)
+    if m:
+        if _NO_DEPOSIT.search(text):
+            return None
+        try:
+            amount = int(m.group(0).replace(",", ""))
+        except ValueError:
+            return None
+        return amount if 0 <= amount <= MAX_DEPOSIT else None
+    return 0 if _NO_DEPOSIT.search(text) else None
+
+
 def parse_service_line(line: str) -> dict | None:
     """One typed price line to a service dict, or None when the line is not usable."""
     m = SERVICE_LINE.match(line or "")
@@ -91,8 +116,9 @@ def parse_service_line(line: str) -> dict | None:
 
 
 def parse_time_pair(text: str):
-    """'09:00-18:00' to (open, close) time objects, or None."""
-    m = TIME_PAIR.search(text or "")
+    """'09:00-18:00' to (open, close) time objects, or None. The whole line must be the pair: a partial
+    match like '0900-1800' is rejected, never guessed at. A bare evening close ('9-5') rolls past noon."""
+    m = TIME_PAIR.fullmatch((text or "").strip())
     if not m:
         return None
     from datetime import time as _time
@@ -109,6 +135,10 @@ def parse_time_pair(text: str):
         o = _time(fix(int(m.group("h1")), 0, m.group("ap1")), int(m.group("m1") or 0))
         c = _time(fix(int(m.group("h2")), 0, m.group("ap2")), int(m.group("m2") or 0))
     except ValueError:
+        return None
+    if m.group("ap1") is None and m.group("ap2") is None and c < o and c.hour + 12 <= 20:
+        c = c.replace(hour=c.hour + 12)
+    if o.hour < 5:
         return None
     return (o, c) if o < c else None
 
@@ -220,6 +250,7 @@ _CHANGE = re.compile(r"\b(change|changing|fix|correct|edit|update|wrong|mistake|
 _REDIRECTS = (
     ("ask_prices", re.compile(r"\b(price|prices|bei|gharama|service|services|huduma)\b", re.I)),
     ("ask_hours", re.compile(r"\b(hours|hour|open|opening|fungua|kufungua)\b", re.I)),
+    ("ask_deposit", re.compile(r"\b(deposit|deposits|amana)\b", re.I)),
     ("ask_durations", re.compile(r"\b(time|times|duration|durations|muda|dakika)\b", re.I)),
     ("ask_type", re.compile(r"\b(type|kinyozi|barbershop|barber|salon|saluni)\b", re.I)),
     ("ask_name", re.compile(r"\b(name|salon|saluni|jina)\b", re.I)),
@@ -275,6 +306,8 @@ def _keep_data_present(state: dict) -> bool:
         return bool(data.get("services"))
     if step == "ask_hours":
         return bool(data.get("open") and data.get("close"))
+    if step == "ask_deposit":
+        return "deposit" in data
     return False
 
 
@@ -350,8 +383,8 @@ async def _go_live(ctx, pid: str, sender: str, state: dict) -> None:
     async with ctx.pool.acquire() as con, con.transaction():
         salon = await con.fetchval(
             "INSERT INTO salons (name, owner_wa_id, timezone, deposit_kes, open_hours, active, wa_phone_number_id, tg_bot_id) "
-            "VALUES ($1,$2,'Africa/Nairobi',0,$3,true,$4,$5) RETURNING id::text",
-            data["salon"], sender, json.dumps({d: [data["open"], data["close"]] for d in DAY_KEYS}), wa_pid, tg_id)
+            "VALUES ($1,$2,'Africa/Nairobi',$3,$4,true,$5,$6) RETURNING id::text",
+            data["salon"], sender, int(data.get("deposit", 0)), json.dumps({d: [data["open"], data["close"]] for d in DAY_KEYS}), wa_pid, tg_id)
         staff_ids = []
         for own in data.get("owners") or [data.get("owner", "Owner")]:
             staff_ids.append(await con.fetchval(
@@ -363,6 +396,7 @@ async def _go_live(ctx, pid: str, sender: str, state: dict) -> None:
             for staff in staff_ids:
                 await con.execute("INSERT INTO staff_services (staff_id, service_id) VALUES ($1::uuid,$2::uuid)", staff, sid)
     slug = await binding.ensure_slug(ctx.pool, salon, data["salon"])
+    clear_salon_cache()
     from .channels.telegram import bot_username
     username = await bot_username(getattr(ctx, "wa", None))
     channel = invites.channel_of(sender)
@@ -392,11 +426,13 @@ def _question_for(state: dict) -> str:
         return t(lang, "ob_ask_durations", example=ex["duration"], lines=lines)
     if step == "ask_hours":
         return t(lang, "ob_ask_hours")
+    if step == "ask_deposit":
+        return t(lang, "ob_ask_deposit")
     if step == "confirm_all":
         owners = ", ".join(data.get("owners", []))
         return t(lang, "ob_confirm_all", salon=data.get("salon", ""), owners=owners,
                  lines=_service_lines(data.get("services", [])), fix=ex["fix"],
-                 hours=f"{data.get('open', '')}-{data.get('close', '')}")
+                 hours=f"{data.get('open', '')}-{data.get('close', '')}", deposit=data.get("deposit", 0))
     return t(lang, "ob_ask_name")
 
 
@@ -465,7 +501,7 @@ async def advance(ctx, sender: str, pid: str, text: str, media: dict | None = No
     step = state.get("step", "ask_name")
 
     if step == "ask_name":
-        if looks_off_topic(words):
+        if low in _NEVER_A_NAME or looks_off_topic(words):
             await _resend(ctx, pid, sender, state, t(lang, "ob_steer"))
             return True
         name = " ".join(words.split())
@@ -519,7 +555,7 @@ async def advance(ctx, sender: str, pid: str, text: str, media: dict | None = No
         return True
 
     if step == "ask_owner":
-        if looks_off_topic(words):
+        if low in _NEVER_A_NAME or low in _GREETING_WORDS or looks_off_topic(words):
             await _resend(ctx, pid, sender, state, t(lang, "ob_steer"))
             return True
         owners = parse_owners(words)
@@ -538,16 +574,18 @@ async def advance(ctx, sender: str, pid: str, text: str, media: dict | None = No
 
     if step == "ask_prices":
         ex = examples(data.get("kind"))
-        if media and media.get("kind") == "photo":
+        if media and media.get("kind") == "image":
             await _say(ctx, pid, sender, t(lang, "ob_photo_type", example=ex["bad"]))
             return True
-        updated, added, bad = apply_corrections(data, words)
-        if not updated and not added:
-            await _say(ctx, pid, sender, t(lang, "ob_prices_bad", example=ex["bad"]))
-            return True
-        if len(data["services"]) > MAX_SERVICES:
-            data["services"] = data["services"][:MAX_SERVICES]
-            await _say(ctx, pid, sender, t(lang, "ob_too_many", n=MAX_SERVICES))
+        bad: list[str] = []
+        if low not in YES_WORDS or not data.get("services"):
+            updated, added, bad = apply_corrections(data, words)
+            if not updated and not added:
+                await _say(ctx, pid, sender, t(lang, "ob_prices_bad", example=ex["bad"]))
+                return True
+            if len(data["services"]) > MAX_SERVICES:
+                data["services"] = data["services"][:MAX_SERVICES]
+                await _say(ctx, pid, sender, t(lang, "ob_too_many", n=MAX_SERVICES))
         state["stack"] = ["ask_prices"]
         state["step"] = "confirm_services"
         await _save_session(ctx.pool, sender, state)
@@ -603,7 +641,7 @@ async def advance(ctx, sender: str, pid: str, text: str, media: dict | None = No
             await _save_session(ctx.pool, sender, state)
             await _say(ctx, pid, sender, t(lang, "ob_ask_hours"))
             return True
-        fixed, _bad = apply_durations(data["services"], words)
+        fixed, bad = apply_durations(data["services"], words)
         if not fixed:
             ex = examples(data.get("kind"))
             await _say(ctx, pid, sender, t(lang, "ob_durations_bad", example=ex["duration"]))
@@ -613,7 +651,10 @@ async def advance(ctx, sender: str, pid: str, text: str, media: dict | None = No
         state["stack"] = ["ask_durations"]
         state["step"] = "ask_hours"
         await _save_session(ctx.pool, sender, state)
-        await _say(ctx, pid, sender, t(lang, "ob_ask_hours"))
+        body = t(lang, "ob_ask_hours")
+        if bad:
+            body += "\n\n" + t(lang, "ob_skipped", lines="\n".join(f"- {b}" for b in bad[:5]))
+        await _say(ctx, pid, sender, body)
         return True
 
     if step == "ask_hours":
@@ -623,6 +664,20 @@ async def advance(ctx, sender: str, pid: str, text: str, media: dict | None = No
             return True
         data["open"], data["close"] = pair[0].strftime("%H:%M"), pair[1].strftime("%H:%M")
         state["stack"] = ["ask_hours"]
+        state["step"] = "ask_deposit"
+        await _save_session(ctx.pool, sender, state)
+        if await _maybe_return(ctx, pid, sender, state):
+            return True
+        await _say(ctx, pid, sender, t(lang, "ob_ask_deposit"))
+        return True
+
+    if step == "ask_deposit":
+        amount = parse_deposit(words)
+        if amount is None:
+            await _say(ctx, pid, sender, t(lang, "ob_deposit_bad"))
+            return True
+        data["deposit"] = amount
+        state["stack"] = ["ask_deposit"]
         state["step"] = "confirm_all"
         await _save_session(ctx.pool, sender, state)
         if await _maybe_return(ctx, pid, sender, state):

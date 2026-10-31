@@ -6,6 +6,7 @@ from collections import Counter
 from contextlib import asynccontextmanager
 
 from . import poolstate
+from .channels.whatsapp import mask
 from .mpesa import parse_callback
 from .payments import settle_with_verification
 
@@ -178,7 +179,7 @@ async def _process_claimed_job(ctx, job: dict) -> None:
                     "INSERT INTO unmatched_payments (checkout_request_id, merchant_request_id, result_code, amount, phone, mpesa_receipt, raw) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) ON CONFLICT DO NOTHING",
                     cb.checkout_request_id, None, cb.code, cb.amount, cb.phone, cb.receipt, payload,
                 )
-                log.error("UNMATCHED PAYMENT recorded: checkout=%s amount=%s receipt=%s phone=%s", cb.checkout_request_id, cb.amount, cb.receipt, cb.phone)
+                log.error("UNMATCHED PAYMENT recorded: checkout=%s amount=%s receipt=%s phone=%s", cb.checkout_request_id, cb.amount, cb.receipt, mask(cb.phone or ""))
         await complete_job(ctx.pool, job["id"])
         return
     raise PermanentJobError(f"unsupported provider {job['provider']}")

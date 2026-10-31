@@ -588,3 +588,415 @@ def test_hostile_header_bytes_cannot_crash_the_client_ip_lookup():
 def test_the_pool_has_room_for_a_job():
     from app.db import MIN_POOL
     assert MIN_POOL >= 3
+
+
+def test_platform_search_treats_like_wildcards_as_literal():
+    from app.platform import _like_escape
+    assert _like_escape("100%_off\\sale") == "100\\%\\_off\\\\sale"
+    assert _like_escape("zuri cuts") == "zuri cuts"
+
+
+def test_ops_failure_counter_is_capped():
+    from app import main as _main
+    _main._OPS_FAILURES.clear()
+    try:
+        for i in range(5000):
+            _main._ops_note_fail(f"10.9.8.{i // 256}:{i}", 1000.0)
+        assert len(_main._OPS_FAILURES) <= 4096
+        assert _main._ops_note_fail("fresh-key", 1000.0) == 1
+        assert _main._ops_note_fail("fresh-key", 1000.0) == 2
+        assert _main._ops_note_fail("fresh-key", 1000.0 + 61) == 1
+    finally:
+        _main._OPS_FAILURES.clear()
+
+
+@needs_db
+@pytest.mark.asyncio
+async def test_delete_salon_removes_payment_reviews_with_their_payments():
+    """A salon that ever needed a refund has payment_reviews rows pointing at its payments; deleting it must not trip the foreign key."""
+    from app import lifecycle
+    pool, out, salon = await build(DSN)
+    staff = await pool.fetchval("SELECT id::text FROM staff LIMIT 1")
+    svc = await pool.fetchval("SELECT id::text FROM services WHERE name='Fade'")
+    cid = await pool.fetchval("INSERT INTO clients (salon_id, wa_id) VALUES ($1::uuid,$2) RETURNING id::text", salon, A)
+    starts = datetime.now(NBO) + timedelta(hours=30)
+    booking = await pool.fetchval(
+        "INSERT INTO bookings (salon_id, staff_id, service_id, client_id, starts_at, ends_at, status) VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,'confirmed') RETURNING id::text",
+        salon, staff, svc, cid, starts, starts + timedelta(minutes=45))
+    pay = await pool.fetchval(
+        "INSERT INTO payments (booking_id, salon_id, phone, amount_kes, status, checkout_request_id) VALUES ($1::uuid,$2::uuid,$3,200,'needs_refund','ws_CO_9') RETURNING id::text",
+        booking, salon, A)
+    await pool.execute(
+        "INSERT INTO payment_reviews (payment_id, reason, status, expected_amount, received_amount) VALUES ($1::uuid,'payment_unresolved','refund_due',200,200)", pay)
+    counts = await lifecycle.delete_salon(pool, salon)
+    assert (counts["reviews"], counts["payments"], counts["bookings"], counts["salons"]) == (1, 1, 1, 1)
+    assert await pool.fetchval("SELECT count(*) FROM salons") == 0
+    assert await pool.fetchval("SELECT count(*) FROM payment_reviews") == 0
+    await pool.close()
+
+
+@needs_db
+@pytest.mark.asyncio
+async def test_move_conflict_says_taken_not_expired():
+    """Two customers racing for one slot: the loser's move must say the time was taken, not that the hold expired."""
+    from app.main import app
+    from app.conversation import Chat
+    from app import booking_flow as _bf
+    pool, out, salon = await build(DSN)
+    ctx = app.state.ctx
+    staff = await pool.fetchval("SELECT id::text FROM staff LIMIT 1")
+    svc = await pool.fetchval("SELECT id::text FROM services WHERE name='Fade'")
+    cid = await pool.fetchval("INSERT INTO clients (salon_id, wa_id) VALUES ($1::uuid,$2) RETURNING id::text", salon, A)
+    base = datetime.now(NBO).replace(microsecond=0) + timedelta(days=1)
+    ends = base + timedelta(minutes=45)
+    await pool.execute(
+        "INSERT INTO bookings (salon_id, staff_id, service_id, client_id, starts_at, ends_at, status) VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,'confirmed')",
+        salon, staff, svc, cid, base, ends)
+    other = await pool.fetchval(
+        "INSERT INTO bookings (salon_id, staff_id, service_id, client_id, starts_at, ends_at, status) VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,'confirmed') RETURNING id::text",
+        salon, staff, svc, cid, base + timedelta(hours=2), ends + timedelta(hours=2))
+    salon_d = {"id": salon, "name": "Zuri Cuts", "wa_phone_number_id": PID, "owner_wa_id": None}
+    pick = {"staff_id": staff, "staff_name": "Brian", "starts_at": base.isoformat(), "ends_at": ends.isoformat()}
+    st = {"late_move_booking": other, "service_id": svc, "history": []}
+    await _bf._move_choice(ctx, salon_d, {"id": cid, "wa_id": A}, st, pick, NBO, Chat(ctx, salon_d, A), "en")
+    bodies = [m["text"]["body"] for m in out.to(A) if m["type"] == "text"]
+    assert bodies and "just taken" in bodies[-1] and "expired" not in bodies[-1]
+    await pool.close()
+
+
+def test_per_salon_model_allowance_is_independent():
+    from types import SimpleNamespace
+    from app.ratelimit import RateLimiter
+
+    class StubRedis:
+        def __init__(self):
+            self.counts = {}
+
+        async def eval(self, script, nkeys, *args):
+            key = args[0]
+            self.counts[key] = self.counts.get(key, 0) + 1
+            return self.counts[key]
+
+    async def run():
+        settings = SimpleNamespace(llm_daily_per_salon=2)
+        lim = RateLimiter(StubRedis(), settings)
+        assert await lim.llm_allowed("s1") and await lim.llm_allowed("s1")
+        assert not await lim.llm_allowed("s1")
+        assert await lim.llm_allowed("s2")
+    asyncio.run(run())
+
+
+def test_voice_falls_back_silently_when_the_salon_is_over_allowance():
+    import httpx
+    from types import SimpleNamespace
+    from app.ai.voice import Transcriber
+
+    class StubRedis:
+        async def eval(self, script, nkeys, *args):
+            return 9999
+
+    async def run():
+        calls = []
+
+        def handler(req):
+            calls.append(req)
+            return httpx.Response(200, json={"text": "nataka fade"})
+
+        http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            settings = SimpleNamespace(asr_url="https://asr.test/transcribe", asr_token="t", asr_timeout_s=5,
+                                       llm_daily_per_salon=1)
+            tx = Transcriber(http, settings, redis=StubRedis())
+            assert await tx.transcribe(b"audio", "audio/ogg", None, salon_id="s9") is None
+            assert calls == []
+        finally:
+            await http.aclose()
+    asyncio.run(run())
+
+
+def test_model_falls_back_to_keywords_when_the_salon_is_over_allowance():
+    import httpx
+    from datetime import date
+    from types import SimpleNamespace
+    from app.ai.llm import Extractor
+
+    class StubRedis:
+        async def eval(self, script, nkeys, *args):
+            return 9999
+
+    async def run():
+        calls = []
+
+        def handler(req):
+            calls.append(req)
+            return httpx.Response(200, json={"choices": [{"message": {"content": "{}"}}]})
+
+        http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            ext = Extractor(http, SimpleNamespace(llm_daily_per_salon=1), redis=StubRedis())
+            res = await ext.extract("nataka fade kesho", today=date(2026, 10, 31), services=[], state="idle", salon_id="s9")
+            assert res.source == "keywords" and calls == []
+        finally:
+            await http.aclose()
+    asyncio.run(run())
+
+
+def test_redaction_covers_url_credentials_and_key_assignments():
+    """A Redis/DB URL carries its password, and KEY= assignments are secrets too: neither may survive either scrubber."""
+    from app import hardening
+    from app import logs as _logs
+    cases = [
+        ("redis connected redis://:s3cr3tPass@redis:6379/0", "s3cr3tPass"),
+        ("dsn postgresql://rembo:PgPass123@db:5432/rembo", "PgPass123"),
+        ("TOKEN_ENCRYPTION_KEY=" + "ab12" * 16, "ab12" * 16),
+        ("REDIS_PASSWORD=hunter2 ok", "hunter2"),
+    ]
+    for line, secret in cases:
+        for scrub in (_logs.redact, hardening.redact_log_secrets):
+            assert secret not in scrub(line), (scrub, line)
+
+
+@needs_db
+@pytest.mark.asyncio
+async def test_reschedule_after_cancel_creates_fresh_pending_jobs():
+    """A moved booking cancels its reminders then reschedules: the cancelled rows must not block the fresh ones."""
+    from app.reminders import cancel_reminders, schedule_reminders
+    pool, out, salon = await build(DSN)
+    staff = await pool.fetchval("SELECT id::text FROM staff LIMIT 1")
+    svc = await pool.fetchval("SELECT id::text FROM services WHERE name='Fade'")
+    cid = await pool.fetchval("INSERT INTO clients (salon_id, wa_id) VALUES ($1::uuid,$2) RETURNING id::text", salon, A)
+    starts = datetime.now(NBO) + timedelta(hours=30)
+    booking = await pool.fetchval(
+        "INSERT INTO bookings (salon_id, staff_id, service_id, client_id, starts_at, ends_at, status) VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,'confirmed') RETURNING id::text",
+        salon, staff, svc, cid, starts, starts + timedelta(minutes=45))
+    await pool.execute("INSERT INTO reminder_templates (salon_id, name, body, approved) VALUES ($1::uuid,'reminder_24h','Hi {salon} {when}',true)", salon)
+    await schedule_reminders(pool, booking)
+    assert await pool.fetchval("SELECT count(*) FROM reminder_jobs WHERE booking_id=$1::uuid AND status='pending'", booking) == 1
+    await cancel_reminders(pool, booking)
+    await schedule_reminders(pool, booking)
+    assert await pool.fetchval("SELECT count(*) FROM reminder_jobs WHERE booking_id=$1::uuid AND status='pending'", booking) == 1
+    await pool.close()
+
+
+def test_redis_log_label_hides_credentials():
+    from app.main import _redis_label
+    assert _redis_label("redis://:s3cr3t@redis:6379/0") == "redis"
+    assert _redis_label("") == "redis"
+
+
+@needs_db
+@pytest.mark.asyncio
+async def test_unmatched_payment_log_masks_the_phone_number(caplog):
+    """The unmatched-payment log must carry the masked sender like every other log line, not the full number."""
+    import logging
+    from app.main import app
+    from app.webhook_jobs import _process_claimed_job, enqueue_jobs
+    from tests.harness import callback
+    pool, out, salon = await build(DSN)
+    body = callback("ws_CO_NOMATCH", amount=200, phone="254711000001")
+    await enqueue_jobs(pool, "mpesa", [("ws_CO_NOMATCH", body)])
+    jid = await pool.fetchval("SELECT id FROM webhook_jobs WHERE event_id='ws_CO_NOMATCH'")
+    with caplog.at_level(logging.ERROR, logger="rembo.webhooks"):
+        await _process_claimed_job(app.state.ctx,
+                                   {"id": jid, "provider": "mpesa", "event_id": "ws_CO_NOMATCH", "payload": body, "attempts": 8})
+    assert "...0001" in caplog.text
+    assert "254711000001" not in caplog.text
+    await pool.close()
+
+
+@needs_db
+@pytest.mark.asyncio
+async def test_deleting_a_salon_tells_its_upcoming_customers():
+    """Nobody should turn up to a dead business: deletion tells every held or confirmed upcoming booking."""
+    from app.main import app
+    from app import lifecycle
+    pool, out, salon = await build(DSN)
+    staff = await pool.fetchval("SELECT id::text FROM staff LIMIT 1")
+    svc = await pool.fetchval("SELECT id::text FROM services WHERE name='Fade'")
+    cid = await pool.fetchval("INSERT INTO clients (salon_id, wa_id, lang) VALUES ($1::uuid,$2,'en') RETURNING id::text", salon, A)
+    starts = datetime.now(NBO) + timedelta(hours=30)
+    await pool.execute(
+        "INSERT INTO bookings (salon_id, staff_id, service_id, client_id, starts_at, ends_at, status) VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,'confirmed')",
+        salon, staff, svc, cid, starts, starts + timedelta(minutes=45))
+    counts = await lifecycle.delete_salon_and_notify(app.state.ctx, salon)
+    assert counts["notified"] == 1
+    assert await pool.fetchval("SELECT count(*) FROM salons") == 0
+    bodies = [m["text"]["body"] for m in out.to(A) if m["type"] == "text"]
+    assert bodies and "closed permanently" in bodies[-1]
+    await pool.close()
+
+
+@needs_db
+@pytest.mark.asyncio
+async def test_doctor_warns_when_a_salon_has_no_approved_templates():
+    """Reminders are silently dead without approved template rows: the setup check must say so."""
+    import httpx
+    from app import doctor as _doctor
+    from app.main import app
+    pool, out, salon = await build(DSN)
+    http = httpx.AsyncClient(transport=httpx.MockTransport(out.handler))
+    try:
+        first = {(c.name, c.ok) for c in await _doctor.run_checks(app.state.ctx.settings, http, pool)}
+        assert ("salon 'Zuri Cuts' reminders", False) in first
+        await pool.execute("INSERT INTO reminder_templates (salon_id, name, body, approved) VALUES ($1::uuid,'reminder_24h','Hi',true)", salon)
+        second = {(c.name, c.ok) for c in await _doctor.run_checks(app.state.ctx.settings, http, pool)}
+        assert ("salon 'Zuri Cuts' reminders", False) not in second
+    finally:
+        await http.aclose()
+    await pool.close()
+
+
+@needs_db
+@pytest.mark.asyncio
+async def test_successful_move_leaves_no_stale_move_state_behind():
+    """After a move, the saved conversation must not still name the moved booking, or the next tap re-moves it."""
+    from app.main import app
+    from app.conversation import Chat
+    from app import booking_flow as _bf
+    pool, out, salon = await build(DSN)
+    ctx = app.state.ctx
+    staff = await pool.fetchval("SELECT id::text FROM staff LIMIT 1")
+    svc = await pool.fetchval("SELECT id::text FROM services WHERE name='Fade'")
+    cid = await pool.fetchval("INSERT INTO clients (salon_id, wa_id) VALUES ($1::uuid,$2) RETURNING id::text", salon, A)
+    day = open_day()
+    base = datetime.combine(day, datetime.min.time(), NBO) + timedelta(hours=12)
+    ends = base + timedelta(minutes=45)
+    other = await pool.fetchval(
+        "INSERT INTO bookings (salon_id, staff_id, service_id, client_id, starts_at, ends_at, status) VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,'confirmed') RETURNING id::text",
+        salon, staff, svc, cid, base + timedelta(hours=3), ends + timedelta(hours=3))
+    salon_d = {"id": salon, "name": "Zuri Cuts", "wa_phone_number_id": PID, "owner_wa_id": None}
+    pick = {"staff_id": staff, "staff_name": "Brian", "starts_at": base.isoformat(), "ends_at": ends.isoformat()}
+    st = {"late_move_booking": other, "service_id": svc, "state": "offered", "history": []}
+    await _bf._move_choice(ctx, salon_d, {"id": cid, "wa_id": A}, st, pick, NBO, Chat(ctx, salon_d, A), "en")
+    saved = await pool.fetchval("SELECT state FROM conversations WHERE salon_id=$1::uuid AND wa_id=$2", salon, A)
+    assert "late_move_booking" not in saved
+    await pool.close()
+
+
+@needs_db
+@pytest.mark.asyncio
+async def test_cancel_wipes_the_booking_keys_from_state():
+    """After a cancel, no held or offered keys may linger to confuse the next message."""
+    from app.main import app
+    from app.conversation import Chat
+    from app import booking_flow as _bf
+    pool, out, salon = await build(DSN)
+    ctx = app.state.ctx
+    staff = await pool.fetchval("SELECT id::text FROM staff LIMIT 1")
+    svc = await pool.fetchval("SELECT id::text FROM services WHERE name='Fade'")
+    cid = await pool.fetchval("INSERT INTO clients (salon_id, wa_id) VALUES ($1::uuid,$2) RETURNING id::text", salon, A)
+    starts = datetime.now(NBO) + timedelta(hours=30)
+    booking = await pool.fetchval(
+        "INSERT INTO bookings (salon_id, staff_id, service_id, client_id, starts_at, ends_at, status) VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,'held') RETURNING id::text",
+        salon, staff, svc, cid, starts, starts + timedelta(minutes=45))
+    salon_d = {"id": salon, "name": "Zuri Cuts", "wa_phone_number_id": PID, "owner_wa_id": None}
+    st = {"state": "held", "booking_id": booking, "last_tap": "x", "history": []}
+    await _bf._cancel(ctx, salon_d, {"id": cid, "wa_id": A}, st, [], NBO, datetime.now(NBO), Chat(ctx, salon_d, A), "en")
+    saved = await pool.fetchval("SELECT state FROM conversations WHERE salon_id=$1::uuid AND wa_id=$2", salon, A)
+    assert saved.get("state") != "held" and "booking_id" not in saved
+    await pool.close()
+
+
+@needs_db
+@pytest.mark.asyncio
+async def test_feedback_is_recorded_once_and_the_state_clears():
+    """A second message after giving feedback must not record it again or thank the customer twice."""
+    from app.main import app
+    from app.conversation import _handle
+    from app.channels.whatsapp import Message
+    pool, out, salon = await build(DSN)
+    ctx = app.state.ctx
+    staff = await pool.fetchval("SELECT id::text FROM staff LIMIT 1")
+    svc = await pool.fetchval("SELECT id::text FROM services WHERE name='Fade'")
+    cid = await pool.fetchval("INSERT INTO clients (salon_id, wa_id) VALUES ($1::uuid,$2) RETURNING id::text", salon, A)
+    starts = datetime.now(NBO) - timedelta(hours=2)
+    booking = await pool.fetchval(
+        "INSERT INTO bookings (salon_id, staff_id, service_id, client_id, starts_at, ends_at, status) VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,'confirmed') RETURNING id::text",
+        salon, staff, svc, cid, starts, starts + timedelta(minutes=45))
+    await pool.execute("INSERT INTO visit_checks (booking_id, salon_id, client_id) VALUES ($1::uuid,$2::uuid,$3::uuid)", booking, salon, cid)
+    import json as _json
+    await pool.execute("INSERT INTO conversations (salon_id, wa_id, state) VALUES ($1::uuid,$2,$3)",
+                       salon, A, _json.dumps({"state": "awaiting_feedback", "visit_booking": booking, "history": []}))
+    await _handle(ctx, Message("m1", A, "Ann", PID, "text", "5", None, None))
+    await _handle(ctx, Message("m2", A, "Ann", PID, "text", "ok", None, None))
+    assert await pool.fetchval("SELECT feedback FROM visit_checks WHERE booking_id=$1::uuid", booking) == "5"
+    thanks = [m for m in out.to(A) if m["type"] == "text" and "zepte" in m["text"]["body"].lower() or "feedback" in m["text"]["body"].lower()]
+    assert len(thanks) == 1
+    await pool.close()
+
+
+@needs_db
+@pytest.mark.asyncio
+async def test_far_future_date_keeps_the_asking_state():
+    """A far-future date must leave the service question pending, not drop the conversation back to idle."""
+    from app.main import app
+    from app.conversation import Chat
+    from app import booking_flow as _bf
+    from app.ai.llm import Extraction
+    pool, out, salon = await build(DSN)
+    ctx = app.state.ctx
+    salon_d = {"id": salon, "name": "Zuri Cuts", "wa_phone_number_id": PID, "owner_wa_id": None}
+    st = {"state": "idle", "history": []}
+    ex = Extraction(intent="book", service="Fade", date=None, far_date=True, language="en")
+    await _bf._book(ctx, salon_d, {"id": "c1", "wa_id": A}, st, [{"name": "Fade", "aliases": []}], NBO, datetime.now(NBO), Chat(ctx, salon_d, A), "en", ex, None)
+    saved = await pool.fetchval("SELECT state FROM conversations WHERE salon_id=$1::uuid AND wa_id=$2", salon, A)
+    assert saved.get("state") == "asking" and saved.get("service_name") == "Fade"
+    await pool.close()
+
+
+def test_the_trouble_message_exists_in_english_and_swahili():
+    from app.messages import t
+    assert "keep it short" in t("en", "fallback_degraded", example="Fade")
+    assert "kifupi" in t("sw", "fallback_degraded", example="Fade")
+
+
+@needs_db
+@pytest.mark.asyncio
+async def test_a_customer_is_told_what_to_do_when_the_model_is_unreachable(monkeypatch):
+    """No network, dead backend or bad AI key: the reply must tell the customer what to do, never go silent or leak the backend."""
+    from types import SimpleNamespace
+    from app import screen as screen_mod
+    from app.ai.llm import Extraction, Result
+    from app.main import app
+    pool, out, salon = await build(DSN)
+    monkeypatch.setattr(screen_mod, "route", lambda *a, **k: "model")
+
+    async def down(*a, **k):
+        return Result(Extraction(intent="other", language="en"), "keywords", degraded=True)
+
+    async def up(*a, **k):
+        return Result(Extraction(intent="other", language="en"), "keywords")
+
+    monkeypatch.setattr(app.state.ctx, "llm", SimpleNamespace(extract=down))
+    async with client() as c:
+        await post(c, payload(A, "blorp wobble xyzq", mid="down1"))
+    await _run_job_to_exhaustion(pool, app.state.ctx)
+    bodies = out.bodies(A)
+    assert len(bodies) == 1, bodies
+    assert "keep it short" in bodies[0] and "contact the salon directly" in bodies[0]
+    for secret in ("primary.test", "fallback.test", "401", "traceback", "Exception"):
+        assert secret not in bodies[0]
+
+    monkeypatch.setattr(app.state.ctx, "llm", SimpleNamespace(extract=up))
+    async with client() as c:
+        await post(c, payload(A, "blorp wobble xyzq", mid="up1"))
+    await _run_job_to_exhaustion(pool, app.state.ctx)
+    assert "rephrase" in out.bodies(A)[-1]
+    await pool.close()
+
+
+@needs_db
+@pytest.mark.asyncio
+async def test_off_and_on_clear_the_cached_salon_row():
+    """The salon lookup is cached for a minute; closing or reopening must not leave the old row behind."""
+    from app.main import app
+    from app import db as _db
+    from tests.harness import post_tg, tg_update
+    pool, out, salon = await build(DSN, platform_owner_id="tg:9001")
+    _db.clear_salon_cache()
+    assert await _db.salon_by_phone_id(pool, PID, app.state.ctx.settings) is not None
+    assert _db._salon_cache
+    async with client() as c:
+        await post_tg(c, tg_update(1, 9001, "off zuri"))
+    assert not _db._salon_cache
+    await pool.close()

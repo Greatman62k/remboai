@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Nightly database backup, 14 days kept. Install:  echo '17 2 * * * root /opt/remboai/deploy/backup.sh' > /etc/cron.d/remboai-backup
 set -euo pipefail
+umask 077
 cd "$(dirname "$0")/.."
 DEST=${BACKUP_DIR:-/var/backups/remboai}
 mkdir -p "$DEST"

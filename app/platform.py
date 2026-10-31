@@ -10,6 +10,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from .channels import outbound
+from .db import clear_salon_cache
 from .messages import t
 from . import lifecycle
 
@@ -32,12 +33,18 @@ def is_platform(settings, sender: str) -> bool:
     return bool(want) and sender.strip() == want
 
 
+def _like_escape(ref: str) -> str:
+    """Escape LIKE wildcards so a typed name only ever matches itself literally."""
+    return ref.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 async def _find(pool, ref: str) -> list[dict]:
     ref = (ref or "").strip()
     rows = await pool.fetch("SELECT id::text, name, slug, active FROM salons WHERE slug=$1", ref.lower())
     if rows:
         return [dict(rows[0])]
-    rows = await pool.fetch("SELECT id::text, name, slug, active FROM salons WHERE name ILIKE $1 ORDER BY name LIMIT 6", f"%{ref}%")
+    rows = await pool.fetch("SELECT id::text, name, slug, active FROM salons WHERE name ILIKE $1 ESCAPE '\\' ORDER BY name LIMIT 6",
+                            f"%{_like_escape(ref)}%")
     return [dict(r) for r in rows]
 
 
@@ -80,6 +87,7 @@ async def handle(ctx, sender: str, text: str) -> bool:
             return True
         active = text.strip().lower().startswith("on")
         await pool.execute("UPDATE salons SET active=$2 WHERE id=$1::uuid", found[0]["id"], active)
+        clear_salon_cache()
         await say(f"{found[0]['name']} is now {'open' if active else 'closed'}.")
         return True
     m = DEL.match(text or "")
@@ -92,8 +100,9 @@ async def handle(ctx, sender: str, text: str) -> bool:
         if (m.group(2) or "").upper() not in ("YES", "NDIYO"):
             await say(f"Delete {found[0]['name']} and everything in it (services, bookings, clients)? Reply: del {found[0]['name']} YES")
             return True
-        counts = await lifecycle.delete_salon(pool, found[0]["id"])
-        await say(f"Deleted {found[0]['name']}: {counts['bookings']} bookings, {counts['payments']} payments.")
+        counts = await lifecycle.delete_salon_and_notify(ctx, found[0]["id"])
+        await say(f"Deleted {found[0]['name']}: {counts['bookings']} bookings, {counts['payments']} payments. "
+                  f"{counts['notified']} customer(s) told.")
         return True
     m = WARN.match(text or "")
     if m:

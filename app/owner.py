@@ -36,8 +36,10 @@ MOVE = re.compile(r"^\s*(move|hamisha|sogeza)\s+(\S+)\s+(.+)$", re.I | re.S)
 LATE = re.compile(r"^\s*(late|chelewa)\s+(.+?)\s+(\d{1,3})\s*$", re.I | re.S)
 INVITE = re.compile(r"^\s*(invite|mwaliko|share)\W*$", re.I)
 KEEP = re.compile(r"^\s*(keep|endelea)\W*$", re.I)
+DEPOSIT = re.compile(r"^\s*(deposit|amana)\b\s*(.*?)\s*$", re.I | re.S)
 SUMMARY = re.compile(r"^\s*(summary|muhtasari)\W*$", re.I)
-SWAHILI = re.compile(r"\b(leo|kesho|ratiba|miadi|funga|fungua|ghairi|muhtasari|msaada|kiungo|chelewa|hamisha|sogeza|jumatatu|jumanne|jumatano|alhamisi|ijumaa|jumamosi|jumapili)\b", re.I)
+TILL_TAP = re.compile(r"^till:(yes|no):([0-9a-fA-F-]{36})$")
+SWAHILI = re.compile(r"\b(leo|kesho|ratiba|miadi|funga|fungua|ghairi|muhtasari|msaada|kiungo|chelewa|hamisha|sogeza|amana|jumatatu|jumanne|jumatano|alhamisi|ijumaa|jumamosi|jumapili)\b", re.I)
 RANGE = re.compile(r"(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s*(?:-|–|to|hadi|mpaka)\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)", re.I)
 
 
@@ -112,6 +114,9 @@ async def handle(ctx, salon: dict, to: str, text: str, tz: ZoneInfo, now: dateti
         await ctx.pool.execute("UPDATE salons SET inactivity_warned_at=NULL, inactivity_final_at=NULL WHERE id=$1::uuid", salon["id"])
         await say(t(lang, "owner_kept", salon=salon["name"]))
         return True
+    if m := DEPOSIT.match(text):
+        await _deposit(ctx, salon, to, m[2], lang)
+        return True
     if INVITE.match(text):
         from . import binding as _binding
         from .channels import invites as _invites
@@ -156,6 +161,52 @@ async def handle(ctx, salon: dict, to: str, text: str, tz: ZoneInfo, now: dateti
     return False
 
 
+async def handle_tap(ctx, salon: dict, sender: str, reply_id: str) -> bool:
+    """An owner's tap on a manual-claim confirm request. Only the owner's tap counts;
+    anything else falls through to the customer flow."""
+    m = TILL_TAP.match(reply_id or "")
+    if not m or not is_owner(salon, sender):
+        return False
+    answer, pay_id = m[1].lower(), m[2]
+    if answer == "yes":
+        status, bid = await payments.confirm_manual_claim(ctx.pool, pay_id)
+        if status == "confirmed":
+            await _announce_manual(ctx, bid, pay_id)
+        elif status == "already":
+            await _say(ctx, salon, sender, t("en", "till_owner_already"))
+        else:
+            await _say(ctx, salon, sender, t("en", "till_owner_closed"))
+    else:
+        status, bid = await payments.decline_manual_claim(ctx.pool, pay_id)
+        if status == "declined":
+            await _say(ctx, salon, sender, t("en", "till_owner_recorded"))
+            await _tell_declined(ctx, salon, bid)
+        elif status == "already":
+            await _say(ctx, salon, sender, t("en", "till_owner_already"))
+        else:
+            await _say(ctx, salon, sender, t("en", "till_owner_closed"))
+    return True
+
+
+async def _announce_manual(ctx, booking_id: str, pay_id: str) -> None:
+    """The owner confirmed the money arrived: reuse the paid announcement path (customer booked,
+    owner notified, reminders scheduled, exactly once)."""
+    p = await ctx.pool.fetchrow("SELECT * FROM payments WHERE id=$1::uuid", pay_id)
+    d = await ctx.pool.fetchrow(payments._DETAIL, booking_id)
+    s = payments.Settlement("paid", "", str(p["id"]), booking_id, p["amount_kes"], p["phone"], p["mpesa_receipt"],
+                            p["result_code"], settled_via="manual", **dict(d))
+    await payments.announce(ctx, s)
+
+
+async def _tell_declined(ctx, salon: dict, booking_id: str | None) -> None:
+    if not booking_id:
+        return
+    row = await ctx.pool.fetchrow("SELECT c.wa_id, c.lang FROM bookings b JOIN clients c ON c.id=b.client_id WHERE b.id=$1::uuid", booking_id)
+    if row is None:
+        return
+    await outbound.send_text(ctx, salon, row["wa_id"], t(row["lang"], "till_declined", salon=salon["name"]))
+
+
 async def _block(ctx, salon, to, rest: str, tz, today: date, lang: str) -> None:
     day = parse_day(rest, today)
     if day is None:
@@ -197,6 +248,22 @@ async def _unblock(ctx, salon, to, rest: str, tz, today: date, lang: str) -> Non
                                     salon["id"], start, start + timedelta(days=1))).split()[-1])
     what = _label(day, today, lang)
     await _say(ctx, salon, to, t(lang, "owner_unblocked" if n else "owner_no_blocks", what=what))
+
+
+async def _deposit(ctx, salon, to, rest: str, lang: str) -> None:
+    """Set the booking deposit in KES. Safe without a till: with no till configured the amount is stored and bookings stay free."""
+    m = re.fullmatch(r"\d[\d,]*", (rest or "").strip())
+    amount = int(m.group(0).replace(",", "")) if m else -1
+    if not 0 <= amount <= 100000:
+        await _say(ctx, salon, to, t(lang, "owner_deposit_bad"))
+        return
+    await ctx.pool.execute("UPDATE salons SET deposit_kes=$2 WHERE id=$1::uuid", salon["id"], amount)
+    if amount == 0:
+        await _say(ctx, salon, to, t(lang, "owner_deposit_off"))
+        return
+    acct = await payments.account(ctx.pool, salon["id"])
+    note = t(lang, "owner_deposit_till", kind=acct["kind"], party=acct["party_b"]) if acct else t(lang, "owner_deposit_notill")
+    await _say(ctx, salon, to, t(lang, "owner_deposit_set", amount=amount, note=note))
 
 
 async def cancel_booking(ctx, salon: dict, booking_id: str, tz: ZoneInfo) -> dict | None:
@@ -314,6 +381,15 @@ async def _move_who(ctx, salon, to, spec: str, rest: str, tz, today: date, lang:
     if day is None or at is None or datetime.combine(day, at, tz) <= now:
         await _say(ctx, salon, to, t(lang, "owner_move_usage"))
         return
+    from .availability import DAY_KEYS
+    try:
+        hours = (salon.get("open_hours") or {})[DAY_KEYS[day.weekday()]]
+        opens, closes = time.fromisoformat(hours[0]), time.fromisoformat(hours[1])
+    except (ValueError, TypeError, IndexError, KeyError):
+        hours, opens, closes = None, None, None
+    if not hours:
+        await _say(ctx, salon, to, t(lang, "owner_move_closed", label=_label(day, today, lang), hours=t(lang, "closed")))
+        return
     b = await ctx.pool.fetchrow(
         "SELECT b.staff_id::text AS staff_id, b.service_id::text AS service_id, sv.name AS service, sv.duration_min, "
         "c.wa_id AS phone, c.lang, st.name AS stylist FROM bookings b JOIN services sv ON sv.id=b.service_id "
@@ -324,6 +400,10 @@ async def _move_who(ctx, salon, to, spec: str, rest: str, tz, today: date, lang:
         return
     want = datetime.combine(day, at, tz)
     want_end = want + timedelta(minutes=b["duration_min"])
+    if at < opens or want_end > datetime.combine(day, closes, tz):
+        await _say(ctx, salon, to, t(lang, "owner_move_closed", label=_label(day, today, lang),
+                                     hours=f"{opens:%H:%M}-{closes:%H:%M}"))
+        return
     own_start = await ctx.pool.fetchval("SELECT starts_at FROM bookings WHERE id=$1::uuid", rows[0]["id"])
     async with ctx.pool.acquire() as con:
         busy = await busy_times(con, [b["staff_id"]], want - timedelta(hours=12), want_end + timedelta(hours=12))

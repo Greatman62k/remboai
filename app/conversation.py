@@ -21,6 +21,7 @@ from .booking_flow import (
     _pay,
     _reply,
     _save,
+    _till_claim,
     _visit_tap,
     example_for,
     match_service,
@@ -181,25 +182,42 @@ async def _neutral_route(ctx, msg: Message, salon: dict, linked: bool, chat: Cha
         target = await _salon_row(ctx, owned[0]["id"])
         return (target or salon), False
     text = (msg.text or "").strip()
+    lang = smalltalk.language(text, "en")
+    seen_st = await peek_state(ctx, salon["id"], msg.sender)
+    offer = seen_st.get("picker_offer")
+    offer = offer if isinstance(offer, dict) else {}
+    if offer.get("id") is not None and text.lower() in _PICKER_YES:
+        target = await _salon_row(ctx, offer["id"])
+        if target is not None:
+            slug = offer.get("slug") or await binding.ensure_slug(ctx.pool, target["id"], target["name"])
+            await binding.bind_sender(ctx.pool, msg.sender, slug)
+            await _save(ctx, salon["id"], msg.sender,
+                        {k: v for k, v in seen_st.items() if k != "picker_offer"})
+            return target, True
     match = _match_business(rows, text)
     if match is not None:
         slug = match["slug"] or await binding.ensure_slug(ctx.pool, match["id"], match["name"])
         await binding.bind_sender(ctx.pool, msg.sender, slug)
         target = await _salon_row(ctx, match["id"])
         return (target or salon), True
+    fuzzy = _fuzzy_business(rows, text)
+    if fuzzy is not None:
+        await _save(ctx, salon["id"], msg.sender,
+                    {**seen_st, "picker_offer": {"id": fuzzy["id"], "slug": fuzzy.get("slug")}})
+        await chat.text(t(lang, "ob_pick_confirm", name=fuzzy["name"]))
+        return None, False
     from .channels import invites
     channel = invites.channel_of(msg.sender)
     from .channels.telegram import bot_username as _bot_username
     username = await _bot_username(getattr(ctx, "wa", None)) if channel == "tg" else None
     number = getattr(ctx.settings, "central_whatsapp_number", "") if channel == "wa" else ""
-    lang = smalltalk.language(text, "en")
-    seen_st = await peek_state(ctx, salon["id"], msg.sender)
     seen = int(seen_st.get("picker_sends") or 0)
     if seen >= 2:
         await guard.strike(ctx.pool, msg.sender, "picker_spam")
         await chat.text(t(lang, "ob_pick_again"))
         return None, False
-    await _save(ctx, salon["id"], msg.sender, {**seen_st, "picker_sends": seen + 1})
+    await _save(ctx, salon["id"], msg.sender,
+                {k: v for k, v in seen_st.items() if k != "picker_offer" and k != "picker_sends"} | {"picker_sends": seen + 1})
     lines = []
     for i, r in enumerate(rows, 1):
         slug = r["slug"] or await binding.ensure_slug(ctx.pool, r["id"], r["name"])
@@ -210,8 +228,7 @@ async def _neutral_route(ctx, msg: Message, salon: dict, linked: bool, chat: Cha
 
 
 def _match_business(rows: list, text: str) -> dict | None:
-    """A typed business choice: its number, slug, or name (exact, then close)."""
-    import difflib as _difflib
+    """A typed business choice: its number, slug, or exact name. Close is not enough to bind on."""
     clean = (text or "").strip().lower()
     if not clean:
         return None
@@ -223,9 +240,21 @@ def _match_business(rows: list, text: str) -> dict | None:
     for r in rows:
         if r["name"].lower() == clean:
             return dict(r)
+    return None
+
+
+def _fuzzy_business(rows: list, text: str) -> dict | None:
+    """A near-miss on a business name: offered for confirmation, never bound on directly."""
+    import difflib as _difflib
+    clean = (text or "").strip().lower()
+    if not clean:
+        return None
     lowered = {r["name"].lower(): r for r in rows}
     close = _difflib.get_close_matches(clean, list(lowered), n=1, cutoff=0.8)
     return dict(lowered[close[0]]) if close else None
+
+
+_PICKER_YES = {"yes", "yeah", "yep", "ndiyo", "ndio", "sawa", "ok"}
 
 
 async def _unallocated(ctx, msg: Message) -> None:
@@ -318,7 +347,7 @@ async def _handle(ctx, msg: Message) -> None:
     if sess is not None:
         text, media = msg.text or "", ({"kind": "image"} if msg.kind == "image" else None)
         if msg.kind == "audio" and msg.media_id and sess.get("step") == "ask_prices" and ctx.voice is not None and ctx.voice.enabled:
-            heard = await _hear(ctx, msg, sess.get("lang") or "en", outbound.salon_token(ctx, salon))
+            heard = await _hear(ctx, msg, sess.get("lang") or "en", outbound.salon_token(ctx, salon), salon["id"])
             if heard is None:
                 await chat.text(t(sess.get("lang") or "en", "voice_failed"))
                 return
@@ -382,7 +411,7 @@ async def _handle(ctx, msg: Message) -> None:
     if len(st["history"]) > guard.MAX_HISTORY * 2:
         st["history"] = st["history"][-guard.MAX_HISTORY * 2 :]
     if msg.kind == "audio" and msg.media_id and ctx.voice is not None and ctx.voice.enabled:
-        heard = await _hear(ctx, msg, lang, outbound.salon_token(ctx, salon))
+        heard = await _hear(ctx, msg, lang, outbound.salon_token(ctx, salon), salon["id"])
         if heard is None:
             await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, "voice_failed"))
             return
@@ -422,13 +451,17 @@ async def _handle(ctx, msg: Message) -> None:
     if msg.reply_id and msg.reply_id.startswith("visit-"):
         await _visit_tap(ctx, salon, client, st, tz, chat, lang, msg.reply_id)
         return
+    if msg.reply_id and msg.reply_id.startswith("till:"):
+        if owner.is_owner(salon, msg.sender) and await owner.handle_tap(ctx, salon, msg.sender, msg.reply_id):
+            return
     if st.get("state") == "awaiting_feedback" and (msg.text or "").strip() and not msg.reply_id and not msg.media_id:
         quick = rule_extract(msg.text, now.date(), services)
         if quick.intent == "other":
             await ctx.pool.execute("UPDATE visit_checks SET feedback=$2, answered_at=now() WHERE booking_id=$1::uuid",
                                    st["visit_booking"], msg.text.strip()[:500])
-            await _save(ctx, salon["id"], chat.to, {"history": st.get("history", [])})
-            await _reply(ctx, salon["id"], chat.to, st, chat, t(lang, "visit_feedback_thanks"))
+            cleared_feedback = {"history": st.get("history", [])}
+            await _save(ctx, salon["id"], chat.to, cleared_feedback)
+            await _reply(ctx, salon["id"], chat.to, cleared_feedback, chat, t(lang, "visit_feedback_thanks"))
             return
     if st.get("state") == "held" and tap_id:
         svc_name = next((s["name"] for s in services if s["id"] == st.get("service_id")), st.get("service_name") or "your booking")
@@ -446,6 +479,12 @@ async def _handle(ctx, msg: Message) -> None:
             await _save(ctx, salon["id"], msg.sender, {"history": st.get("history", [])})
             st = {"history": st.get("history", [])}
         else:
+            quick_held_first = rule_extract(msg.text or "", now.date(), services, "held")
+            if quick_held_first.intent != "cancel" and st.get("booking_id"):
+                acct = await payments.account(ctx.pool, salon["id"])
+                if acct is not None and acct.get("manual"):
+                    await _till_claim(ctx, salon, client, st, chat, lang, msg.text or "")
+                    return
             strict = mpesa.normalize_msisdn(msg.text or "")
             embedded = mpesa.extract_msisdn(msg.text or "") if not strict else None
             number = strict or embedded
@@ -516,11 +555,12 @@ async def _handle(ctx, msg: Message) -> None:
         if where == "rules" or quick.intent == "greeting":
             res = Result(quick, "rules")
         else:
-            res = await ctx.llm.extract(msg.text, today=now.date(), services=services, state=st.get("state", "idle"), history=st.get("history"))
+            res = await ctx.llm.extract(msg.text, today=now.date(), services=services, state=st.get("state", "idle"), history=st.get("history"),
+                                        salon_id=salon["id"])
             if res.ex.intent == "other" and quick.intent == "book" and (quick.service or quick.date or quick.window or quick.time):
                 res = Result(quick, "keywords")
     ex = res.ex
-    log.info("understood intent=%s via %s %s %dms", ex.intent, res.source, res.model, res.ms)
+    log.info("understood intent=%s via %s%s %s %dms", ex.intent, res.source, " degraded" if res.degraded else "", res.model, res.ms)
     if ex.intent != "other" and ex.language != lang:
         lang = ex.language
         await ctx.pool.execute("UPDATE clients SET lang=$2 WHERE id=$1::uuid", client["id"], lang)
@@ -550,15 +590,16 @@ async def _handle(ctx, msg: Message) -> None:
         await _book(*env, ex=ex, tap_id=tap_id)
     else:
         lang = await _speak(ctx, client, lang, msg.text or "")
-        await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, "fallback", example=example_for(services, lang)))
+        key = "fallback_degraded" if res.degraded else "fallback"
+        await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, key, example=example_for(services, lang)))
 
 
-async def _hear(ctx, msg: Message, lang: str, token: str) -> str | None:
+async def _hear(ctx, msg: Message, lang: str, token: str, salon_id: str | None = None) -> str | None:
     """Voice note -> text. Swahili speakers are known by their earlier messages; otherwise the model works out the language itself."""
     got = await ctx.wa.download_media(token, msg.media_id)
     if got is None:
         return None
-    heard = await ctx.voice.transcribe(got[0], got[1], "swh_Latn" if lang == "sw" else None)
+    heard = await ctx.voice.transcribe(got[0], got[1], "swh_Latn" if lang == "sw" else None, salon_id=salon_id)
     return heard.text if heard else None
 
 
