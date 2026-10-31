@@ -1,9 +1,11 @@
 """Voice notes: Meta holds the audio, our speech service turns it into text, and the normal conversation takes over."""
 import asyncio
 import os
+from types import SimpleNamespace
 
 import pytest
 
+from app.ai.voice import Transcriber
 from app.channels.whatsapp import parse_messages
 from tests.harness import PID, build, client, open_day, payload, post
 
@@ -16,6 +18,13 @@ def voice(wa_id: str = A, mid: str = "v1", media: str = "MEDIA1") -> dict:
     body = payload(wa_id, "", mid=mid)
     body["entry"][0]["changes"][0]["value"]["messages"][0] = {"from": wa_id, "id": mid, "type": "audio", "audio": {"id": media, "mime_type": "audio/ogg; codecs=opus", "voice": True}}
     return body
+
+
+def test_auth_headers_carry_our_token_and_proxy_keys_when_set():
+    plain = Transcriber(None, SimpleNamespace(asr_token="tok", asr_proxy_key="", asr_proxy_secret=""))
+    assert plain.auth_headers == {"X-Asr-Token": "tok"}
+    proxied = Transcriber(None, SimpleNamespace(asr_token="tok", asr_proxy_key="kid", asr_proxy_secret="sec"))
+    assert proxied.auth_headers == {"X-Asr-Token": "tok", "Modal-Key": "kid", "Modal-Secret": "sec"}
 
 
 def test_an_audio_message_carries_its_media_id():
@@ -33,7 +42,7 @@ def test_a_voice_note_becomes_a_booking_conversation_and_the_customer_is_told_wh
         assert "nataka fade kesho mchana" in out.bodies(A)[0]
         assert "Nafasi za mapema za Fade" in out.bodies(A)[1]
         [call] = out.asr
-        assert call["auth"] == "Bearer asrtok" and call["type"] == "audio/ogg" and call["bytes"] == b"OggS-fake-voice-note"
+        assert call["auth"] == "asrtok" and call["type"] == "audio/ogg" and call["bytes"] == b"OggS-fake-voice-note"
         assert call["lang"] is None
         await pool.close()
     asyncio.run(run())

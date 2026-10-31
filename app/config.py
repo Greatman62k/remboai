@@ -61,6 +61,8 @@ class Settings(BaseSettings):
     hold_minutes: int = 10
     asr_url: str = ""
     asr_token: str = ""
+    asr_proxy_key: str = ""
+    asr_proxy_secret: str = ""
     asr_timeout_s: float = 45.0
     vision_enabled: bool = True
     rate_limit_per_min: int = 20

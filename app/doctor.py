@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from .ai.llm import Extractor, _coerce, _json_from, sanitize
+from .ai.voice import Transcriber
 from .ai.vision import StyleMatcher, make_png
 from .mpesa import Daraja, MpesaError
 from .channels.whatsapp import explain
@@ -122,7 +123,7 @@ async def run_checks(s, http: httpx.AsyncClient, pool) -> list[Check]:
 
     if s.asr_url:
         try:
-            r = await http.get(s.asr_url.rsplit("/", 1)[0] + "/health", timeout=s.asr_timeout_s)
+            r = await http.get(s.asr_url.rsplit("/", 1)[0] + "/health", headers=Transcriber(http, s).auth_headers, timeout=s.asr_timeout_s)
             add("voice notes", r.status_code == 200, f"speech service answered: {r.json().get('model') if r.status_code == 200 else r.status_code}")
         except (httpx.HTTPError, ValueError) as e:
             add("voice notes", False, f"speech service not reachable ({e.__class__.__name__}); a cold start can take 30+ seconds, try again")
