@@ -5,6 +5,7 @@ import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from . import payments, waitlist
 from .messages import t
 from .metrics import reminders_queued, reminders_sent
 from .channels import outbound
@@ -16,6 +17,7 @@ MAX_ATTEMPTS = 3
 RETRY_DELAYS = (timedelta(minutes=5), timedelta(minutes=15))
 CLAIM_LEASE = timedelta(minutes=5)
 THANKS_TEMPLATE = "thanks_visit"
+STILL_TEMPLATE = "reminder_3h"
 
 
 async def ask_about_visits(pool, ctx) -> int:
@@ -53,7 +55,8 @@ class _Fmt(dict):
     def __missing__(self, key):
         return "{" + key + "}"
 
-async def schedule_reminders(pool, booking_id: str, template_24h: str = "reminder_24h", template_2h: str = "reminder_2h"):
+async def schedule_reminders(pool, booking_id: str, template_24h: str = "reminder_24h", template_2h: str = "reminder_2h",
+                         template_3h: str = STILL_TEMPLATE):
     row = await pool.fetchrow("SELECT b.id::text, b.salon_id::text, b.client_id::text, b.starts_at, b.ends_at, b.status, c.wa_id, c.reminder_opt_out as client_opt, b.reminder_opt_out as booking_opt FROM bookings b JOIN clients c ON c.id=b.client_id WHERE b.id=$1::uuid", booking_id)
     if not row or row["status"] not in ("held", "confirmed"):
         return
@@ -79,6 +82,10 @@ async def schedule_reminders(pool, booking_id: str, template_24h: str = "reminde
         run_at = starts_at - timedelta(hours=2)
         if run_at > now:
             jobs.append((template_2h, run_at))
+    if template_3h in names:
+        run_at = starts_at - timedelta(hours=3)
+        if run_at > now:
+            jobs.append((template_3h, run_at))
     if THANKS_TEMPLATE in names and row["ends_at"] is not None:
         run_at = (row["ends_at"] if row["ends_at"].tzinfo else row["ends_at"].replace(tzinfo=NBO)) + timedelta(hours=2)
         if run_at > now:
@@ -112,7 +119,7 @@ async def _settle_failure(pool, job_id: str, attempts: int, error: str, starts_a
 async def run_reminders(ctx):
     rows = await ctx.pool.fetch(
         "SELECT r.id::text, r.booking_id::text, r.salon_id::text, r.wa_id, r.template_name, b.starts_at, b.ends_at, s.name AS salon_name, s.wa_phone_number_id, s.wa_access_token, "
-        "t.body, t.language, t.variables, c.name AS client_name, sv.name AS service_name "
+        "t.body, t.language, t.variables, c.name AS client_name, c.lang, sv.name AS service_name "
         "FROM reminder_jobs r JOIN bookings b ON b.id=r.booking_id JOIN salons s ON s.id=r.salon_id "
         "JOIN reminder_templates t ON t.salon_id=r.salon_id AND t.name=r.template_name "
         "JOIN clients c ON c.id=r.client_id JOIN services sv ON sv.id=b.service_id "
@@ -163,6 +170,9 @@ async def _deliver(ctx, r, attempts: int, starts_at: datetime) -> None:
         if state["status"] != "confirmed":
             await pool.execute("UPDATE reminder_jobs SET run_at=now()+($2) WHERE id=$1::uuid", r["id"], timedelta(minutes=10))
             return
+    if r["template_name"] == STILL_TEMPLATE:
+        await _deliver_still(ctx, r, starts_at)
+        return
     local = starts_at.astimezone(NBO)
     values = _template_values(r, local)
     body = r["body"].format_map(values)
@@ -183,3 +193,82 @@ async def _deliver(ctx, r, attempts: int, starts_at: datetime) -> None:
         log.info("sent reminder %s to %s", r["template_name"], to[-4:])
     else:
         await _settle_failure(pool, r["id"], attempts, "send failed", starts_at)
+
+
+async def _deliver_still(ctx, r, starts_at: datetime) -> None:
+    """The 3h Still-coming nudge always carries Keep/Cancel buttons, on every channel."""
+    lang = r["lang"] or "en"
+    body = r["body"].format_map(_template_values(r, starts_at.astimezone(NBO)))
+    buttons = [(f"still-keep:{r['booking_id']}", t(lang, "still_btn_keep")[:20]),
+               (f"still-cancel:{r['booking_id']}", t(lang, "still_btn_cancel")[:20])]
+    salon = {"id": r["salon_id"], "wa_phone_number_id": r["wa_phone_number_id"], "wa_access_token": r["wa_access_token"]}
+    sent = await outbound.send_buttons(ctx, salon, r["wa_id"], body, buttons)
+    if sent:
+        await ctx.pool.execute("UPDATE reminder_jobs SET status='sent', sent_at=now(), last_error=NULL WHERE id=$1::uuid", r["id"])
+        reminders_sent.labels("sent").inc()
+        log.info("sent reminder %s to %s", STILL_TEMPLATE, r["wa_id"][-4:])
+    else:
+        raise RuntimeError("still send failed")
+
+
+async def handle_still_tap(ctx, salon: dict, client: dict, st: dict, chat, lang: str, tz, reply_id: str) -> bool:
+    """Keep confirms the customer is still coming; Cancel frees the slot toward the waitlist."""
+    from .booking_flow import _reply, _save, when_label
+    kind, _, bid = reply_id.partition(":")
+    if kind not in ("still-keep", "still-cancel") or not bid:
+        return False
+    row = await ctx.pool.fetchrow(
+        "SELECT b.id::text AS id, b.status, b.starts_at FROM bookings b "
+        "WHERE b.id=$1::uuid AND b.salon_id=$2::uuid AND b.client_id=$3::uuid", bid, salon["id"], client["id"])
+    if row is None or row["status"] not in ("held", "confirmed"):
+        return True
+    if row["starts_at"] <= datetime.now(NBO):
+        return True
+    if kind == "still-keep":
+        await ctx.pool.execute("UPDATE reminder_jobs SET replied=true WHERE booking_id=$1::uuid AND template_name=$2 AND status='sent'",
+                               bid, STILL_TEMPLATE)
+        await _reply(ctx, salon["id"], chat.to, st, chat, t(lang, "still_kept", when=when_label(row["starts_at"], tz)))
+        return True
+    await ctx.pool.execute("UPDATE bookings SET status='cancelled' WHERE id=$1::uuid AND status IN ('held','confirmed')", bid)
+    await payments.park_for_cancellation(ctx.pool, bid)
+    await payments.fail_open_manual_claims(ctx.pool, bid)
+    await cancel_reminders(ctx.pool, bid)
+    cleared = {"history": st.get("history", [])}
+    await _save(ctx, salon["id"], chat.to, cleared)
+    await _reply(ctx, salon["id"], chat.to, cleared, chat,
+                 t(lang, "cancelled", when=when_label(row["starts_at"], tz), salon=salon["name"]))
+    await waitlist.offer_for_booking(ctx, salon, bid)
+    return True
+
+
+async def release_silent(ctx) -> int:
+    """Bookings whose 3h nudge went out, was never answered, and whose start is
+    now under 2h away lose the slot toward the waitlist. Runs every minute."""
+    rows = await ctx.pool.fetch(
+        "SELECT b.id::text AS bid, b.salon_id::text AS salon_id, s.name AS salon_name, s.owner_wa_id, "
+        "s.wa_phone_number_id, s.wa_access_token, s.tg_bot_id, s.deposit_kes, c.wa_id AS phone, c.lang, "
+        "b.starts_at, sv.name AS service "
+        "FROM reminder_jobs r JOIN bookings b ON b.id=r.booking_id JOIN salons s ON s.id=r.salon_id "
+        "JOIN clients c ON c.id=r.client_id JOIN services sv ON sv.id=b.service_id "
+        "WHERE r.template_name=$1 AND r.status='sent' AND NOT r.replied "
+        "AND b.status IN ('held','confirmed') AND b.starts_at > now() AND b.starts_at <= now() + make_interval(hours => 2) "
+        "LIMIT 20", STILL_TEMPLATE)
+    n = 0
+    for r in rows:
+        try:
+            await ctx.pool.execute("UPDATE bookings SET status='cancelled' WHERE id=$1::uuid AND status IN ('held','confirmed')", r["bid"])
+            await payments.park_for_cancellation(ctx.pool, r["bid"])
+            await payments.fail_open_manual_claims(ctx.pool, r["bid"])
+            await cancel_reminders(ctx.pool, r["bid"])
+            lang = r["lang"] or "en"
+            salon = {"id": r["salon_id"], "name": r["salon_name"], "owner_wa_id": r["owner_wa_id"],
+                     "wa_phone_number_id": r["wa_phone_number_id"], "wa_access_token": r["wa_access_token"],
+                     "tg_bot_id": r["tg_bot_id"], "deposit_kes": r["deposit_kes"]}
+            await outbound.send_text(ctx, salon, r["phone"],
+                                     t(lang, "still_released", service=r["service"],
+                                       when=r["starts_at"].astimezone(NBO).strftime("%a %d %b, %H:%M"), salon=r["salon_name"]))
+            await waitlist.offer_for_booking(ctx, salon, r["bid"])
+            n += 1
+        except Exception:
+            log.exception("silent release failed for booking %s", r["bid"])
+    return n
