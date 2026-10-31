@@ -2,6 +2,14 @@
 
 Everything in this repository was written during the Meta Global AI Developer Hackathon (building period Oct 27 - Nov 4, 2026).
 
+## Oct 31 (dependency refresh)
+
+327 tests, all passing.
+
+- Pinned dependencies moved to their latest releases: pydantic 2.14.2, redis 8.1.0, cryptography 50.0.2, prometheus-client 0.26.0, pytest 9.2.0. Everything else was already latest.
+- The refresh fixed a real gap as a side effect: the QR sticker tests now run instead of skipping on a broken `qrcode` import.
+- Verified end to end: host suite plus the full Docker suite on a rebuilt image, against real Postgres and Redis.
+
 ## Oct 30 (chat-first rebuild)
 
 278 tests, all passing.

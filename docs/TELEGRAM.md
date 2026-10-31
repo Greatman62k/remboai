@@ -13,7 +13,7 @@ not a phone number, so the bot asks "which M-Pesa number?" before the deposit pr
    python scripts/seed_salon.py --name "Brian's Kinyozi" --telegram-bot-id 123456789 --stylist Brian \
      --service "Fade:500:45:kinyozi,cut" --till <HEAD_OFFICE>:<TILL> --owner 2547XXXXXXXX --deposit 200
    ```
-   A salon can have a WhatsApp number and a Telegram bot at once (`--phone-number-id` too).
+   A salon can have a WhatsApp number and a Telegram bot at once (`--phone-number-id` too). Add `--manual-till` after `--till` when the till has no Daraja API: deposits then confirm on the owner's tap.
 5. Start the app. With no https `PUBLIC_BASE_URL` it **polls** Telegram, so a laptop is enough. With an https `PUBLIC_BASE_URL` it registers a webhook
    (`TELEGRAM_WEBHOOK_SECRET` required). Force one with `TELEGRAM_MODE=poll|webhook`.
 

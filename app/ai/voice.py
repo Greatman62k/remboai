@@ -9,6 +9,8 @@ from dataclasses import dataclass
 
 import httpx
 
+from app.ratelimit import RateLimiter
+
 log = logging.getLogger("rembo.voice")
 MAX_TEXT = 500
 
@@ -21,16 +23,19 @@ class Transcript:
 
 
 class Transcriber:
-    def __init__(self, http: httpx.AsyncClient, settings, budget=None):
-        self.http, self.s, self.budget = http, settings, budget
+    def __init__(self, http: httpx.AsyncClient, settings, budget=None, redis=None):
+        self.http, self.s, self.budget, self.redis = http, settings, budget, redis
 
     @property
     def enabled(self) -> bool:
         return bool(self.s.asr_url)
 
-    async def transcribe(self, audio: bytes, mime: str, lang: str | None) -> Transcript | None:
+    async def transcribe(self, audio: bytes, mime: str, lang: str | None, salon_id: str | None = None) -> Transcript | None:
         """lang is an Omnilingual code such as 'swh_Latn', or None to let the model decide."""
         if not self.enabled or (self.budget is not None and not await self.budget.take("voice")):
+            return None
+        if salon_id and self.redis is not None and not await RateLimiter(self.redis, self.s).llm_allowed(salon_id, kind="voice"):
+            log.warning("salon %s hit its daily voice allowance", salon_id)
             return None
         t0 = clock.perf_counter()
         try:

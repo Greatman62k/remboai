@@ -249,6 +249,134 @@ def test_daraja_down_keeps_the_slot_and_says_how_to_retry():
     asyncio.run(run())
 
 
+def test_claim_parsing_reads_amount_and_code_but_trusts_nothing():
+    assert payments.parse_claim("200 QAB1CD2EF3") == (200, "QAB1CD2EF3", False)
+    sms = "Confirmed. Ksh200.00 sent to Zuri Cuts on 12/2/26 at 3:00 PM. M-PESA Ref: qab1cd2ef3."
+    assert payments.parse_claim(sms) == (200, "QAB1CD2EF3", False)
+    assert payments.parse_claim("0712345678") == (None, None, False)
+    assert payments.parse_claim("send to till 5012345") == (None, None, False)
+    assert payments.parse_claim("200") == (200, None, False)
+    assert payments.parse_claim("200 300 QAB1CD2EF3") == (None, "QAB1CD2EF3", True)
+
+
+async def manual_salon(pool, salon):
+    await pool.execute("UPDATE salons SET owner_wa_id=$1", OWNER)
+    await pool.execute("UPDATE salon_payment SET manual=true WHERE salon_id=$1::uuid", salon)
+
+
+@needs_db
+def test_manual_till_confirms_on_owner_tap():
+    async def run():
+        pool, out, salon = await build(DSN)
+        await manual_salon(pool, salon)
+        async with client() as c:
+            await to_pay(c, out, pool)
+        assert out.stk == []
+        assert "till 5012345" in out.bodies(A)[-1]
+        async with client() as c:
+            await post(c, payload(A, "200 QAB1CD2EF3", mid="claim1"))
+        p = await pool.fetchrow("SELECT id::text, status, method, amount_kes, mpesa_receipt FROM payments")
+        assert (p["status"], p["method"], p["amount_kes"], p["mpesa_receipt"]) == ("pending", "manual", 200, "QAB1CD2EF3")
+        assert await pool.fetchval("SELECT status FROM bookings") == "held"
+        assert await pool.fetchval("SELECT hold_expires_at > now() + interval '20 minutes' FROM bookings")
+        assert "waiting for Zuri Cuts to confirm" in out.bodies(A)[-1]
+        req = [m for m in out.to(OWNER) if m["type"] == "interactive"][-1]
+        yes = [b["reply"]["id"] for b in req["interactive"]["action"]["buttons"] if b["reply"]["id"].startswith("till:yes:")]
+        assert len(yes) == 1 and yes[0].endswith(p["id"])
+        async with client() as c:
+            await post(c, payload(OWNER, reply_id=yes[0], mid="tap1"))
+        assert await pool.fetchval("SELECT status FROM payments") == "paid"
+        assert await pool.fetchval("SELECT status FROM bookings") == "confirmed"
+        assert "You're all booked" in out.bodies(A)[-1]
+        assert "Deposit KES 200 paid" in out.bodies(OWNER)[-1]
+        n_before = len(out.bodies(A))
+        async with client() as c:
+            await post(c, payload(OWNER, reply_id=yes[0], mid="tap2"))
+        assert await pool.fetchval("SELECT count(*) FROM payments WHERE status='paid'") == 1
+        assert "already confirmed" in out.bodies(OWNER)[-1]
+        assert len(out.bodies(A)) == n_before
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
+def test_owner_no_leaves_the_hold_open_for_a_better_claim():
+    async def run():
+        pool, out, salon = await build(DSN)
+        await manual_salon(pool, salon)
+        async with client() as c:
+            await to_pay(c, out, pool)
+            await post(c, payload(A, "200 QAB1CD2EF3", mid="claim1"))
+        req = [m for m in out.to(OWNER) if m["type"] == "interactive"][-1]
+        no = [b["reply"]["id"] for b in req["interactive"]["action"]["buttons"] if b["reply"]["id"].startswith("till:no:")][0]
+        async with client() as c:
+            await post(c, payload(OWNER, reply_id=no, mid="tap1"))
+        assert await pool.fetchval("SELECT status FROM payments") == "failed"
+        assert await pool.fetchval("SELECT status FROM bookings") == "held"
+        assert "could not confirm" in out.bodies(A)[-1]
+        assert "better claim" in out.bodies(OWNER)[-1]
+        async with client() as c:
+            await post(c, payload(A, "200 QAB1CD2EF3", mid="claim2"))
+        assert "already used" in out.bodies(A)[-1]
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
+def test_an_unclear_claim_goes_to_review_not_to_the_owner_buttons():
+    async def run():
+        pool, out, salon = await build(DSN)
+        await manual_salon(pool, salon)
+        async with client() as c:
+            await to_pay(c, out, pool)
+            await post(c, payload(A, "150 QAB1CD2EF3", mid="claim1"))
+        assert await pool.fetchval("SELECT status FROM payments") == "review"
+        review = await pool.fetchrow("SELECT reason, status, expected_amount, received_amount FROM payment_reviews")
+        assert (review["reason"], review["status"], review["expected_amount"], review["received_amount"]) == ("amount_mismatch", "pending_review", 200, 150)
+        assert await pool.fetchval("SELECT status FROM bookings") == "held"
+        assert "human eye" in out.bodies(A)[-1]
+        assert all(m["type"] == "text" for m in out.to(OWNER))
+        assert "KES 150" in out.bodies(OWNER)[-1]
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
+def test_manual_claims_wait_for_the_owner_not_the_sweeper():
+    async def run():
+        from app.main import app
+        pool, out, salon = await build(DSN)
+        await manual_salon(pool, salon)
+        async with client() as c:
+            await to_pay(c, out, pool)
+            await post(c, payload(A, "200 QAB1CD2EF3", mid="claim1"))
+        assert await payments.reconcile(app.state.ctx) == 0
+        assert await pool.fetchval("SELECT status FROM payments") == "pending"
+        await pool.execute("UPDATE bookings SET hold_expires_at=now() - interval '1 minute'")
+        await pool.execute("UPDATE payments SET created_at=now() - interval '10 minutes'")
+        assert await expire_holds(pool) == 1
+        assert await pool.fetchval("SELECT status FROM bookings") == "expired"
+        assert await pool.fetchval("SELECT status FROM payments") == "failed"
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
+def test_cancelling_drops_a_waiting_manual_claim():
+    async def run():
+        pool, out, salon = await build(DSN)
+        await manual_salon(pool, salon)
+        async with client() as c:
+            await to_pay(c, out, pool)
+            await post(c, payload(A, "200 QAB1CD2EF3", mid="claim1"))
+            out.script["cancel it"] = {"intent": "cancel"}
+            await post(c, payload(A, "cancel it", mid="x1"))
+        assert await pool.fetchval("SELECT status FROM bookings") == "cancelled"
+        assert await pool.fetchval("SELECT status FROM payments") == "failed"
+        await pool.close()
+    asyncio.run(run())
+
+
 @needs_db
 def test_a_salon_without_a_till_confirms_bookings_without_a_deposit():
     async def run():

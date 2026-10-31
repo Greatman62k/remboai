@@ -265,7 +265,7 @@ def test_owner_cancels_and_moves_by_customer_number():
         staff = await pool.fetchval("SELECT id::text FROM staff")
         svc = await pool.fetchval("SELECT id::text FROM services WHERE name='Fade'")
         a = await pool.fetchval("INSERT INTO clients (salon_id, wa_id, lang) VALUES ($1::uuid,$2,'en') RETURNING id::text", salon, A)
-        morrow = (datetime.now(nbo) + timedelta(days=1)).date()
+        morrow = open_day()
         mkb = lambda cid, h: pool.fetchval(
             "INSERT INTO bookings (salon_id, staff_id, service_id, client_id, starts_at, ends_at, status) "
             "VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,'confirmed') RETURNING id::text",
@@ -366,5 +366,51 @@ def test_daily_summary_is_sent_once_per_day_with_deposits_and_tomorrows_bookings
             assert await owner.daily_summaries(ctx) == 0
         body = out.bodies(OWNER)[-1]
         assert "Deposits collected today: KES 200 (1)." in body
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
+def test_owner_sets_the_deposit_and_sees_whether_a_till_takes_it():
+    async def run():
+        pool, out, salon = await build(DSN)
+        await pool.execute("UPDATE salons SET owner_wa_id=$1", OWNER)
+        async with client() as c:
+            await post(c, payload(OWNER, "deposit 200", mid="d1"))
+            assert await pool.fetchval("SELECT deposit_kes FROM salons") == 200
+            assert "KES 200" in out.bodies(OWNER)[-1] and "till" in out.bodies(OWNER)[-1].lower()
+            await post(c, payload(OWNER, "amana 300", mid="d2"))
+            assert await pool.fetchval("SELECT deposit_kes FROM salons") == 300
+            assert "Amana imewekwa" in out.bodies(OWNER)[-1]
+            await post(c, payload(OWNER, "deposit much", mid="d3"))
+            assert "0 to 100000" in out.bodies(OWNER)[-1]
+            assert await pool.fetchval("SELECT deposit_kes FROM salons") == 300
+            await post(c, payload(OWNER, "deposit 0", mid="d4"))
+            assert "off" in out.bodies(OWNER)[-1].lower()
+            assert await pool.fetchval("SELECT deposit_kes FROM salons") == 0
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
+def test_owner_cannot_move_a_booking_onto_a_closed_day():
+    async def run():
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+        pool, out, salon = await build(DSN)
+        await pool.execute("UPDATE salons SET owner_wa_id=$1", OWNER)
+        nbo = ZoneInfo("Africa/Nairobi")
+        staff = await pool.fetchval("SELECT id::text FROM staff")
+        svc = await pool.fetchval("SELECT id::text FROM services WHERE name='Fade'")
+        a = await pool.fetchval("INSERT INTO clients (salon_id, wa_id, lang) VALUES ($1::uuid,$2,'en') RETURNING id::text", salon, A)
+        morrow = (datetime.now(nbo) + timedelta(days=1)).date()
+        await pool.execute(
+            "INSERT INTO bookings (salon_id, staff_id, service_id, client_id, starts_at, ends_at, status) "
+            "VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,'confirmed')",
+            salon, staff, svc, a, datetime.combine(morrow, time(10, 0), nbo), datetime.combine(morrow, time(10, 45), nbo))
+        async with client() as c:
+            await post(c, payload(OWNER, "move 254711000001 sunday 10:00", mid="m1"))
+            assert "closed" in out.bodies(OWNER)[-1].lower()
+            assert await pool.fetchval("SELECT count(*) FROM bookings WHERE starts_at::date=$1", morrow) == 1
         await pool.close()
     asyncio.run(run())

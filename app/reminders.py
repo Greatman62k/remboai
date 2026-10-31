@@ -84,7 +84,7 @@ async def schedule_reminders(pool, booking_id: str, template_24h: str = "reminde
         if run_at > now:
             jobs.append((THANKS_TEMPLATE, run_at))
     for name, run_at in jobs:
-        exists = await pool.fetchval("SELECT 1 FROM reminder_jobs WHERE booking_id=$1::uuid AND template_name=$2", booking_id, name)
+        exists = await pool.fetchval("SELECT 1 FROM reminder_jobs WHERE booking_id=$1::uuid AND template_name=$2 AND status='pending'", booking_id, name)
         if exists:
             continue
         await pool.execute("INSERT INTO reminder_jobs (booking_id, salon_id, client_id, wa_id, run_at, template_name) VALUES ($1::uuid,$2::uuid,$3::uuid,$4,$5,$6)", booking_id, row["salon_id"], row["client_id"], row["wa_id"], run_at, name)

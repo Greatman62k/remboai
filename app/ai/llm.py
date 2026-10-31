@@ -16,6 +16,7 @@ import httpx
 from pydantic import BaseModel, ValidationError
 
 from app import lexicon, smalltalk
+from app.ratelimit import RateLimiter
 from app.timeparse import parse_day, parse_time, parse_window
 
 log = logging.getLogger("rembo.llm")
@@ -40,6 +41,22 @@ class Result:
     source: str
     model: str = ""
     ms: int = 0
+    degraded: bool = False
+
+
+def _failure_kind(exc: BaseException, status: int | None) -> str:
+    """What went wrong with a model call, in words the logs and the operator can act on."""
+    if status in (401, 403, 407):
+        return "auth"
+    if status == 429:
+        return "rate_limited"
+    if status is not None and status >= 500:
+        return "server"
+    if isinstance(exc, httpx.TimeoutException):
+        return "timeout"
+    if isinstance(exc, httpx.NetworkError):
+        return "network"
+    return "other"
 
 
 def build_prompt(today: date, services: list[str], state: str, history: list[dict] | None = None) -> str:
@@ -179,8 +196,8 @@ def strip_reasoning(content: str) -> str:
 
 
 class Extractor:
-    def __init__(self, http: httpx.AsyncClient, settings, budget=None, pool=None):
-        self.http, self.s, self.budget, self.pool = http, settings, budget, pool
+    def __init__(self, http: httpx.AsyncClient, settings, budget=None, pool=None, redis=None):
+        self.http, self.s, self.budget, self.pool, self.redis = http, settings, budget, pool, redis
 
     def endpoints(self) -> list[tuple[str, str, str, int]]:
         primary = getattr(self.s, "llm_backend", "") or "primary"
@@ -212,10 +229,14 @@ class Extractor:
             body["response_format"] = {"type": "json_schema", "json_schema": {"name": "extraction", "schema": Extraction.model_json_schema()}}
         return body
 
-    async def extract(self, text: str, *, today: date, services: list[dict], state: str, history: list[dict] | None = None) -> Result:
+    async def extract(self, text: str, *, today: date, services: list[dict], state: str, history: list[dict] | None = None,
+                      salon_id: str | None = None) -> Result:
         names = [s["name"] for s in services]
         if self.budget is not None and not await self.budget.take("text"):
-            return Result(sanitize(rule_extract(text, today, services, state), today), "keywords")
+            return Result(sanitize(rule_extract(text, today, services, state), today), "keywords", degraded=True)
+        if salon_id and self.redis is not None and not await RateLimiter(self.redis, self.s).llm_allowed(salon_id):
+            log.warning("salon %s hit its daily model allowance; answering from keyword rules", salon_id)
+            return Result(sanitize(rule_extract(text, today, services, state), today), "keywords", degraded=True)
         for backend, base, key, model, attempts in self.endpoints():
             if _breaker_open(backend, self.s):
                 log.warning("model backend %s resting after failures; trying the next one", backend)
@@ -235,7 +256,12 @@ class Extractor:
                     await self._log_call(backend, model, ms, True, usage.get("prompt_tokens"), usage.get("completion_tokens"))
                     return Result(ex, "model", model, ms)
                 except (httpx.HTTPError, KeyError, IndexError, ValueError, ValidationError) as e:
-                    log.warning("model %s attempt %s failed: %s", model, attempt + 1, e.__class__.__name__)
+                    status = e.response.status_code if isinstance(e, httpx.HTTPStatusError) and e.response is not None else None
+                    kind = _failure_kind(e, status)
+                    if kind == "auth":
+                        log.error("model %s rejected our API key (%s): check the key for backend %s", model, status, backend)
+                    else:
+                        log.warning("model %s attempt %s failed: %s (%s)", model, attempt + 1, e.__class__.__name__, kind)
                     _breaker_note(backend, False, self.s)
                     await self._log_call(backend, model, int((clock.perf_counter() - t0) * 1000), False)
-        return Result(sanitize(rule_extract(text, today, services, state), today), "keywords")
+        return Result(sanitize(rule_extract(text, today, services, state), today), "keywords", degraded=True)

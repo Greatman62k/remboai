@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from app.ai.llm import Extractor, _BREAKER, strip_reasoning
+from app.ai.llm import Extractor, _BREAKER, _failure_kind, rule_extract, strip_reasoning
 
 DSN = os.environ.get("TEST_DATABASE_URL")
 needs_db = pytest.mark.skipif(not DSN, reason="needs TEST_DATABASE_URL")
@@ -64,6 +64,44 @@ async def test_a_tripped_backend_rests_while_the_fallback_serves():
     _BREAKER.clear()
 
 
+def test_model_failures_are_named_so_the_operator_knows_what_broke():
+    req = httpx.Request("POST", "https://primary.test/v1/chat")
+    assert _failure_kind(httpx.ConnectError("no route to host"), None) == "network"
+    assert _failure_kind(httpx.ReadTimeout("slow server"), None) == "timeout"
+    denied = httpx.HTTPStatusError("denied", request=req, response=httpx.Response(401))
+    assert _failure_kind(denied, 401) == "auth"
+    busy = httpx.HTTPStatusError("busy", request=req, response=httpx.Response(429))
+    assert _failure_kind(busy, 429) == "rate_limited"
+    down = httpx.HTTPStatusError("down", request=req, response=httpx.Response(503))
+    assert _failure_kind(down, 503) == "server"
+    assert _failure_kind(ValueError("bad json"), None) == "other"
+
+
+@pytest.mark.asyncio
+async def test_no_network_means_keyword_rules_and_a_degraded_flag():
+    def handler(req):
+        raise httpx.ConnectError("no route to host")
+    _BREAKER.clear()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        ext = Extractor(http, settings())
+        res = await ext.extract("what time do you close", today=date(2026, 10, 30), services=SERVICES, state="idle")
+        assert (res.source, res.degraded) == ("keywords", True)
+        assert res.ex.intent == rule_extract("what time do you close", date(2026, 10, 30), SERVICES, "idle").intent
+    _BREAKER.clear()
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_api_key_means_keyword_rules_and_a_degraded_flag():
+    def handler(req):
+        return httpx.Response(401, json={"error": "bad key"})
+    _BREAKER.clear()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        ext = Extractor(http, settings())
+        res = await ext.extract("what time do you close", today=date(2026, 10, 30), services=SERVICES, state="idle")
+        assert (res.source, res.degraded) == ("keywords", True)
+    _BREAKER.clear()
+
+
 @needs_db
 def test_successful_calls_are_logged_with_backend_and_tokens():
     async def run():
@@ -87,9 +125,10 @@ def test_model_info_names_the_active_backend():
     async def run():
         from tests.harness import build, client
         from app.main import app
-        pool, out, salon = await build(DSN, llm_backend="baseten")
+        pool, out, salon = await build(DSN, llm_backend="baseten", ops_api_key="test-ops-key")
         async with client() as c:
-            r = await c.get("/model-info")
+            assert (await c.get("/model-info")).status_code == 401
+            r = await c.get("/model-info", headers={"x-ops-key": "test-ops-key"})
             assert r.json()["backend"] == "baseten"
             assert r.json()["model"] == "muse-spark-1.3"
         await pool.close()

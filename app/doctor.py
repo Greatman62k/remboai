@@ -33,7 +33,7 @@ async def run_checks(s, http: httpx.AsyncClient, pool) -> list[Check]:
     salons = []
     try:
         salons = [dict(r) for r in await pool.fetch(
-            "SELECT s.id::text, s.name, s.wa_phone_number_id, s.tg_bot_id, s.owner_wa_id, s.deposit_kes, sp.kind, sp.shortcode, sp.party_b, "
+            "SELECT s.id::text, s.name, s.wa_phone_number_id, s.tg_bot_id, s.owner_wa_id, s.deposit_kes, sp.kind, sp.shortcode, sp.party_b, sp.manual, "
             "(SELECT count(*) FROM services v WHERE v.salon_id=s.id AND v.active) AS services, "
             "(SELECT count(*) FROM staff t WHERE t.salon_id=s.id AND t.active) AS staff "
             "FROM salons s LEFT JOIN salon_payment sp ON sp.salon_id=s.id WHERE s.active")]
@@ -49,7 +49,14 @@ async def run_checks(s, http: httpx.AsyncClient, pool) -> list[Check]:
         if sl["deposit_kes"] > 0 and not sl["kind"]:
             add(label + " deposits", False, "deposit is set but no till/paybill: bookings will be confirmed with NO deposit (use --till)", warn=True)
         elif sl["kind"]:
-            add(label + " deposits", True, f"KES {sl['deposit_kes']} to {sl['kind']} {sl['party_b']} (shortcode {sl['shortcode']})")
+            manual = "manual till, owner confirms each deposit" if sl["manual"] else f"Daraja STK (shortcode {sl['shortcode']})"
+            add(label + " deposits", True, f"KES {sl['deposit_kes']} to {sl['kind']} {sl['party_b']} ({manual})")
+        try:
+            approved = await pool.fetchval("SELECT count(*) FROM reminder_templates WHERE salon_id=$1::uuid AND approved=true", sl["id"])
+            if not approved:
+                add(label + " reminders", False, "no approved reminder templates: no 24h/2h/thanks reminders go out until rows are added (see docs/TEMPLATES.md)", warn=True)
+        except Exception as e:  # noqa: BLE001
+            add(label + " reminders", False, f"could not read reminder_templates: {e.__class__.__name__}", warn=True)
         add(label + " owner", bool(sl["owner_wa_id"]), "owner contact set" if sl["owner_wa_id"] else "no --owner: no booking alerts or owner commands", warn=True)
         if not sl["wa_phone_number_id"]:
             continue

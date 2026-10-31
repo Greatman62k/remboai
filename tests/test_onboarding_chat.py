@@ -13,6 +13,7 @@ from app.onboarding_chat import (
     examples,
     find_service,
     looks_off_topic,
+    parse_deposit,
     parse_owners,
     parse_price,
     parse_service_line,
@@ -45,6 +46,21 @@ def test_slugify_and_service_and_time_parsing_are_deterministic():
     assert parse_time_pair("9am-6pm")[1].strftime("%H:%M") == "18:00"
     assert parse_time_pair("18:00-09:00") is None
     assert parse_time_pair("sometime") is None
+
+
+def test_mangled_pairs_are_rejected_and_bare_evenings_roll():
+    from datetime import time
+    assert parse_time_pair("0900-1800") is None
+    assert parse_time_pair("9:3-17") is None
+    assert parse_time_pair("25:00-9:99") is None
+    assert parse_time_pair("open 9-17") is None
+    assert parse_time_pair("9-5") == (time(9), time(17))
+    assert parse_time_pair("12-8") == (time(12), time(20))
+    assert parse_time_pair("10-2") == (time(10), time(14))
+    assert parse_time_pair("2-11") is None
+    assert parse_time_pair("7-7") is None
+    assert parse_time_pair("09:00-18:00") == (time(9), time(18))
+    assert parse_time_pair("9am-5pm") == (time(9), time(17))
     assert default_minutes("Skin fade") == 30
     assert default_minutes("Knotless braids") == 180
     assert default_minutes("Something new") == 45
@@ -103,6 +119,21 @@ def test_owners_kinds_and_change_requests_parse():
     assert not wants_register("what are your opening hours")
     assert not wants_register("how do i set up an appointment")
     assert not wants_register("Fade 500 30")
+
+
+def test_deposit_amounts_parse_with_a_plain_no_for_free():
+    assert parse_deposit("200") == 200
+    assert parse_deposit("1,500") == 1500
+    assert parse_deposit("KES 200 per booking") == 200
+    assert parse_deposit("no") == 0
+    assert parse_deposit("no deposit") == 0
+    assert parse_deposit("no 200") is None
+    assert parse_deposit("none 200") is None
+    assert parse_deposit("bure") == 0
+    assert parse_deposit("") is None
+    assert parse_deposit("much") is None
+    assert parse_deposit("99999999") is None
+    assert redirect_step("change the deposit please") == "ask_deposit"
 
 
 def test_bare_times_belong_to_the_only_service():
@@ -180,12 +211,16 @@ def test_chat_onboarding_registers_a_salon_with_no_model_calls():
             await post_tg(c, tg_update(9, OWNER_CHAT, "YES"))
             assert "opening hours" in out.tg_bodies(str(OWNER_CHAT))[-1].lower()
             await post_tg(c, tg_update(10, OWNER_CHAT, "09:00-18:00"))
+            assert "deposit" in out.tg_bodies(str(OWNER_CHAT))[-1].lower()
+            await post_tg(c, tg_update(11, OWNER_CHAT, "200"))
             assert "ready to open" in out.tg_bodies(str(OWNER_CHAT))[-1].lower()
-            await post_tg(c, tg_update(11, OWNER_CHAT, "YES"))
+            assert "KES 200" in out.tg_bodies(str(OWNER_CHAT))[-1]
+            await post_tg(c, tg_update(12, OWNER_CHAT, "YES"))
             live = out.tg_bodies(str(OWNER_CHAT))[-1]
             assert "is live" in live.lower() and "amina-braids" in live
         assert out.calls == []
-        row = await pool.fetchrow("SELECT name, owner_wa_id, tg_bot_id, slug, open_hours FROM salons WHERE slug='amina-braids'")
+        row = await pool.fetchrow("SELECT name, owner_wa_id, tg_bot_id, slug, open_hours, deposit_kes FROM salons WHERE slug='amina-braids'")
+        assert row["deposit_kes"] == 200
         assert row is not None and row["owner_wa_id"] == sender and row["tg_bot_id"] == BOT
         import json
         hours = row["open_hours"] if isinstance(row["open_hours"], dict) else json.loads(row["open_hours"])
@@ -224,6 +259,101 @@ def test_onboarding_twin_yes_branch_and_voice_price_list():
 
 
 @needs_db
+def test_affirmations_are_never_stored_as_names():
+    async def run():
+        from app.main import app
+        pool, out, seed = await build(DSN)
+        ctx = app.state.ctx
+        from app import onboarding_chat
+        sender, chat = "tg:8002", "8002"
+        await onboarding_chat.begin(ctx, sender, BOT, "/start register")
+        await onboarding_chat.advance(ctx, sender, BOT, "yes")
+        assert "salon name" in out.tg_bodies(chat)[-1].lower()
+        await onboarding_chat.advance(ctx, sender, BOT, "Real Salon")
+        await onboarding_chat.advance(ctx, sender, BOT, "1")
+        await onboarding_chat.advance(ctx, sender, BOT, "ok")
+        assert "stylist" in out.tg_bodies(chat)[-1].lower()
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
+def test_greetings_are_not_stored_as_stylist_names():
+    async def run():
+        from app.main import app
+        pool, out, seed = await build(DSN)
+        ctx = app.state.ctx
+        from app import onboarding_chat
+        sender, chat = "tg:8005", "8005"
+        await onboarding_chat.begin(ctx, sender, BOT, "/start register")
+        await onboarding_chat.advance(ctx, sender, BOT, "Greet Salon")
+        await onboarding_chat.advance(ctx, sender, BOT, "1")
+        await onboarding_chat.advance(ctx, sender, BOT, "hello")
+        assert "stylist" in out.tg_bodies(chat)[-1].lower()
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
+def test_yes_after_back_keeps_the_listed_prices():
+    async def run():
+        from app.main import app
+        pool, out, seed = await build(DSN)
+        ctx = app.state.ctx
+        from app import onboarding_chat
+        sender, chat = "tg:8003", "8003"
+        await onboarding_chat.begin(ctx, sender, BOT, "/start register")
+        await onboarding_chat.advance(ctx, sender, BOT, "Steady Cuts")
+        await onboarding_chat.advance(ctx, sender, BOT, "1")
+        await onboarding_chat.advance(ctx, sender, BOT, "Amina")
+        await onboarding_chat.advance(ctx, sender, BOT, "Fade 500 30")
+        await onboarding_chat.advance(ctx, sender, BOT, "BACK")
+        await onboarding_chat.advance(ctx, sender, BOT, "YES")
+        assert "Fade: 500" in out.tg_bodies(chat)[-1]
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
+def test_dropped_duration_lines_are_shown_not_silently_lost():
+    async def run():
+        from app.main import app
+        pool, out, seed = await build(DSN)
+        ctx = app.state.ctx
+        from app import onboarding_chat
+        sender, chat = "tg:8004", "8004"
+        await onboarding_chat.begin(ctx, sender, BOT, "/start register")
+        await onboarding_chat.advance(ctx, sender, BOT, "Time Salon")
+        await onboarding_chat.advance(ctx, sender, BOT, "1")
+        await onboarding_chat.advance(ctx, sender, BOT, "Amina")
+        await onboarding_chat.advance(ctx, sender, BOT, "Fade 500")
+        await onboarding_chat.advance(ctx, sender, BOT, "YES")
+        await onboarding_chat.advance(ctx, sender, BOT, "Fade 30\nxyz")
+        body = out.tg_bodies(chat)[-1]
+        assert "xyz" in body and "opening hours" in body.lower()
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
+def test_price_board_photos_get_a_typed_list_answer():
+    async def run():
+        from app.main import app
+        pool, out, seed = await build(DSN)
+        ctx = app.state.ctx
+        from app import onboarding_chat
+        sender, chat = "tg:8001", "8001"
+        await onboarding_chat.begin(ctx, sender, BOT, "/start register")
+        await onboarding_chat.advance(ctx, sender, BOT, "Photo Salon")
+        await onboarding_chat.advance(ctx, sender, BOT, "1")
+        await onboarding_chat.advance(ctx, sender, BOT, "Amina")
+        await onboarding_chat.advance(ctx, sender, BOT, "see the board", {"kind": "image"})
+        assert "type the list" in out.tg_bodies(chat)[-1].lower()
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
 def test_interruptions_back_and_corrections_stay_in_setup():
     async def run():
         from app.main import app
@@ -253,6 +383,8 @@ def test_interruptions_back_and_corrections_stay_in_setup():
         await onboarding_chat.advance(ctx, sender, BOT, "Braids 3h")
         assert "opening hours" in out.tg_bodies(chat)[-1].lower()
         await onboarding_chat.advance(ctx, sender, BOT, "09:00-18:00")
+        assert "deposit" in out.tg_bodies(chat)[-1].lower()
+        await onboarding_chat.advance(ctx, sender, BOT, "0")
         summary = out.tg_bodies(chat)[-1]
         assert "Services:" in summary and "Fade: 600" in summary
         await onboarding_chat.advance(ctx, sender, BOT, "Braids 1600")
@@ -288,6 +420,8 @@ def test_kinyozi_flow_many_stylists_and_plain_language_changes():
         assert "Fade 30" in out.tg_bodies(chat)[-1]
         await onboarding_chat.advance(ctx, sender, BOT, "YES")
         await onboarding_chat.advance(ctx, sender, BOT, "08:00-20:00")
+        assert "deposit" in out.tg_bodies(chat)[-1].lower()
+        await onboarding_chat.advance(ctx, sender, BOT, "no deposit")
         assert "Stylists: Brian, Kevin, Amina" in out.tg_bodies(chat)[-1]
         await onboarding_chat.advance(ctx, sender, BOT, "i want to change the time")
         assert "How long" in out.tg_bodies(chat)[-1]
@@ -327,6 +461,8 @@ def test_keep_old_answer_after_a_stylist_redirect():
         await onboarding_chat.advance(ctx, sender, BOT, "Fade 500 30")
         await onboarding_chat.advance(ctx, sender, BOT, "YES")
         await onboarding_chat.advance(ctx, sender, BOT, "09:00-18:00")
+        assert "deposit" in out.tg_bodies(chat)[-1].lower()
+        await onboarding_chat.advance(ctx, sender, BOT, "0")
         assert "Stylists: Juma" in out.tg_bodies(chat)[-1]
         await onboarding_chat.advance(ctx, sender, BOT, "i want to change stylists")
         assert "your name" in out.tg_bodies(chat)[-1].lower()

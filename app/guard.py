@@ -115,7 +115,7 @@ async def hand_off(ctx, salon: dict, client: dict, lang: str, category: str, tex
         )
     except Exception:
         log.exception("handoff insert failed")
-    owner = (salon.get("owner_wa_id") or getattr(ctx.settings, "owner_alert_wa_id", "") or "").strip().lstrip("+")
+    owner = (salon.get("owner_wa_id") or "").strip().lstrip("+")
     if owner:
         try:
             wa_id = client.get("wa_id") or ""
@@ -147,7 +147,7 @@ async def clear_handoff(pool, salon_id: str, wa_id: str) -> None:
 
 async def owner_command(ctx, salon: dict, wa_id: str, text: str, send) -> bool:
     import re as _re
-    owner = (salon.get("owner_wa_id") or getattr(ctx.settings, "owner_alert_wa_id", "") or "").strip().lstrip("+")
+    owner = (salon.get("owner_wa_id") or "").strip().lstrip("+")
     m = _re.match(r"^\s*resolve\s+\+?(\d{9,15})\s*$", text or "", _re.I)
     if not owner or wa_id != owner or not m:
         return False

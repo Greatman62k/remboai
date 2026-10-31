@@ -38,6 +38,34 @@ _OPS_FAIL_WINDOW = 60
 _OPS_FAIL_LIMIT = 5
 _MAX_BIGINT = 9223372036854775807
 _OPS_FAILURES: dict[str, tuple[float, int]] = {}
+_OPS_FAIL_MAX_KEYS = 4096
+
+
+def _redis_label(url: str) -> str:
+    """The Redis host for startup logs. The URL carries the password, which must never reach a log line."""
+    from urllib.parse import urlsplit
+    try:
+        host = urlsplit(url or "").hostname
+    except ValueError:
+        host = None
+    return host or "redis"
+
+
+def _ops_note_fail(key: str, now: float) -> int:
+    """Count one failed ops-key attempt for rate limiting. Old windows are pruned and the table is capped,
+    so scanner traffic cannot grow it without bound."""
+    if key not in _OPS_FAILURES and len(_OPS_FAILURES) >= _OPS_FAIL_MAX_KEYS:
+        for old, (started, _) in list(_OPS_FAILURES.items()):
+            if now - started >= _OPS_FAIL_WINDOW:
+                _OPS_FAILURES.pop(old, None)
+        while len(_OPS_FAILURES) >= _OPS_FAIL_MAX_KEYS:
+            _OPS_FAILURES.pop(next(iter(_OPS_FAILURES)), None)
+    started, count = _OPS_FAILURES.get(key, (now, 0))
+    if now - started >= _OPS_FAIL_WINDOW:
+        started, count = now, 0
+    count += 1
+    _OPS_FAILURES[key] = (started, count)
+    return count
 _OPS_INCR = """
 local n = redis.call('INCR', KEYS[1])
 if n == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
@@ -57,13 +85,8 @@ async def _check_ops_key(ctx, provided: str | None, request: Request) -> None:
         if redis is not None:
             n = int(await redis.eval(_OPS_INCR, 1, key, _OPS_FAIL_WINDOW))
         else:
-            now = asyncio.get_running_loop().time()
-            start, cnt = _OPS_FAILURES.get(key, (now, 0))
-            if now - start >= _OPS_FAIL_WINDOW:
-                start, cnt = now, 0
-            cnt += 1
-            _OPS_FAILURES[key] = (start, cnt)
-            n = cnt
+            import time as _clock
+            n = _ops_note_fail(key, _clock.monotonic())
     except Exception:
         n = 1
     if n > _OPS_FAIL_LIMIT:
@@ -90,7 +113,7 @@ async def lifespan(app: FastAPI):
         from redis.asyncio import from_url as redis_from_url
         redis_client = redis_from_url(s.redis_url, decode_responses=False, socket_connect_timeout=2, socket_timeout=2)
         await redis_client.ping()
-        log.info("redis connected %s", s.redis_url)
+        log.info("redis connected %s", _redis_label(s.redis_url))
     except Exception as e:
         log.warning("redis unavailable (%s): using local fallback", e.__class__.__name__)
         if redis_client is not None:
@@ -100,9 +123,10 @@ async def lifespan(app: FastAPI):
                 pass
             redis_client = None
     budget = Budget(pool, s)
-    llm = Extractor(http, s, budget, pool)
+    llm = Extractor(http, s, budget, pool, redis_client)
+    voice = Transcriber(http, s, budget, redis_client)
     tg = Telegram(http, s.telegram_bot_token) if s.telegram_bot_token else None
-    app.state.ctx = Ctx(s, pool, Channels(wa, tg), llm, redis_client, Daraja(http, s), Transcriber(http, s, budget), StyleMatcher(http, s, llm.endpoints, budget))
+    app.state.ctx = Ctx(s, pool, Channels(wa, tg), llm, redis_client, Daraja(http, s), voice, StyleMatcher(http, s, llm.endpoints, budget))
     app.state.redis = redis_client
     app.state.tg = tg
     poller = None
@@ -201,9 +225,11 @@ async def health():
     return {"ok": True}
 
 @app.get("/model-info")
-async def model_info(request: Request):
-    """Which model backend is active, for open-weights prize verification."""
-    s = request.app.state.ctx.settings
+async def model_info(request: Request, x_ops_key: str | None = Header(default=None)):
+    """Which model backend is active, for open-weights prize verification. Gated like the other ops endpoints."""
+    ctx = request.app.state.ctx
+    await _check_ops_key(ctx, x_ops_key, request)
+    s = ctx.settings
     return {"backend": getattr(s, "llm_backend", "primary"), "model": s.llm_model,
             "fallback_backend": getattr(s, "llm_fallback_backend", "") or None, "fallback_model": s.llm_fallback_model or None,
             "quantization": getattr(s, "llm_quantization", "") or None, "host": getattr(s, "llm_host", "") or None}
@@ -220,7 +246,7 @@ async def ready(request: Request):
 async def verify(request: Request):
     q = request.query_params
     expected = request.app.state.settings.wa_verify_token
-    if expected and q.get("hub.mode") == "subscribe" and q.get("hub.verify_token") == expected:
+    if expected and q.get("hub.mode") == "subscribe" and safe_equals(q.get("hub.verify_token"), expected):
         return PlainTextResponse(q.get("hub.challenge", ""))
     raise HTTPException(403)
 
