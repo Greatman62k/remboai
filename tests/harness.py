@@ -62,7 +62,7 @@ class Outside:
         if host == "asr.test":
             if self.asr_down:
                 return httpx.Response(503)
-            self.asr.append({"auth": req.headers.get("authorization"), "type": req.headers.get("content-type"), "lang": req.url.params.get("lang"), "bytes": req.content})
+            self.asr.append({"auth": req.headers.get("x-asr-token"), "type": req.headers.get("content-type"), "lang": req.url.params.get("lang"), "bytes": req.content})
             return httpx.Response(200, json={"text": self.asr_text})
         if host == "graph.facebook.com":
             sent = json.loads(req.content) | {"_auth": req.headers["authorization"]}

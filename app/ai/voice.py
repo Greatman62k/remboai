@@ -30,6 +30,13 @@ class Transcriber:
     def enabled(self) -> bool:
         return bool(self.s.asr_url)
 
+    @property
+    def auth_headers(self) -> dict:
+        h = {"X-Asr-Token": self.s.asr_token}
+        if self.s.asr_proxy_key:
+            h |= {"Modal-Key": self.s.asr_proxy_key, "Modal-Secret": self.s.asr_proxy_secret}
+        return h
+
     async def transcribe(self, audio: bytes, mime: str, lang: str | None, salon_id: str | None = None) -> Transcript | None:
         """lang is an Omnilingual code such as 'swh_Latn', or None to let the model decide."""
         if not self.enabled or (self.budget is not None and not await self.budget.take("voice")):
@@ -40,7 +47,7 @@ class Transcriber:
         t0 = clock.perf_counter()
         try:
             r = await self.http.post(self.s.asr_url, content=audio, params={"lang": lang} if lang else None, timeout=self.s.asr_timeout_s,
-                                     headers={"Authorization": f"Bearer {self.s.asr_token}", "Content-Type": mime.split(";")[0] or "audio/ogg"})
+                                     headers={**self.auth_headers, "Content-Type": mime.split(";")[0] or "audio/ogg"})
             r.raise_for_status()
             text = " ".join(str(r.json().get("text", "")).split())[:MAX_TEXT]
         except (httpx.HTTPError, ValueError, AttributeError) as e:
