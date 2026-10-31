@@ -8,10 +8,10 @@ import dataclasses
 import json
 import logging
 import re
-from datetime import datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-from . import binding, guard, locks, mpesa, onboarding_chat, owner, payments, platform, screen, smalltalk
+from . import binding, guard, locks, mpesa, onboarding_chat, owner, payments, platform, screen, smalltalk, waitlist
 from .availability import DAY_KEYS
 from .booking_flow import (
     _book,
@@ -32,11 +32,13 @@ from .booking_flow import (
 )
 from .channels import outbound
 from .ai.llm import Extraction, Result, rule_extract
+from .reminders import handle_still_tap
 from .messages import t
 from .channels.whatsapp import Message, mask
 
 log = logging.getLogger("rembo.conv")
 PAY_WORDS = re.compile(r"^\s*(pay|paid|lipa|nimelipa|nimeshalipa|nimetuma|nimeshatuma|done|sent|tuma|retry|resend|tena|try again)(\s+(now|sasa|hivi|tayari))?\W*$", re.I)
+WAITLIST_WORDS = re.compile(r"^\s*(waitlist|waiting list|notify me|let me know|nijulishe|niweke|weka jina)\W*$", re.I)
 
 
 class Chat:
@@ -451,6 +453,19 @@ async def _handle(ctx, msg: Message) -> None:
     if msg.reply_id and msg.reply_id.startswith("visit-"):
         await _visit_tap(ctx, salon, client, st, tz, chat, lang, msg.reply_id)
         return
+    if msg.reply_id and msg.reply_id.startswith("wait-"):
+        if await waitlist.handle_tap(ctx, salon, client, st, chat, lang, tz, msg.reply_id):
+            return
+    if msg.reply_id and msg.reply_id.startswith("still-"):
+        if await handle_still_tap(ctx, salon, client, st, chat, lang, tz, msg.reply_id):
+            return
+    if WAITLIST_WORDS.match(msg.text or "") and st.get("state") == "no_slots" and st.get("service_id") and st.get("date"):
+        service = next((s for s in services if s["id"] == st["service_id"]), None)
+        if service is not None:
+            outcome = await waitlist.join(ctx.pool, salon["id"], client["id"], service["id"], date.fromisoformat(st["date"]))
+            key = "waitlist_joined" if outcome == "joined" else "waitlist_already"
+            await _reply(ctx, salon["id"], chat.to, st, chat, t(lang, key, service=service["name"], day=st["date"]))
+            return
     if msg.reply_id and msg.reply_id.startswith("till:"):
         if owner.is_owner(salon, msg.sender) and await owner.handle_tap(ctx, salon, msg.sender, msg.reply_id):
             return
