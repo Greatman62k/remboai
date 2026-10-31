@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 import asyncpg
 
-from . import guard, mpesa, payments
+from . import guard, mpesa, payments, waitlist
 from .availability import Slot, choose, day_slots
 from .bookings import busy_times, hold_slot, release
 from .channels import outbound
@@ -161,6 +161,7 @@ async def _cancel(ctx, salon, client, st, services, tz, now, chat, lang) -> None
     await payments.park_for_cancellation(ctx.pool, row["id"])
     await payments.fail_open_manual_claims(ctx.pool, row["id"])
     await cancel_reminders(ctx.pool, row["id"])
+    await waitlist.offer_for_booking(ctx, salon, row["id"])
     paid = await ctx.pool.fetchval("SELECT amount_kes FROM payments WHERE booking_id=$1::uuid AND status IN ('paid','needs_refund')", row["id"])
     key = "cancelled_paid" if paid else "cancelled"
     await _reply(ctx, salon["id"], chat.to, cleared, chat, t(lang, key, when=when_label(row["starts_at"], tz), salon=salon["name"]))
@@ -190,6 +191,7 @@ async def _late_tap(ctx, salon, client, st, services, tz, now, chat, lang, reply
         await payments.park_for_cancellation(ctx.pool, row["id"])
         await payments.fail_open_manual_claims(ctx.pool, row["id"])
         await cancel_reminders(ctx.pool, row["id"])
+        await waitlist.offer_for_booking(ctx, salon, row["id"])
         paid = await ctx.pool.fetchval("SELECT amount_kes FROM payments WHERE booking_id=$1::uuid AND status IN ('paid','needs_refund')", row["id"])
         key = "cancelled_paid" if paid else "cancelled"
         cleared_late = {"history": st.get("history", [])}
@@ -270,9 +272,10 @@ async def find_slots(ctx, salon, service: dict, day: date, window: str | None, a
 async def _offer(ctx, salon, st, service, day, window, at, tz, now, chat, lang, note_key: str | None = None) -> None:
     slots, exact = await find_slots(ctx, salon, service, day, window, at, tz, now)
     if not slots:
-        state = {"history": st.get("history", [])}
+        state = {"state": "no_slots", "service_id": service["id"], "date": day.isoformat(), "history": st.get("history", [])}
         await _save(ctx, salon["id"], chat.to, state)
-        await _reply(ctx, salon["id"], chat.to, state, chat, t(lang, "no_slots", service=service["name"]))
+        await _reply(ctx, salon["id"], chat.to, state, chat,
+                     t(lang, "no_slots", service=service["name"]) + "\n" + t(lang, "waitlist_hint"))
         return
     lines = "\n".join(t(lang, "slot_line", n=i + 1, when=when_label(s.starts_at, tz), stylist=s.staff_name) for i, s in enumerate(slots))
     state = {"state": "offered", "service_id": service["id"], "date": day.isoformat(), "window": window, "time": at.strftime("%H:%M") if at else None,

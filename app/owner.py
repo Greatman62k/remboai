@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 import asyncpg
 
-from . import payments
+from . import payments, waitlist
 from .channels import outbound
 from .availability import day_slots
 from .bookings import busy_times
@@ -279,6 +279,7 @@ async def cancel_booking(ctx, salon: dict, booking_id: str, tz: ZoneInfo) -> dic
     row = dict(row)
     await payments.park_for_cancellation(ctx.pool, row["id"])
     await cancel_reminders(ctx.pool, row["id"])
+    await waitlist.offer_for_booking(ctx, salon, row["id"])
     when = row["starts_at"].astimezone(tz).strftime("%a %d %b, %H:%M")
     cust_refund = t(row["lang"], "cancelled_by_salon_refund", amount=row["paid"]) if row["paid"] else ""
     await _say(ctx, salon, row["phone"], t(row["lang"], "cancelled_by_salon", salon=salon["name"], when=when, refund=cust_refund))
