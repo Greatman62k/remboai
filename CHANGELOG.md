@@ -2,6 +2,16 @@
 
 Everything in this repository was written during the Meta Global AI Developer Hackathon (building period Oct 27 - Nov 4, 2026).
 
+## Oct 31 (waitlist, Still-coming, proxy auth, site)
+
+352 tests, all passing.
+
+- Waitlist fill (`app/waitlist.py`, migration 026): any cancel (customer, late tap, owner) offers the freed slot to the oldest waiter with Yes/No buttons; Yes books the exact slot within 10 minutes (held with deposit prompt, or confirmed when free); No, expiry, or a taken slot moves the offer on; a minute sweep expires stale offers.
+- Still-coming 3h reminders (migration 027): approved `reminder_3h` templates send with Keep/Cancel buttons; Keep marks the nudge answered, Cancel frees the slot at once, and a minute sweep releases never-answered bookings under 2h out toward the waitlist.
+- Voice notes run behind Modal proxy auth: the endpoint requires a proxy token before any container starts, our own token moved to the `X-Asr-Token` header, and the app sends both (`ASR_PROXY_KEY`/`ASR_PROXY_SECRET` in `.env`). Image also lifts NumPy to 2 for pyarrow.
+- Marketing site started in `site/` (Home, Pricing, Setup guide) in the reference house style with Telegram blue and WhatsApp green accents; contact links are still placeholders.
+- README verify section, `roadmap file` with dates, secrets scan clean, keyword eval baseline re-run (40 messages: 98 percent intent, 100 percent language).
+
 ## Oct 31 (dependency refresh)
 
 327 tests, all passing.

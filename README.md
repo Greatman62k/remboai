@@ -101,6 +101,14 @@ docker run --rm --network remboai-test_default -v $PWD:/srv -w /srv --user root 
 `docker compose exec app python scripts/doctor.py` checks the whole set-up (WhatsApp token, models, M-Pesa, public URL) and says what to fix.
 `scripts/eval.py` scores each model backend against the keyword baseline on the labeled corpus.
 
+## Verify
+
+- Suite: the `docker run ... pytest -q` line above is the gate. It must end green (352 passed at last check: booking, waitlist, Still-coming, onboarding, guards, lifecycle).
+- Health: `docker compose exec -T app python scripts/doctor.py` must report ready before any demo.
+- Models: `python scripts/eval.py` with no keys scores the keyword baseline (40 messages: 98 percent intent, 100 percent language). With keys, `EVAL_BACKENDS` / `EVAL_API_KEYS` add the live-backend rows to the same table for the demo slide.
+- Waitlist: join twice (second join says already), cancel the booked slot, tap Yes on the offer, and confirm the booking lands on the freed slot.
+- Still-coming: with a `reminder_3h` template approved, a booking 4 hours out gets Keep/Cancel buttons; Keep protects it from the silent release, Cancel and silence both hand the slot to the waitlist.
+
 ## Layout
 
 - `app/channels/` WhatsApp and Telegram wire formats, one sender, invite links and QR stickers; both produce the same message
