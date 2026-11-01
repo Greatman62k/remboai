@@ -8,6 +8,7 @@ services:
       DOMAIN: ${DOMAIN:?set DOMAIN in deploy/.env}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ../site:/srv/site:ro
       - caddy_data:/data
     depends_on:
       app:
@@ -21,6 +22,7 @@ services:
     environment:
       DATABASE_URL: postgresql://rembo:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db:5432/rembo
       REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/0
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-172.16.0.0/12}
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
@@ -52,18 +54,8 @@ services:
       timeout: 3s
       retries: 20
     volumes:
+      # No migrations mounted here: the app applies and records every migration itself on start.
       - pgdata:/var/lib/postgresql/data
-      - ../migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
-      - ../migrations/002_booking.sql:/docker-entrypoint-initdb.d/002_booking.sql:ro
-      - ../migrations/003_payments.sql:/docker-entrypoint-initdb.d/003_payments.sql:ro
-      - ../migrations/004_owner.sql:/docker-entrypoint-initdb.d/004_owner.sql:ro
-      - ../migrations/005_owner_web.sql:/docker-entrypoint-initdb.d/005_owner_web.sql:ro
-      - ../migrations/006_telegram.sql:/docker-entrypoint-initdb.d/006_telegram.sql:ro
-      - ../migrations/007_usage.sql:/docker-entrypoint-initdb.d/007_usage.sql:ro
-      - ../migrations/008_abuse.sql:/docker-entrypoint-initdb.d/008_abuse.sql:ro
-      - ../migrations/009_durable_queue.sql:/docker-entrypoint-initdb.d/009_durable_queue.sql:ro
-      - ../migrations/010_unmatched.sql:/docker-entrypoint-initdb.d/010_unmatched.sql:ro
-      - ../migrations/011_salon_tokens.sql:/docker-entrypoint-initdb.d/011_salon_tokens.sql:ro
     networks: [internal]
   redis:
     image: redis:7-alpine

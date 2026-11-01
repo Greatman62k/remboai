@@ -40,9 +40,9 @@ def test_owner_sees_the_day_with_payment_status_in_english_and_swahili():
             await post(c, payload(OWNER, "ratiba " + day, mid="o2"))
             assert out.bodies(OWNER)[-1].startswith("Miadi ") and "amana KES 200 imelipwa" in out.bodies(OWNER)[-1]
             await post(c, payload(OWNER, "msaada", mid="o3"))
-            assert "Amri za saluni" in out.bodies(OWNER)[-1]
+            assert "Amri za mmiliki wa saluni" in out.bodies(OWNER)[-1]
             await post(c, payload(OWNER, "help", mid="o4"))
-            assert "Salon commands" in out.bodies(OWNER)[-1]
+            assert "Salon owner commands" in out.bodies(OWNER)[-1]
             assert out.calls == [out.calls[0]]
         await pool.close()
     asyncio.run(run())
@@ -140,9 +140,9 @@ def test_owner_marks_a_confirmed_booking_as_no_show_and_a_hold_is_refused_clearl
 
 
 @needs_db
-def test_owner_pushes_a_stylist_late_and_everyone_hears_about_it():
+def test_owner_pushes_a_stylist_late_and_everyone_hears_about_it(monkeypatch):
     async def run():
-        from datetime import datetime, timedelta
+        from datetime import datetime, time, timedelta
         from zoneinfo import ZoneInfo
         from app import owner as _owner
         from app.main import app
@@ -150,10 +150,18 @@ def test_owner_pushes_a_stylist_late_and_everyone_hears_about_it():
         await pool.execute("UPDATE salons SET owner_wa_id=$1", OWNER)
         ctx = app.state.ctx
         nbo = ZoneInfo("Africa/Nairobi")
+        fixed_now = datetime.combine(datetime.now(nbo).date(), time(22, 30), nbo)
+
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return fixed_now.astimezone(tz) if tz else fixed_now.replace(tzinfo=None)
+
+        monkeypatch.setattr(_owner, "datetime", FixedDateTime)
         staff = await pool.fetchval("SELECT id::text FROM staff")
         svc = await pool.fetchval("SELECT id::text FROM services WHERE name='Fade'")
         cid = await pool.fetchval("INSERT INTO clients (salon_id, wa_id, lang) VALUES ($1::uuid,$2,'en') RETURNING id::text", salon, A)
-        start = datetime.now(nbo) + timedelta(hours=2)
+        start = FixedDateTime.now(nbo) + timedelta(hours=1)
         day = start.date()
         booking = await pool.fetchval(
             "INSERT INTO bookings (salon_id, staff_id, service_id, client_id, starts_at, ends_at, status) "
@@ -163,7 +171,10 @@ def test_owner_pushes_a_stylist_late_and_everyone_hears_about_it():
         await _owner._late(ctx, shop, OWNER, "Brian", "30", nbo, day, "en")
         mine = out.bodies(OWNER)[-1]
         assert "Brian" in mine and "30" in mine and "Fade" in mine
-        assert await pool.fetchval("SELECT starts_at FROM bookings") == start + timedelta(minutes=30)
+        shifted_start = await pool.fetchval("SELECT starts_at FROM bookings")
+        assert shifted_start == start + timedelta(minutes=30)
+        assert shifted_start.astimezone(nbo).date() == day + timedelta(days=1)
+        assert "moved into tomorrow" in mine.lower()
         cust = out.bodies(A)[-1]
         assert "30 minutes late" in cust and "Keep it" in str(out.to(A)[-1])
         assert await pool.fetchval("SELECT count(*) FROM delays") == 1
@@ -330,7 +341,7 @@ def test_late_with_no_match_or_no_bookings_answers_clearly():
 
 
 @needs_db
-def test_only_the_owner_has_commands_and_an_owner_can_still_use_the_customer_flow():
+def test_only_the_owner_has_commands_and_owner_messages_do_not_enter_customer_flow():
     async def run():
         pool, out, salon = await build(DSN)
         await pool.execute("UPDATE salons SET owner_wa_id=$1", OWNER)
@@ -343,6 +354,7 @@ def test_only_the_owner_has_commands_and_an_owner_can_still_use_the_customer_flo
             assert await pool.fetchval("SELECT count(*) FROM bookings") == 0
             await post(c, payload(OWNER, "prices?", mid="o1"))
             assert "Fade" in out.bodies(OWNER)[-1] and "KES 500" in out.bodies(OWNER)[-1]
+            assert await pool.fetchval("SELECT count(*) FROM bookings") == 0
             await post(c, payload(OWNER, "block", mid="o2"))
             assert "which day" in out.bodies(OWNER)[-1].lower()
             await post(c, payload(OWNER, f"block {day} 16:00-14:00", mid="o3"))

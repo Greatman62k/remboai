@@ -18,8 +18,10 @@ not a phone number, so the bot asks "which M-Pesa number?" before the deposit pr
    (`TELEGRAM_WEBHOOK_SECRET` required). Force one with `TELEGRAM_MODE=poll|webhook`.
 
 ## Make yourself the owner
-Open your bot, send `/id`, and it replies with your id (`tg:123456789`). Use that as `--owner tg:123456789`.
+Open the bot from the salon owner's Telegram account and send `/id`; use the returned id (`tg:123456789`) as `--owner tg:123456789`.
 Then `today`, `summary`, `invite`, `block friday 14:00-16:00` and the rest work from Telegram. `invite` returns the customer link for the salon: share it, or print it as a QR sticker with `scripts/invite_qr.py`.
+
+`PLATFORM_OWNER_ID` configures the primary platform administrator. `PLATFORM_OWNER_IDS` can list comma-separated backup administrator IDs. Keep at least one backup under a separately secured account. Platform administrators can register their own salon, but the bot first confirms that the registering account will become its owner. To register someone else's business, have that owner message the bot from their own account; registration does not transfer ownership based on a third party's claim. To manage a salon from the platform account, use `/owner <command>`; if the account owns more than one salon on the bot, use `/owner <salon-slug> | <command>`. The route only works for a salon whose configured `owner_wa_id` matches that Telegram account. Use a separate Telegram account to exercise customer booking flows; salon-owner and platform-owner messages do not fall through into customer mode.
 
 ## Notes
 - Only private chats are served; groups and channels are ignored.

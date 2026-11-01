@@ -14,6 +14,7 @@ from .ai.voice import Transcriber
 from .ai.vision import StyleMatcher, make_png
 from .mpesa import Daraja, MpesaError
 from .channels.whatsapp import explain
+from .platform import configured_ids
 
 
 @dataclass
@@ -22,6 +23,12 @@ class Check:
     ok: bool
     detail: str
     warn: bool = False
+
+
+def _platform_identity_overlaps(settings, salons: list[dict]) -> tuple[set[str], int]:
+    ids = configured_ids(settings)
+    overlap = sum(1 for salon in salons if salon.get("owner_wa_id") in ids)
+    return ids, overlap
 
 
 async def run_checks(s, http: httpx.AsyncClient, pool) -> list[Check]:
@@ -41,6 +48,21 @@ async def run_checks(s, http: httpx.AsyncClient, pool) -> list[Check]:
         add("database", True, f"connected, {len(salons)} active salon(s)")
     except Exception as e:  # noqa: BLE001
         add("database", False, f"{e.__class__.__name__}: {e}")
+    try:
+        owner_customer_overlap = int(await pool.fetchval(
+            "SELECT count(*) FROM salons s JOIN clients c ON c.salon_id=s.id AND c.wa_id=s.owner_wa_id WHERE s.active") or 0)
+        platform_ids, platform_salon_overlap = _platform_identity_overlaps(s, salons)
+        platform_client_overlap = int(await pool.fetchval(
+            "SELECT count(*) FROM clients WHERE wa_id=ANY($1::text[])", list(platform_ids)) or 0) if platform_ids else 0
+        collisions = owner_customer_overlap + platform_salon_overlap + platform_client_overlap
+        if collisions:
+            add("identity separation", False,
+                f"{owner_customer_overlap} salon owner/customer overlap(s); platform owner matches {platform_salon_overlap} salon owner(s) and {platform_client_overlap} customer record(s). "
+                "Platform messages fail closed; use /owner <command> for an explicitly owned salon and a separate account for customer testing.", warn=True)
+        elif platform_ids:
+            add("identity separation", True, "platform administrators, salon owners, and customers use separate IDs")
+    except Exception as e:  # noqa: BLE001
+        add("identity separation", False, f"could not check role overlap: {e.__class__.__name__}", warn=True)
     if not salons:
         add("salon", True, "no salon yet: message the bot REGISTER to set up the first business (or run scripts/seed_salon.py)")
 
@@ -105,6 +127,15 @@ async def run_checks(s, http: httpx.AsyncClient, pool) -> list[Check]:
                 + ("" if good else " (unexpected: check the model name and prompt)"))
         except Exception as e:  # noqa: BLE001
             add(f"model {model}", False, f"{e.__class__.__name__}: {str(e)[:120]}")
+    if getattr(s, "agent_mode", "off") == "on":
+        from .agent.probe import probe_backends
+        probes = await probe_backends(http, s, ext.endpoints())
+        for r in probes:
+            other_works = any(x.ok and x.backend == r.backend and x.model == r.model for x in probes)
+            add(f"agent {r.model} ({r.protocol})", r.ok, f"{r.ms} ms; {r.detail}" + ("" if r.ok or not other_works else " (the other wire format works, which is enough)"),
+                warn=not r.ok and other_works)
+    else:
+        add("agent mode", False, "AGENT_MODE is off: the keyword/extraction flow answers customers. Set AGENT_MODE=on so the model drives the conversation", warn=True)
     matcher = StyleMatcher(http, s, ext.endpoints)
     if not matcher.enabled:
         add("photo matching", False, "switched off (VISION_ENABLED=false or no LLM_API_KEY)", warn=True)
@@ -124,11 +155,12 @@ async def run_checks(s, http: httpx.AsyncClient, pool) -> list[Check]:
     if s.asr_url:
         try:
             r = await http.get(s.asr_url.rsplit("/", 1)[0] + "/health", headers=Transcriber(http, s).auth_headers, timeout=s.asr_timeout_s)
-            add("voice notes", r.status_code == 200, f"speech service answered: {r.json().get('model') if r.status_code == 200 else r.status_code}")
+            add("speech service health", r.status_code == 200,
+                f"health endpoint answered: {r.json().get('model') if r.status_code == 200 else r.status_code}; this does not test audio transcription")
         except (httpx.HTTPError, ValueError) as e:
-            add("voice notes", False, f"speech service not reachable ({e.__class__.__name__}); a cold start can take 30+ seconds, try again")
+            add("speech service health", False, f"speech service not reachable ({e.__class__.__name__}); a cold start can take 30+ seconds, try again")
     else:
-        add("voice notes", False, "ASR_URL not set: voice notes get a 'please type' reply (deploy/modal_asr.py)", warn=True)
+        add("speech service health", False, "ASR_URL not set: voice notes get a 'please type' reply (deploy/modal_asr.py)", warn=True)
 
     try:
         from .ai.budget import Budget

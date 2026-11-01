@@ -358,7 +358,7 @@ async def test_a_job_that_runs_long_keeps_its_lease_and_is_not_run_twice():
     async def slow(ctx, j):
         await asyncio.sleep(1.3)
         seen.append(await pool.fetchval("SELECT locked_until > now() FROM webhook_jobs WHERE id=$1", j["id"]))
-        await webhook_jobs.complete_job(pool, j["id"])
+        await webhook_jobs.complete_job(pool, j["id"], j["claim_token"])
 
     orig, webhook_jobs._process_claimed_job = webhook_jobs._process_claimed_job, slow
     old_lease, old_beat = webhook_jobs.LEASE_SECONDS, webhook_jobs.HEARTBEAT_SECONDS
@@ -369,6 +369,26 @@ async def test_a_job_that_runs_long_keeps_its_lease_and_is_not_run_twice():
     finally:
         webhook_jobs._process_claimed_job, webhook_jobs.LEASE_SECONDS, webhook_jobs.HEARTBEAT_SECONDS = orig, old_lease, old_beat
     assert seen == [True], "the lease must be renewed while the job is still running"
+    await pool.close()
+
+
+@needs_db
+@pytest.mark.asyncio
+async def test_a_stale_webhook_claim_cannot_renew_or_complete_a_reclaimed_job():
+    from app import webhook_jobs
+    pool, out, salon = await build(DSN)
+    await webhook_jobs.enqueue_jobs(pool, "mpesa", [("fenced-job", {})])
+    stale = await webhook_jobs.claim_next(pool)
+    await pool.execute("UPDATE webhook_jobs SET locked_until=now()-interval '1 second' WHERE id=$1", stale["id"])
+    current = await webhook_jobs.claim_next(pool)
+    assert current["id"] == stale["id"]
+    assert current["claim_token"] != stale["claim_token"]
+    lease_before = await pool.fetchval("SELECT locked_until FROM webhook_jobs WHERE id=$1", current["id"])
+    assert await webhook_jobs._heartbeat_once(pool, stale["id"], stale["claim_token"]) is False
+    assert await pool.fetchval("SELECT locked_until FROM webhook_jobs WHERE id=$1", current["id"]) == lease_before
+    assert await webhook_jobs.complete_job(pool, stale["id"], stale["claim_token"]) is False
+    assert await pool.fetchval("SELECT status FROM webhook_jobs WHERE id=$1", current["id"]) == "processing"
+    assert await webhook_jobs.complete_job(pool, current["id"], current["claim_token"]) is True
     await pool.close()
 
 
@@ -543,11 +563,13 @@ async def test_a_non_ascii_signature_header_gets_403_not_500():
 @needs_db
 @pytest.mark.asyncio
 async def test_dead_webhook_jobs_are_purged_after_the_retention_period():
-    from app.webhook_jobs import dead_job, enqueue_jobs, purge_expired_data
+    from app.webhook_jobs import claim_next, dead_job, enqueue_jobs, purge_expired_data
     pool, out, salon = await build(DSN)
     await enqueue_jobs(pool, "whatsapp", [("deadold", {"wa_id": A}), ("deadnew", {"wa_id": A})])
     for eid in ("deadold", "deadnew"):
-        await dead_job(pool, await pool.fetchval("SELECT id FROM webhook_jobs WHERE event_id=$1", eid), "boom")
+        job = await claim_next(pool)
+        assert job["event_id"] == eid
+        assert await dead_job(pool, job["id"], "boom", job["claim_token"])
     await pool.execute("UPDATE webhook_jobs SET updated_at = now() - interval '40 days', completed_at = NULL WHERE event_id='deadold'")
     purged = await purge_expired_data(pool, webhook_days=30, inbound_days=90)
     assert purged["webhook_jobs"] == 1
@@ -558,15 +580,53 @@ async def test_dead_webhook_jobs_are_purged_after_the_retention_period():
 @needs_db
 @pytest.mark.asyncio
 async def test_a_requeued_dead_job_is_not_purged_while_it_waits():
-    from app.webhook_jobs import dead_job, enqueue_jobs, purge_expired_data, requeue_dead_job
+    from app.webhook_jobs import claim_next, dead_job, enqueue_jobs, purge_expired_data, requeue_dead_job
     pool, out, salon = await build(DSN)
     await enqueue_jobs(pool, "whatsapp", [("revive", {"wa_id": A})])
-    jid = await pool.fetchval("SELECT id FROM webhook_jobs")
-    await dead_job(pool, jid, "boom")
+    job = await claim_next(pool)
+    jid = job["id"]
+    assert await dead_job(pool, jid, "boom", job["claim_token"])
     await pool.execute("UPDATE webhook_jobs SET updated_at = now() - interval '40 days', completed_at = now() - interval '40 days'")
     assert await requeue_dead_job(pool, jid)
     await purge_expired_data(pool, webhook_days=30, inbound_days=90)
     assert await pool.fetchval("SELECT status FROM webhook_jobs WHERE id=$1", jid) == "pending"
+    await pool.close()
+
+
+@needs_db
+@pytest.mark.asyncio
+async def test_sensitive_handoff_and_payment_callback_data_obey_retention():
+    from app.webhook_jobs import purge_expired_data
+    pool, out, salon = await build(DSN)
+    client_id = await pool.fetchval(
+        "INSERT INTO clients (salon_id, wa_id) VALUES ($1::uuid,$2) RETURNING id::text", salon, A)
+    await pool.execute(
+        "INSERT INTO handoffs (salon_id, client_id, category, message, status, created_at, resolved_at) "
+        "VALUES ($1::uuid,$2::uuid,'medical','sensitive customer text','resolved',now()-interval '40 days',now()-interval '40 days')",
+        salon, client_id)
+    await pool.execute(
+        "INSERT INTO mpesa_callbacks (checkout_request_id, body, received_at) "
+        "VALUES ('orphan-old','{}',now()-interval '100 days')")
+    await pool.execute(
+        "INSERT INTO unmatched_payments (checkout_request_id, result_code, amount, phone, raw, created_at) "
+        "VALUES ('unmatched-old',0,200,$1,'{}',now()-interval '100 days')", A)
+
+    booking, _ = await _due_reminder(pool, salon, wa_id="254711000009")
+    await pool.execute(
+        "INSERT INTO payments (booking_id, salon_id, phone, amount_kes, checkout_request_id, status) "
+        "VALUES ($1::uuid,$2::uuid,$3,200,'pending-old','pending')", booking, salon, A)
+    await pool.execute(
+        "INSERT INTO mpesa_callbacks (checkout_request_id, body, received_at) "
+        "VALUES ('pending-old','{}',now()-interval '100 days')")
+
+    purged = await purge_expired_data(pool, handoff_days=30, callback_days=90, unmatched_raw_days=90)
+    assert purged["handoffs"] == 1
+    assert purged["mpesa_callbacks"] == 1
+    assert purged["unmatched_payment_payloads"] == 1
+    assert await pool.fetchval("SELECT count(*) FROM handoffs WHERE message='sensitive customer text'") == 0
+    assert await pool.fetchval("SELECT count(*) FROM mpesa_callbacks WHERE checkout_request_id='orphan-old'") == 0
+    assert await pool.fetchval("SELECT count(*) FROM mpesa_callbacks WHERE checkout_request_id='pending-old'") == 1
+    assert await pool.fetchval("SELECT raw IS NULL FROM unmatched_payments WHERE checkout_request_id='unmatched-old'") is True
     await pool.close()
 
 
@@ -628,10 +688,13 @@ async def test_delete_salon_removes_payment_reviews_with_their_payments():
         booking, salon, A)
     await pool.execute(
         "INSERT INTO payment_reviews (payment_id, reason, status, expected_amount, received_amount) VALUES ($1::uuid,'payment_unresolved','refund_due',200,200)", pay)
+    await pool.execute("INSERT INTO mpesa_callbacks (checkout_request_id, body) VALUES ('ws_CO_9','{}')")
     counts = await lifecycle.delete_salon(pool, salon)
     assert (counts["reviews"], counts["payments"], counts["bookings"], counts["salons"]) == (1, 1, 1, 1)
+    assert counts["callbacks"] == 1
     assert await pool.fetchval("SELECT count(*) FROM salons") == 0
     assert await pool.fetchval("SELECT count(*) FROM payment_reviews") == 0
+    assert await pool.fetchval("SELECT count(*) FROM mpesa_callbacks WHERE checkout_request_id='ws_CO_9'") == 0
     await pool.close()
 
 
@@ -790,15 +853,17 @@ async def test_unmatched_payment_log_masks_the_phone_number(caplog):
     """The unmatched-payment log must carry the masked sender like every other log line, not the full number."""
     import logging
     from app.main import app
-    from app.webhook_jobs import _process_claimed_job, enqueue_jobs
+    from app.webhook_jobs import _process_claimed_job, claim_next, enqueue_jobs
     from tests.harness import callback
     pool, out, salon = await build(DSN)
     body = callback("ws_CO_NOMATCH", amount=200, phone="254711000001")
     await enqueue_jobs(pool, "mpesa", [("ws_CO_NOMATCH", body)])
-    jid = await pool.fetchval("SELECT id FROM webhook_jobs WHERE event_id='ws_CO_NOMATCH'")
+    job = await claim_next(pool)
+    assert job is not None
+    # Exercise the terminal unmatched-payment path with a real claimed job.
+    job["attempts"] = 8
     with caplog.at_level(logging.ERROR, logger="rembo.webhooks"):
-        await _process_claimed_job(app.state.ctx,
-                                   {"id": jid, "provider": "mpesa", "event_id": "ws_CO_NOMATCH", "payload": body, "attempts": 8})
+        await _process_claimed_job(app.state.ctx, job)
     assert "...0001" in caplog.text
     assert "254711000001" not in caplog.text
     await pool.close()

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 from collections import Counter
 from contextlib import asynccontextmanager
@@ -16,6 +17,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 
 from app.token_crypto import decrypt_token
+from app.channels.whatsapp import mask
 
 log = logging.getLogger("rembo.outbound")
 
@@ -23,15 +25,17 @@ log = logging.getLogger("rembo.outbound")
 @dataclass
 class _Scope:
     message_id: str
+    conversational: bool = False
     seen: Counter = field(default_factory=Counter)
+    sequence: int = 0
 
 
 _scope: ContextVar[_Scope | None] = ContextVar("rembo_message_scope", default=None)
 
 
 @asynccontextmanager
-async def message_scope(message_id: str):
-    token = _scope.set(_Scope(message_id))
+async def message_scope(message_id: str, conversational: bool = False):
+    token = _scope.set(_Scope(message_id, conversational))
     try:
         yield
     finally:
@@ -41,6 +45,48 @@ async def message_scope(message_id: str):
 def current_message_id() -> str | None:
     s = _scope.get()
     return s.message_id if s else None
+
+
+async def record_inbound(ctx, msg) -> None:
+    """Keep the sanitized inbound side of a chat turn for the protected conversation trace."""
+    await ctx.pool.execute(
+        "INSERT INTO conversation_trace (message_id, thread, channel, message_kind, user_text) "
+        "VALUES ($1,$2,$3,$4,$5) ON CONFLICT (message_id) DO NOTHING",
+        msg.id, mask(msg.sender), "telegram" if msg.sender.startswith("tg:") else "whatsapp",
+        (msg.kind or "other")[:32], (msg.text or "")[:5000],
+    )
+
+
+async def update_inbound_text(ctx, text: str) -> None:
+    """Replace an audio placeholder with the sanitized speech transcript, when one exists."""
+    scope = _scope.get()
+    if scope is not None and scope.conversational:
+        await ctx.pool.execute(
+            "UPDATE conversation_trace SET user_text=$2 WHERE message_id=$1",
+            scope.message_id, (text or "")[:5000],
+        )
+
+
+async def set_conversation_salon(ctx, salon_id: str) -> None:
+    """Attach the resolved business context to this turn without storing channel IDs or recipient numbers."""
+    scope = _scope.get()
+    if scope is not None and scope.conversational:
+        await ctx.pool.execute(
+            "UPDATE conversation_trace SET salon_id=$2::uuid WHERE message_id=$1",
+            scope.message_id, salon_id,
+        )
+
+
+async def _record_reply(ctx, scope: _Scope, sequence: int, kind: str, body: str,
+                        buttons: list[tuple[str, str]] | None, send_ok: bool) -> None:
+    await ctx.pool.execute(
+        "INSERT INTO conversation_trace_replies (message_id, sequence, message_kind, body, buttons, send_ok) "
+        "VALUES ($1,$2,$3,$4,$5::jsonb,$6) "
+        "ON CONFLICT (message_id, sequence) DO UPDATE SET message_kind=EXCLUDED.message_kind, body=EXCLUDED.body, "
+        "buttons=EXCLUDED.buttons, send_ok=EXCLUDED.send_ok",
+        scope.message_id, sequence, kind, (body or "")[:4096],
+        json.dumps(buttons, ensure_ascii=False) if buttons else None, send_ok,
+    )
 
 
 def salon_token(ctx, salon: dict | None) -> str:
@@ -57,19 +103,26 @@ def salon_token(ctx, salon: dict | None) -> str:
     return ctx.settings.wa_access_token
 
 
-async def _once(ctx, kind: str, to: str, body: str, send) -> bool:
+async def _once(ctx, kind: str, to: str, body: str, send,
+                buttons: list[tuple[str, str]] | None = None, digest_body: str | None = None) -> bool:
     scope = _scope.get()
     if scope is None:
         return bool(await send())
-    digest = hashlib.sha256(f"{kind}\x00{to}\x00{body}".encode()).hexdigest()[:32]
+    scope.sequence += 1
+    sequence = scope.sequence
+    digest = hashlib.sha256(f"{kind}\x00{to}\x00{digest_body if digest_body is not None else body}".encode()).hexdigest()[:32]
     scope.seen[digest] += 1
     occ = scope.seen[digest]
     if await ctx.pool.fetchval("SELECT 1 FROM outbound_log WHERE message_id=$1 AND digest=$2 AND occ=$3", scope.message_id, digest, occ):
         log.info("not sending again: already sent while handling %s", scope.message_id)
+        if scope.conversational:
+            await _record_reply(ctx, scope, sequence, kind, body, buttons, True)
         return True
     ok = bool(await send())
     if ok:
         await ctx.pool.execute("INSERT INTO outbound_log (message_id, digest, occ) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING", scope.message_id, digest, occ)
+    if scope.conversational:
+        await _record_reply(ctx, scope, sequence, kind, body, buttons, ok)
     return ok
 
 
@@ -83,6 +136,18 @@ async def send_plain(ctx, to: str, body: str) -> bool:
     return await _once(ctx, "plain", to, body, lambda: ctx.wa.send_text(None, "", to, body))
 
 
+async def send_unbound_text(ctx, phone_number_id, to: str, body: str) -> bool:
+    """Send before a salon is bound, while retaining the normal per-inbound retry guard."""
+    return await _once(ctx, "plain", to, body, lambda: ctx.wa.send_text(phone_number_id, "", to, body))
+
+
+async def send_unbound_buttons(ctx, phone_number_id, to: str, body: str, buttons: list[tuple[str, str]]) -> bool:
+    """Button counterpart to send_unbound_text for setup flows before salon creation."""
+    digest_body = body + "\x00" + repr(buttons)
+    return await _once(ctx, "buttons", to, body, lambda: ctx.wa.send_buttons(phone_number_id, "", to, body, buttons), buttons, digest_body)
+
+
 async def send_buttons(ctx, salon: dict, to: str, body: str, buttons: list[tuple[str, str]]) -> bool:
     token = salon_token(ctx, salon)
-    return await _once(ctx, "buttons", to, body + "\x00" + repr(buttons), lambda: ctx.wa.send_buttons(salon["wa_phone_number_id"], token, to, body, buttons))
+    digest_body = body + "\x00" + repr(buttons)
+    return await _once(ctx, "buttons", to, body, lambda: ctx.wa.send_buttons(salon["wa_phone_number_id"], token, to, body, buttons), buttons, digest_body)

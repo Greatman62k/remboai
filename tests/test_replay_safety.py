@@ -148,7 +148,10 @@ async def test_a_senders_next_message_waits_for_the_one_before_it():
     assert await claim_next(pool) is None
     await retry_job(pool, first, RuntimeError("boom"))
     assert await claim_next(pool) is None
-    await dead_job(pool, first["id"], "gave up")
+    await pool.execute("UPDATE webhook_jobs SET available_at=now() WHERE id=$1", first["id"])
+    reclaimed = await claim_next(pool)
+    assert reclaimed["event_id"] == "f1"
+    assert await dead_job(pool, reclaimed["id"], "gave up", reclaimed["claim_token"])
     assert (await claim_next(pool))["event_id"] == "f2"
     await pool.close()
 

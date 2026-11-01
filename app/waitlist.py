@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from .channels import outbound
 from .messages import t
@@ -36,7 +37,9 @@ async def _offer_next(ctx, salon: dict, staff_id: str, staff_name: str, service_
     """Offer the freed slot to the oldest waiting customer. True when an
     offer went out, False when nobody is waiting."""
     from .bookings import busy_times
-    day = starts_at.date()
+    timezone = ZoneInfo(salon.get("timezone") or "Africa/Nairobi")
+    local_start = starts_at.astimezone(timezone)
+    day = local_start.date()
     while True:
         row = await ctx.pool.fetchrow(
             "SELECT w.id::text AS id, c.wa_id AS phone, c.lang FROM waitlist w JOIN clients c ON c.id=w.client_id "
@@ -55,7 +58,8 @@ async def _offer_next(ctx, salon: dict, staff_id: str, staff_name: str, service_
             await ctx.pool.execute("UPDATE waitlist SET status='expired' WHERE id=$1::uuid", row["id"])
             continue
         lang = row["lang"] or "en"
-        body = t(lang, "waitlist_offer", service=service_name, when=starts_at.strftime("%a %d %b, %H:%M"), stylist=staff_name)
+        body = t(lang, "waitlist_offer", service=service_name,
+                 when=local_start.strftime("%a %d %b, %H:%M"), stylist=staff_name)
         buttons = [(f"wait-yes:{row['id']}", t(lang, "waitlist_btn_yes")[:20]),
                    (f"wait-no:{row['id']}", t(lang, "waitlist_btn_no")[:20])]
         try:
@@ -88,10 +92,12 @@ async def offer_for_booking(ctx, salon: dict, booking_id: str) -> None:
     every cancel path (customer, late tap, owner) shares one call."""
     row = await ctx.pool.fetchrow(
         "SELECT b.staff_id::text AS staff_id, s.name AS staff_name, b.service_id::text AS service_id, "
-        "sv.name AS service, b.starts_at, b.ends_at FROM bookings b "
-        "JOIN staff s ON s.id=b.staff_id JOIN services sv ON sv.id=b.service_id WHERE b.id=$1::uuid", booking_id)
+        "sv.name AS service, b.starts_at, b.ends_at, sl.timezone FROM bookings b "
+        "JOIN staff s ON s.id=b.staff_id JOIN services sv ON sv.id=b.service_id "
+        "JOIN salons sl ON sl.id=b.salon_id WHERE b.id=$1::uuid", booking_id)
     if row is None:
         return
+    salon = {**salon, "timezone": row["timezone"]}
     await offer_freed_slot(ctx, salon, row["staff_id"], row["staff_name"], row["service_id"],
                            row["service"], row["starts_at"], row["ends_at"])
 

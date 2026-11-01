@@ -1,9 +1,9 @@
-"""Chat onboarding for salon owners, handled by plain code, not the model.
+"""Chat onboarding for salon owners.
 
-A Telegram sender types /start register and the machine walks them through
-name, prices, durations, and hours, then creates the salon and hands back an
-invite link. Every decision (parsing, validation, limits) is deterministic so
-it works with no model budget and behaves the same in tests.
+A model may make the conversation natural and extract values, while code
+validates the data, enforces limits, and controls salon creation and invites.
+The deterministic flow remains available whenever the agent is disabled or
+unavailable.
 """
 from __future__ import annotations
 
@@ -14,7 +14,8 @@ import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from . import binding
+from . import binding, guard, smalltalk
+from .channels import outbound
 from .db import clear_salon_cache
 from .messages import has as has_text, t
 from .smalltalk import FILLER_EXTRA as _FILLER_EXTRA
@@ -28,12 +29,29 @@ MIN_PRICE, MAX_PRICE = 50, 100000
 MIN_NAME, MAX_NAME = 2, 60
 
 CANCEL_WORDS = {"cancel", "ghairi", "stop", "acha"}
+_CANCEL_REGISTRATION = re.compile(
+    r"^(?:i\s+(?:do\s+not|don't|dont)\s+want\s+to\s+register|i\s+don't\s+want\s+to\s+sign\s+up|"
+    r"not\s+interested\s+in\s+registering|stop\s+(?:the\s+)?registration|cancel\s+(?:the\s+)?registration|"
+    r"sitaki(?:\s+(?:kusajili|kujisajili|kuendelea))?|acha\s+kusajili|sahau\s+(?:hayo|hilo|hizi)|"
+    r"forget\s+(?:it|that|this)|never\s+mind(?:\s+registration)?)\s*[.!?]*$", re.I)
+_CUSTOMER_BOOKING_REQUEST = re.compile(
+    r"^\s*(?:i\s+(?:want|wanted)\s+(?:(?:to\s+)?(?:get|have)\s+)?(?:a\s+)?(?:haircut|shave|cut|fade|trim)|"
+    r"i\s+was\s+trying\s+to\s+get\s+(?:a\s+)?(?:haircut|shave|cut|fade|trim)|"
+    r"book\s+me(?:\s+for)?\s+(?:a\s+)?(?:haircut|shave|cut|fade|trim)|"
+    r"nilikuwa\s+nataka\s+.{0,40}\b(?:kunyolewa|kunyoa|kukata\s+nywele|nywele|fade)\b|"
+    r"nataka\s+.{0,30}\b(?:kunyolewa|kunyoa\s+nywele|kukata\s+nywele)\b)\s*[.!?]*$", re.I)
 BACK_WORDS = {"back", "rudi"}
-_NEVER_A_NAME = {"yes", "yeah", "yep", "no", "nope", "ok", "okay", "hapana"}
+_NEVER_A_NAME = {"yes", "yeah", "yep", "yup", "no", "nope", "ok", "okay", "hapana"}
 _GREETING_WORDS = {"hi", "hello", "hey", "habari", "hujambo", "jambo", "shikamoo", "mambo", "vipi", "sasa"}
-YES_WORDS = {"yes", "yeah", "yep", "ndiyo", "ndio", "sawa", "ok", "okay"}
+YES_WORDS = {"yes", "yeah", "yep", "yup", "ndiyo", "ndio", "sawa", "ok", "okay"}
 NO_WORDS = {"no", "nope", "hapana", "la"}
-SW_HINTS = re.compile(r"\b(habari|niaje|mambo|nataka|tafadhali|asante|bei|sawa|ndiyo|hapana|ghairi|hamisha|sogeza)\b", re.I)
+_AFFIRM_SENTENCE = re.compile(
+    r"^(?:(?:yes|yeah|yep|yup|ndiyo|ndio|sawa|ok|okay)(?:[,! .]+(?:everything|all|that|those|the details|the services|the prices|the times)?(?:\s+(?:is|are|that's|it's|looks|look|seems|seem))?\s*(?:correct|right|good|fine|okay|ok|sawa|poa|mine|different))?|"
+    r"(?:everything|all|that|those|the details|the services|the prices|the times)\s+(?:(?:is|are|looks|look|seems|seem)\s+)?(?:correct|right|good|fine|okay|ok|sawa|poa)|"
+    r"(?:it\s+)?(?:looks|sounds|seems)\s+(?:correct|right|good|fine|okay|ok))$", re.I)
+_AFFIRM_ACTION = re.compile(r"^(?:yes|yeah|yep|yup|ndiyo|ndio)[,! ]+(?:please\s+)?(?:go ahead|do it|proceed|create it|set it up)$", re.I)
+_NEGATIVE_SENTENCE = re.compile(r"^(?:no|nope|hapana|la)(?:\W+(?:that is wrong|that's wrong|not correct|not right|si sawa|sio sawa|badilisha|change it))?$", re.I)
+SW_HINTS = re.compile(r"\b(habari|niaje|mambo|nataka|tafadhali|asante|bei|sawa|ndiyo|hapana|ghairi|hamisha|sogeza|sajili|kusajili|biashara|saluni|huduma|wahudumu|jina|muda|amana|kinyozi)\b", re.I)
 
 DURATION_HINTS = (
     ("braid", 180), ("dread", 180), ("locs", 180), ("weav", 150), ("wig", 120),
@@ -51,8 +69,22 @@ TIME_PAIR = re.compile(
     r"(?P<h2>\d{1,2})(?::(?P<m2>\d{2}))?\s*(?P<ap2>[ap]\.?m\.?)?", re.I)
 
 
+_TIME_TOKEN = re.compile(r"(?<![\w])(?:[01]?\d|2[0-3])(?::[0-5]\d)?\s*(?:[ap]\.?m\.?)?(?![\w])", re.I)
+
+
 def detect_lang(text: str) -> str:
     return "sw" if SW_HINTS.search(text or "") else "en"
+
+
+def is_affirmative(text: str) -> bool:
+    """A clear yes suitable for a registration confirmation."""
+    words = " ".join((text or "").strip().lower().split()).strip(" .,!?")
+    return words in YES_WORDS or bool(_AFFIRM_SENTENCE.fullmatch(words) or _AFFIRM_ACTION.fullmatch(words))
+
+
+def is_negative(text: str) -> bool:
+    words = " ".join((text or "").strip().lower().split()).strip(" .!?")
+    return words in NO_WORDS or bool(_NEGATIVE_SENTENCE.fullmatch(words))
 
 
 def default_minutes(name: str) -> int:
@@ -116,9 +148,34 @@ def parse_service_line(line: str) -> dict | None:
 
 
 def parse_time_pair(text: str):
-    """'09:00-18:00' to (open, close) time objects, or None. The whole line must be the pair: a partial
-    match like '0900-1800' is rejected, never guessed at. A bare evening close ('9-5') rolls past noon."""
-    m = TIME_PAIR.fullmatch((text or "").strip())
+    """Parse a stated opening-hours pair. Four-digit '0900-1800' is read as 09:00-18:00;
+    three-digit '800-1900' is rejected, never guessed at. A bare evening close ('9-5') rolls past noon."""
+    raw = (text or "").strip()
+    mil = re.fullmatch(r"(\d{2})(\d{2})\s*(?:-|–|to)\s*(\d{2})(\d{2})", raw, re.I)
+    if mil and all(int(mil.group(i)) <= 23 for i in (1, 3)) and all(int(mil.group(i)) <= 59 for i in (2, 4)):
+        raw = f"{mil.group(1)}:{mil.group(2)}-{mil.group(3)}:{mil.group(4)}"
+    m = TIME_PAIR.fullmatch(raw)
+    if not m:
+        matches = list(_TIME_TOKEN.finditer(raw))
+        if len(matches) == 2:
+            first, second = matches
+            prefix = raw[:first.start()].strip().casefold()
+            between = raw[first.end():second.start()].strip().casefold()
+            suffix = raw[second.end():].strip().casefold().strip(".,!?")
+            allowed_prefix = {"we", "we're", "we're", "we are", "i", "i'm", "i am", "our", "the",
+                              "open", "opening", "hour", "hours", "are", "is", "from", "at", "between"}
+            prefix_words = prefix.replace("we're", "we").replace("i'm", "i").split()
+            allowed_between = {"to", "until", "till", "through", "and", "we", "we're", "close", "closes",
+                               "closing", "at", "are", "is"}
+            between_words = between.replace("-", " ").replace("–", " ").replace(",", " ").split()
+            allowed_suffix = {"daily", "every", "day"}
+            prefix_ok = not prefix_words or all(word in allowed_prefix for word in prefix_words)
+            explicit_clock = ":" in first.group() or ":" in second.group() or bool(re.search(r"[ap]\.?m", first.group() + second.group(), re.I))
+            between_ok = (bool(between_words) or (between in ("-", "–") and explicit_clock)) and all(word in allowed_between for word in between_words)
+            suffix_ok = not suffix or all(word in allowed_suffix for word in suffix.split())
+            if prefix_ok and between_ok and suffix_ok:
+                raw = f"{first.group().strip()}-{second.group().strip()}"
+                m = TIME_PAIR.fullmatch(raw)
     if not m:
         return None
     from datetime import time as _time
@@ -166,6 +223,20 @@ async def _clear_session(pool, sender: str) -> None:
     await pool.execute("DELETE FROM onboarding_sessions WHERE sender=$1", sender)
 
 
+async def clear_session(pool, sender: str) -> None:
+    """End a registration draft when the owner explicitly cancels or switches to booking."""
+    await _clear_session(pool, sender)
+
+
+def wants_cancel_registration(text: str) -> bool:
+    low = " ".join(guard.clean(text or "").casefold().split()).strip(" .,!?")
+    return low in CANCEL_WORDS or bool(_CANCEL_REGISTRATION.fullmatch(low))
+
+
+def wants_customer_booking(text: str) -> bool:
+    return bool(_CUSTOMER_BOOKING_REQUEST.fullmatch(guard.clean(text or "")))
+
+
 async def similar_salon(pool, name: str) -> str | None:
     """An existing salon name close enough that this may be a duplicate registration."""
     names = [r["name"] for r in await pool.fetch("SELECT name FROM salons WHERE active")]
@@ -179,14 +250,14 @@ async def similar_salon(pool, name: str) -> str | None:
 
 async def _say(ctx, pid: str, to: str, body: str) -> None:
     try:
-        await ctx.wa.send_text(pid, "", to, body)
+        await outbound.send_unbound_text(ctx, pid, to, body)
     except Exception:
         log.warning("onboarding send failed")
 
 
 async def _say_buttons(ctx, pid: str, to: str, body: str, buttons: list[tuple[str, str]]) -> None:
     try:
-        await ctx.wa.send_buttons(pid, "", to, body, buttons)
+        await outbound.send_unbound_buttons(ctx, pid, to, body, buttons)
     except Exception:
         log.warning("onboarding send failed")
 
@@ -207,7 +278,7 @@ _EXPLAIN_MARKERS = re.compile(r"\b(sorry|pole|samahani|actually|kumbe|maana|yaan
 
 def looks_off_topic(text: str) -> bool:
     """True when a message at a name step is chatter, a question, or an explanation, not the name itself."""
-    words = (text or "").strip()
+    words = guard.clean(text)
     if not words:
         return True
     low = words.lower()
@@ -229,6 +300,15 @@ MAX_OWNERS = 10
 
 def examples(kind: str | None) -> dict:
     return EXAMPLES.get(kind) or EXAMPLES["salon"]
+
+
+def registration_format() -> dict[str, str]:
+    """User-facing placeholders; parser examples stay separate so no fictional menu looks real."""
+    return {
+        "prices": "[service name] | [your price in KES] | [duration]",
+        "duration": "[service name] | [duration]",
+        "fix": "[service name] | [updated price] | [new duration, if changing it]",
+    }
 
 
 def parse_owners(words: str) -> list[str] | None:
@@ -336,6 +416,7 @@ def apply_durations(services: list[dict], words: str) -> tuple[int, list[str]]:
             mins = int(m.group(1)) * (60 if (m.group(2) or "").lower().startswith("h") else 1)
             if 5 <= mins <= 480:
                 services[0]["minutes"] = mins
+                services[0]["explicit"] = True
                 return 1, []
             return 0, [lines[0].strip()]
     for ln in lines:
@@ -344,6 +425,7 @@ def apply_durations(services: list[dict], words: str) -> tuple[int, list[str]]:
         mins = int(m.group(2)) * (60 if (m.group(3) or "").lower().startswith("h") else 1) if m else 0
         if m and target and 5 <= mins <= 480:
             target["minutes"] = mins
+            target["explicit"] = True
             fixed += 1
         else:
             bad.append(ln.strip())
@@ -361,7 +443,7 @@ def apply_corrections(data: dict, words: str) -> tuple[list[str], list[dict], li
         if p is None:
             bad.append(ln.strip())
             continue
-        target = find_service(data.get("services", []), p["name"])
+        target = next((s for s in data.get("services", []) if s["name"].casefold() == p["name"].casefold()), None)
         if target is None:
             added.append(p)
         else:
@@ -373,8 +455,95 @@ def apply_corrections(data: dict, words: str) -> tuple[list[str], list[dict], li
     return updated, added, bad
 
 
-async def _go_live(ctx, pid: str, sender: str, state: dict) -> None:
+def registration_complete(state: dict) -> bool:
+    """Validate the full persisted draft before any salon row is created."""
+    data = state.get("data") or {}
+    if state.get("twin"):
+        return False
+    salon = data.get("salon")
+    if not isinstance(salon, str) or not MIN_NAME <= len(salon.strip()) <= MAX_NAME:
+        return False
+    if data.get("kind") not in ("salon", "kinyozi"):
+        return False
+    owners = data.get("owners")
+    if not isinstance(owners, list) or not 1 <= len(owners) <= MAX_OWNERS or not all(isinstance(name, str) and parse_owners(name) for name in owners):
+        return False
+    services = data.get("services")
+    if not isinstance(services, list) or not 1 <= len(services) <= MAX_SERVICES:
+        return False
+    seen = set()
+    for service in services:
+        if not isinstance(service, dict) or not isinstance(service.get("name"), str):
+            return False
+        name = service["name"].strip()
+        if not MIN_NAME <= len(name) <= MAX_NAME or name.casefold() in seen:
+            return False
+        seen.add(name.casefold())
+        price, minutes = service.get("price"), service.get("minutes")
+        if not isinstance(price, int) or isinstance(price, bool) or not MIN_PRICE <= price <= MAX_PRICE:
+            return False
+        if not isinstance(minutes, int) or isinstance(minutes, bool) or not 5 <= minutes <= 480:
+            return False
+    if not all(service.get("explicit") for service in services):
+        # Older sessions reached these steps only after the owner accepted the estimates.
+        if not state.get("duration_defaults_accepted"):
+            if "duration_defaults_accepted" in state or state.get("step") not in ("ask_hours", "ask_deposit", "confirm_all"):
+                return False
+    if not state.get("services_confirmed") and state.get("step") not in ("ask_durations", "ask_hours", "ask_deposit", "confirm_all"):
+        return False
+    if not data.get("open") or not data.get("close") or parse_time_pair(f"{data['open']}-{data['close']}") is None:
+        return False
+    deposit = data.get("deposit")
+    return isinstance(deposit, int) and not isinstance(deposit, bool) and 0 <= deposit <= MAX_DEPOSIT
+
+
+def registration_next_step(state: dict) -> str:
+    """Return the first incomplete or unconfirmed registration stage."""
+    data = state.get("data") or {}
+    salon = data.get("salon")
+    if state.get("step") == "confirm_name" and state.get("twin"):
+        return "confirm_name"
+    if not isinstance(salon, str) or not MIN_NAME <= len(salon.strip()) <= MAX_NAME:
+        return "ask_name"
+    if data.get("kind") not in ("salon", "kinyozi"):
+        return "ask_type"
+    owners = data.get("owners")
+    if not isinstance(owners, list) or not owners or not all(isinstance(name, str) and parse_owners(name) for name in owners):
+        return "ask_owner"
+    services = data.get("services")
+    if not isinstance(services, list) or not services or len(services) > MAX_SERVICES:
+        return "ask_prices"
+    service_names = set()
+    for service in services:
+        if not isinstance(service, dict) or not isinstance(service.get("name"), str):
+            return "ask_prices"
+        name = service["name"].strip()
+        price, minutes = service.get("price"), service.get("minutes")
+        if (not MIN_NAME <= len(name) <= MAX_NAME or name.casefold() in service_names
+                or not isinstance(price, int) or isinstance(price, bool) or not MIN_PRICE <= price <= MAX_PRICE
+                or not isinstance(minutes, int) or isinstance(minutes, bool) or not 5 <= minutes <= 480):
+            return "ask_prices"
+        service_names.add(name.casefold())
+    if not state.get("services_confirmed"):
+        return "confirm_services"
+    if not all(isinstance(s, dict) and s.get("explicit") for s in services) and not state.get("duration_defaults_accepted"):
+        return "ask_durations"
+    if not data.get("open") or not data.get("close") or parse_time_pair(f"{data.get('open', '')}-{data.get('close', '')}") is None:
+        return "ask_hours"
+    deposit = data.get("deposit")
+    if not isinstance(deposit, int) or isinstance(deposit, bool) or not 0 <= deposit <= MAX_DEPOSIT:
+        return "ask_deposit"
+    return "confirm_all"
+
+
+async def _go_live(ctx, pid: str, sender: str, state: dict) -> bool:
     """Create the salon, its stylists, and its services, then hand back the invite link."""
+    if not registration_complete(state):
+        log.error("refusing to create an incomplete salon registration for %s", sender[-4:])
+        state["step"] = registration_next_step(state)
+        await _save_session(ctx.pool, sender, state)
+        await _resend(ctx, pid, sender, state, t(state.get("lang", "en"), "ob_steer"))
+        return False
     from .channels import invites
     from .availability import DAY_KEYS
     data, lang = state["data"], state.get("lang", "en")
@@ -395,6 +564,7 @@ async def _go_live(ctx, pid: str, sender: str, state: dict) -> None:
                 salon, s["name"], s["price"], s["minutes"])
             for staff in staff_ids:
                 await con.execute("INSERT INTO staff_services (staff_id, service_id) VALUES ($1::uuid,$2::uuid)", staff, sid)
+    await outbound.set_conversation_salon(ctx, salon)
     slug = await binding.ensure_slug(ctx.pool, salon, data["salon"])
     clear_salon_cache()
     from .channels.telegram import bot_username
@@ -404,12 +574,13 @@ async def _go_live(ctx, pid: str, sender: str, state: dict) -> None:
     link = invites.invite_for(channel, slug, username=username, number=number)
     await _clear_session(ctx.pool, sender)
     await _say(ctx, pid, sender, t(lang, "ob_live", salon=data["salon"], link=link))
+    return True
 
 
 def _question_for(state: dict) -> str:
     """The prompt that belongs to the state's step, rebuilt from what is known so far."""
     lang, data = state.get("lang", "en"), state.get("data", {})
-    ex = examples(data.get("kind"))
+    ex = registration_format()
     step = state.get("step", "ask_name")
     if step == "confirm_name":
         return t(lang, "ob_name_twin", name=state.get("twin", ""))
@@ -480,11 +651,23 @@ async def advance(ctx, sender: str, pid: str, text: str, media: dict | None = No
     if state is None:
         return False
     lang, data = state.get("lang", "en"), state.setdefault("data", {})
-    words = (text or "").strip()
+    words = guard.clean(text)
     low = words.lower()
-    if low in CANCEL_WORDS:
-        await _clear_session(ctx.pool, sender)
-        await _say(ctx, pid, sender, t(lang, "ob_cancelled"))
+    if wants_cancel_registration(words):
+        await clear_session(ctx.pool, sender)
+        await _say(ctx, pid, sender, t(smalltalk.language(words, lang), "ob_cancelled"))
+        return True
+    step = state.get("step", "ask_name")
+    if step == "confirm_platform_owner":
+        if low in YES_WORDS:
+            state["step"] = "ask_name"
+            await _save_session(ctx.pool, sender, state)
+            await _say(ctx, pid, sender, t(lang, "ob_ask_name"))
+        elif low in NO_WORDS:
+            await clear_session(ctx.pool, sender)
+            await _say(ctx, pid, sender, t(lang, "ob_cancelled"))
+        else:
+            await _say(ctx, pid, sender, t(lang, "ob_platform_owner_confirm"))
         return True
     if low in BACK_WORDS:
         state["return_to"] = None
@@ -499,6 +682,21 @@ async def advance(ctx, sender: str, pid: str, text: str, media: dict | None = No
         await _resend(ctx, pid, sender, state, t(lang, "ob_steer"))
         return True
     step = state.get("step", "ask_name")
+
+    if step == "confirm_all" and is_affirmative(words):
+        await _go_live(ctx, pid, sender, state)
+        return True
+
+    # A model conversation runs only when enabled. The parser and state machine
+    # below remain the authoritative fallback for outages and model refusals.
+    if media is None and getattr(ctx, "agent", None) is not None and getattr(ctx.settings, "agent_mode", "off") == "on":
+        from .onboarding_agent import advance as agent_advance
+        # Keep compact yes/no controls deterministic; natural confirmations are
+        # interpreted by the model but still checked against the current state.
+        simple_control = low in NO_WORDS and step in {"confirm_name", "confirm_services", "ask_durations", "confirm_all"}
+        if not simple_control:
+            if await agent_advance(ctx, sender, pid, words, state):
+                return True
 
     if step == "ask_name":
         if low in _NEVER_A_NAME or looks_off_topic(words):
@@ -533,6 +731,7 @@ async def advance(ctx, sender: str, pid: str, text: str, media: dict | None = No
             await _say(ctx, pid, sender, t(lang, "ob_ask_type", salon=data["salon"]))
         elif low in NO_WORDS:
             state["return_to"] = None
+            state.pop("twin", None)
             state["step"] = "ask_name"
             await _save_session(ctx.pool, sender, state)
             await _say(ctx, pid, sender, t(lang, "ob_ask_name"))
@@ -569,25 +768,26 @@ async def advance(ctx, sender: str, pid: str, text: str, media: dict | None = No
         await _save_session(ctx.pool, sender, state)
         if await _maybe_return(ctx, pid, sender, state):
             return True
-        await _say(ctx, pid, sender, t(lang, "ob_ask_prices", example=examples(data.get("kind"))["prices"]))
+        await _say(ctx, pid, sender, t(lang, "ob_ask_prices", example=registration_format()["prices"]))
         return True
 
     if step == "ask_prices":
-        ex = examples(data.get("kind"))
+        ex = registration_format()
         if media and media.get("kind") == "image":
-            await _say(ctx, pid, sender, t(lang, "ob_photo_type", example=ex["bad"]))
+            await _say(ctx, pid, sender, t(lang, "ob_photo_type", example=ex["prices"]))
             return True
         bad: list[str] = []
         if low not in YES_WORDS or not data.get("services"):
             updated, added, bad = apply_corrections(data, words)
             if not updated and not added:
-                await _say(ctx, pid, sender, t(lang, "ob_prices_bad", example=ex["bad"]))
+                await _say(ctx, pid, sender, t(lang, "ob_prices_bad", example=ex["prices"]))
                 return True
             if len(data["services"]) > MAX_SERVICES:
                 data["services"] = data["services"][:MAX_SERVICES]
                 await _say(ctx, pid, sender, t(lang, "ob_too_many", n=MAX_SERVICES))
         state["stack"] = ["ask_prices"]
         state["step"] = "confirm_services"
+        state["services_confirmed"] = False
         await _save_session(ctx.pool, sender, state)
         body = t(lang, "ob_confirm_services", lines=_service_lines(data["services"], mark_guessed=True), fix=ex["fix"])
         if bad:
@@ -596,11 +796,12 @@ async def advance(ctx, sender: str, pid: str, text: str, media: dict | None = No
         return True
 
     if step == "confirm_services":
-        ex = examples(data.get("kind"))
+        ex = registration_format()
         if low in YES_WORDS:
             if await _maybe_return(ctx, pid, sender, state):
                 return True
             state["stack"] = ["confirm_services"]
+            state["services_confirmed"] = True
             if all(s.get("explicit") for s in data["services"]):
                 state["step"] = "ask_hours"
             else:
@@ -610,6 +811,8 @@ async def advance(ctx, sender: str, pid: str, text: str, media: dict | None = No
         elif low in NO_WORDS:
             state["step"] = "ask_prices"
             data["services"] = []
+            state["services_confirmed"] = False
+            state.pop("duration_defaults_accepted", None)
             await _save_session(ctx.pool, sender, state)
             await _say(ctx, pid, sender, t(lang, "ob_ask_prices", example=ex["prices"]))
         else:
@@ -622,6 +825,7 @@ async def advance(ctx, sender: str, pid: str, text: str, media: dict | None = No
             if len(data["services"]) > MAX_SERVICES:
                 data["services"] = data["services"][:MAX_SERVICES]
                 await _say(ctx, pid, sender, t(lang, "ob_too_many", n=MAX_SERVICES))
+            state["services_confirmed"] = False
             await _save_session(ctx.pool, sender, state)
             body = ""
             if updated:
@@ -636,14 +840,21 @@ async def advance(ctx, sender: str, pid: str, text: str, media: dict | None = No
         if low in YES_WORDS:
             if await _maybe_return(ctx, pid, sender, state):
                 return True
+            state["duration_defaults_accepted"] = True
+            for service in data.get("services", []):
+                service["explicit"] = True
             state["stack"] = ["ask_durations"]
             state["step"] = "ask_hours"
             await _save_session(ctx.pool, sender, state)
             await _say(ctx, pid, sender, t(lang, "ob_ask_hours"))
             return True
+        if low in NO_WORDS:
+            ex = registration_format()
+            await _say(ctx, pid, sender, t(lang, "ob_durations_bad", example=ex["duration"]))
+            return True
         fixed, bad = apply_durations(data["services"], words)
         if not fixed:
-            ex = examples(data.get("kind"))
+            ex = registration_format()
             await _say(ctx, pid, sender, t(lang, "ob_durations_bad", example=ex["duration"]))
             return True
         if await _maybe_return(ctx, pid, sender, state):
@@ -686,7 +897,7 @@ async def advance(ctx, sender: str, pid: str, text: str, media: dict | None = No
         return True
 
     if step == "confirm_all":
-        ex = examples(data.get("kind"))
+        ex = registration_format()
         if low in YES_WORDS:
             await _go_live(ctx, pid, sender, state)
         elif low in NO_WORDS:
@@ -716,8 +927,20 @@ async def advance(ctx, sender: str, pid: str, text: str, media: dict | None = No
 async def begin(ctx, sender: str, pid: str, text: str) -> bool:
     """Start onboarding for a /start register message. False when registration is not allowed."""
     if not await binding.registration_allowed(ctx.pool, sender):
-        await _say(ctx, pid, sender, t(detect_lang(text), "ob_limited"))
+        await _say(ctx, pid, sender, t(smalltalk.language(text, detect_lang(text)), "ob_limited"))
         return True
-    await _save_session(ctx.pool, sender, {"step": "ask_name", "data": {}, "lang": detect_lang(text), "stack": []})
-    await _say(ctx, pid, sender, t(detect_lang(text), "ob_ask_name"))
+    text = guard.clean(text)
+    from . import platform
+    is_platform_owner = platform.is_platform(ctx.settings, sender)
+    step = "confirm_platform_owner" if is_platform_owner else "ask_name"
+    state = {"step": step, "data": {}, "lang": smalltalk.language(text, detect_lang(text)), "stack": []}
+    await _save_session(ctx.pool, sender, state)
+    if is_platform_owner:
+        await _say(ctx, pid, sender, t(state["lang"], "ob_platform_owner_confirm"))
+        return True
+    if getattr(ctx, "agent", None) is not None and getattr(ctx.settings, "agent_mode", "off") == "on":
+        from .onboarding_agent import advance as agent_advance
+        if await agent_advance(ctx, sender, pid, text, state):
+            return True
+    await _say(ctx, pid, sender, t(state["lang"], "ob_ask_name"))
     return True

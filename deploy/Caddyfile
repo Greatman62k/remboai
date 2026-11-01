@@ -25,7 +25,7 @@
     request_body {
         max_size 256KiB
     }
-    @app path /health /ready /webhook /telegram/webhook /mpesa/callback/* /ops/*
+    @app path /health /ready /webhook /telegram/webhook /mpesa/callback/* /ops/* /metrics /model-info
     handle @app {
         reverse_proxy app:8080 {
             transport http {
@@ -37,6 +37,8 @@
         }
     }
     handle {
-        respond 404
+        root * /srv/site
+        try_files {path} {path}.html /index.html
+        file_server
     }
 }

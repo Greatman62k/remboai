@@ -4,12 +4,222 @@ import os
 
 import pytest
 
-from app import lifecycle
+from app import lifecycle, platform
 from tests.harness import PID, build, client, payload, post, post_tg, tg_update
 
 DSN = os.environ.get("TEST_DATABASE_URL")
 needs_db = pytest.mark.skipif(not DSN, reason="needs TEST_DATABASE_URL")
 A, P = "254711000001", "tg:9001"
+
+
+def test_owner_route_parser_requires_the_explicit_prefix_and_parses_salon_scope():
+    assert platform.owner_request("/owner today") == (None, "today")
+    assert platform.owner_request("/owner@remboai_bot zuri-cuts | resolve") == ("zuri-cuts", "resolve")
+    assert platform.owner_request("/owner") == (None, "")
+    assert platform.owner_request("owner today") is None
+
+
+def test_platform_commands_understand_role_and_natural_business_lists():
+    assert platform.ROLE.match("What is my role")
+    assert platform.SHOPS.match("Return list")
+    assert platform.SHOPS.match("list businesses")
+
+
+def test_platform_admin_help_and_role_are_scannable_plain_text_lists():
+    from app.messages import t
+
+    for text in (platform.HELP_TEXT, platform.ROLE_TEXT):
+        assert "1. " in text
+        assert "del <business> YES" in text
+        assert "\n- " not in text
+    assert platform.HELP_TEXT.startswith("Platform administrator commands\n")
+    assert platform.ROLE_TEXT.startswith("You are authenticated as a RemboAI platform administrator.")
+    for lang in ("en", "sw"):
+        owner_help = t(lang, "owner_help")
+        assert owner_help.count("\n") == 8
+        assert "\n1. " in owner_help and "\n8. " in owner_help
+        assert "\n- " not in owner_help
+
+
+def test_platform_model_reply_is_cleaned_for_plain_text_chat():
+    from app.agent.platform_assistant import _clean_reply
+
+    body = _clean_reply("Great — here's help:\n\n- **Businesses**: `shops`\n- **Totals**: `stats`")
+    assert body == "Great, here's help:\n\n• Businesses: shops\n• Totals: stats"
+    assert "—" not in body and "–" not in body
+    assert "**" not in body and "`" not in body
+
+
+def test_platform_model_failure_is_explained_before_command_fallback():
+    from types import SimpleNamespace
+    from app.agent.platform_assistant import _fallback_reply
+
+    body = _fallback_reply(SimpleNamespace(unavailable=True, problems=[]))
+    assert body.startswith("I couldn't get an assistant response just now.")
+    assert platform.HELP_TEXT in body
+
+
+def test_primary_and_backup_platform_admin_ids_are_recognized():
+    from types import SimpleNamespace
+
+    settings = SimpleNamespace(platform_owner_id="tg:primary", platform_owner_ids="tg:backup1, tg:backup2")
+    assert platform.is_platform(settings, "tg:primary")
+    assert platform.is_platform(settings, "tg:backup2")
+    assert not platform.is_platform(settings, "tg:other")
+
+
+def test_doctor_checks_backup_admin_ids_for_salon_owner_collisions():
+    from types import SimpleNamespace
+    from app.doctor import _platform_identity_overlaps
+
+    settings = SimpleNamespace(platform_owner_id="tg:primary", platform_owner_ids="tg:backup")
+    ids, overlap = _platform_identity_overlaps(settings, [{"owner_wa_id": "tg:backup"}])
+    assert ids == {"tg:primary", "tg:backup"}
+    assert overlap == 1
+
+
+def test_unknown_start_slug_is_not_a_customer_salon_selection():
+    import asyncio
+    from types import SimpleNamespace
+    from app import conversation
+
+    class Pool:
+        async def fetchrow(self, query, sender):
+            return None
+
+    class Context:
+        pool = Pool()
+
+    salon = {"id": "salon-1"}
+    msg = SimpleNamespace(text="/start unknown-salon", sender="tg:7001")
+
+    async def run():
+        return await conversation._resolve_salon(Context(), msg, salon)
+
+    resolved, linked = asyncio.run(run())
+    assert resolved == salon
+    assert linked is False
+
+
+@needs_db
+def test_platform_owner_defaults_to_hub_and_can_route_only_to_owned_salon():
+    async def run():
+        pool, out, salon = await build(DSN, platform_owner_id=P, till=False)
+        await pool.execute("UPDATE salons SET owner_wa_id=$1, slug='zuri-cuts'", P)
+        await pool.execute("INSERT INTO clients (salon_id, wa_id) VALUES ($1::uuid,$2)", salon, P)
+        async with client() as c:
+            await post_tg(c, tg_update(1, 9001, "nataka fade tomorrow afternoon"))
+            assert out.tg_bodies("9001")[-1].startswith("Platform administrator commands")
+            assert await pool.fetchval("SELECT count(*) FROM bookings") == 0
+            assert await pool.fetchval("SELECT count(*) FROM clients WHERE wa_id=$1", P) == 1
+
+            await post_tg(c, tg_update(2, 9001, "/owner zuri-cuts | today"))
+            assert "No bookings" in out.tg_bodies("9001")[-1]
+
+            await pool.execute("UPDATE salons SET owner_wa_id='tg:other'")
+            await post_tg(c, tg_update(3, 9001, "/owner today"))
+            assert "No salon owned by this account" in out.tg_bodies("9001")[-1]
+            assert await pool.fetchval("SELECT count(*) FROM bookings") == 0
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
+def test_platform_owner_can_register_own_salon_after_confirming_ownership():
+    async def run():
+        pool, out, salon = await build(DSN, platform_owner_id=P, till=False)
+        await pool.execute("UPDATE salons SET owner_wa_id=$1", P)
+        initial_salons = await pool.fetchval("SELECT count(*) FROM salons")
+        async with client() as c:
+            await post_tg(c, tg_update(1, 9001, "What is my role"))
+            assert "authenticated as a RemboAI platform administrator" in out.tg_bodies("9001")[-1]
+
+            await post_tg(c, tg_update(2, 9001, "Return list"))
+            assert "Businesses:" in out.tg_bodies("9001")[-1]
+
+            await post_tg(c, tg_update(3, 9001, "I want to register a business"))
+            assert "salon owned by your current platform-admin account" in out.tg_bodies("9001")[-1]
+            assert await pool.fetchval("SELECT state->>'step' FROM onboarding_sessions WHERE sender=$1", P) == "confirm_platform_owner"
+            assert await pool.fetchval("SELECT count(*) FROM salons") == initial_salons
+
+            await post_tg(c, tg_update(4, 9001, "Yes"))
+            assert await pool.fetchval("SELECT state->>'step' FROM onboarding_sessions WHERE sender=$1", P) == "ask_name"
+            await post_tg(c, tg_update(5, 9001, "I want to book Fade tomorrow afternoon"))
+            assert await pool.fetchval("SELECT count(*) FROM bookings") == 0
+            assert await pool.fetchval("SELECT count(*) FROM clients WHERE wa_id=$1", P) == 0
+            assert await pool.fetchval("SELECT state->>'step' FROM onboarding_sessions WHERE sender=$1", P) == "ask_name"
+
+            await post_tg(c, tg_update(6, 9001, "/owner today"))
+            assert "No bookings" in out.tg_bodies("9001")[-1]
+
+            await post_tg(c, tg_update(7, 9001, "Stop"))
+            assert "Registration cancelled" in out.tg_bodies("9001")[-1]
+            assert await pool.fetchval("SELECT count(*) FROM onboarding_sessions WHERE sender=$1", P) == 0
+            assert await pool.fetchval("SELECT count(*) FROM bookings") == 0
+            assert await pool.fetchval("SELECT count(*) FROM salons") == initial_salons
+            assert await pool.fetchval("SELECT count(*) FROM agent_turns WHERE outcome='registration_agent'") == 0
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
+def test_platform_assistant_uses_read_only_tools_for_natural_questions():
+    async def run():
+        pool, out, salon = await build(DSN, platform_owner_id=P, agent_mode="on", till=False)
+        moves = iter([
+            ("tool", "platform_totals", {}),
+            ("say", "The platform currently has 1 salon, which is active, and 0 bookings."),
+        ])
+        out.agent = lambda _body: next(moves)
+        async with client() as c:
+            await post_tg(c, tg_update(1, 9001, "Can you summarize how the platform is doing?"))
+            assert "platform currently has 1 salon" in out.tg_bodies("9001")[-1]
+            assert len(out.agent_requests) == 2
+            tool_names = {tool["function"]["name"] for tool in out.agent_requests[0]["tools"]}
+            assert tool_names == {"list_businesses", "platform_totals", "business_status"}
+
+            trace = await pool.fetchrow(
+                "SELECT outcome, sender, salon_id, model_calls, steps FROM agent_turns WHERE message_id='tg:1'")
+            assert trace["outcome"] == "platform_agent"
+            assert trace["sender"] == "platform_admin"
+            assert trace["salon_id"] is None
+            assert trace["model_calls"] == 2
+            assert "platform_totals" in str(trace["steps"])
+            assert await pool.fetchval("SELECT count(*) FROM platform_agent_sessions WHERE sender=$1", P) == 1
+            assert await pool.fetchval("SELECT active FROM salons WHERE id=$1::uuid", salon) is True
+            assert await pool.fetchval("SELECT count(*) FROM bookings") == 0
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
+def test_platform_owner_voice_is_transcribed_and_never_runs_mutating_commands():
+    async def run():
+        pool, out, salon = await build(DSN, platform_owner_id=P, agent_mode="on", till=False)
+        moves = iter([
+            ("tool", "platform_totals", {}),
+            ("say", "The platform has 1 business and 0 bookings."),
+            ("say", "I cannot delete a business for you. Please use the typed command and confirmation."),
+        ])
+        out.agent = lambda _body: next(moves)
+        async with client() as c:
+            out.asr_text = "How many businesses do we have?"
+            await post_tg(c, tg_update(1, 9001, voice={"file_id": "VOICE1", "duration": 4}))
+            assert out.tg_bodies("9001") == ["The platform has 1 business and 0 bookings."]
+            trace = await pool.fetchrow(
+                "SELECT message_kind, user_text FROM conversation_trace WHERE message_id='tg:1'")
+            assert trace["message_kind"] == "audio"
+            assert trace["user_text"] == "How many businesses do we have?"
+            assert await pool.fetchval("SELECT outcome FROM agent_turns WHERE message_id='tg:1'") == "platform_agent"
+            assert await pool.fetchval("SELECT count(*) FROM conversation_trace_replies WHERE message_id='tg:1'") == 1
+
+            out.asr_text = "del Zuri Cuts YES"
+            await post_tg(c, tg_update(2, 9001, voice={"file_id": "VOICE2", "duration": 4}))
+            assert "cannot delete" in out.tg_bodies("9001")[-1].lower()
+            assert await pool.fetchval("SELECT count(*) FROM salons") == 1
+            assert await pool.fetchval("SELECT active FROM salons WHERE id=$1::uuid", salon) is True
+        await pool.close()
+    asyncio.run(run())
 
 
 async def two_salons(dsn):

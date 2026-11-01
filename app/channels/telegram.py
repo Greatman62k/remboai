@@ -25,12 +25,21 @@ class Telegram:
         return "tg:" + self.token.split(":", 1)[0]
 
     async def call(self, method: str, payload: dict | None = None, timeout: float = 10.0) -> dict | list | None:
-        try:
-            r = await self.http.post(f"{API}/bot{self.token}/{method}", json=payload or {}, timeout=timeout)
-            body = r.json()
-        except (httpx.HTTPError, ValueError) as e:
-            log.warning("telegram %s failed: %s", method, e.__class__.__name__)
-            return None
+        body = None
+        for attempt in range(3):
+            try:
+                r = await self.http.post(f"{API}/bot{self.token}/{method}", json=payload or {}, timeout=timeout)
+                body = r.json()
+                break
+            except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+                # The request never reached Telegram, so trying again cannot send anything twice.
+                if attempt == 2:
+                    log.warning("telegram %s failed: %s", method, e.__class__.__name__)
+                    return None
+                await asyncio.sleep(0.5 * (attempt + 1))
+            except (httpx.HTTPError, ValueError) as e:
+                log.warning("telegram %s failed: %s", method, e.__class__.__name__)
+                return None
         if not body.get("ok"):
             log.error("telegram %s refused: %s %s", method, body.get("error_code"), body.get("description"))
             return None
@@ -48,6 +57,10 @@ class Telegram:
         if not ok:
             log.error("DELIVERY FAILED to %s on Telegram", mask(chat))
         return ok
+
+    async def typing(self, chat: str) -> None:
+        """Shows 'typing...' while the model thinks. Best effort."""
+        await self.call("sendChatAction", {"chat_id": chat, "action": "typing"}, timeout=3.0)
 
     async def answer_callback(self, callback_id: str) -> None:
         await self.call("answerCallbackQuery", {"callback_query_id": callback_id})
@@ -157,6 +170,10 @@ class Channels:
         if to.startswith("tg:"):
             return False
         return await self.wa.send_template(phone_number_id, token, to, template, lang, body_params)
+
+    async def typing(self, to: str) -> None:
+        if to.startswith("tg:") and self.tg:
+            await self.tg.typing(to[3:])
 
     async def download_media(self, token: str, media_id: str, max_bytes: int = 2_000_000):
         if media_id.startswith("tg:"):

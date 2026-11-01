@@ -52,7 +52,7 @@ async def _renew_once(pool, key: str, owner: uuid.UUID) -> bool:
         n = await pool.execute("UPDATE sender_locks SET locked_until = now() + ($3 * interval '1 second') WHERE key=$1 AND owner=$2", key, owner, LEASE_SECONDS)
     except Exception:
         log.warning("could not renew the lock %s", key)
-        return True
+        return False
     if not n.endswith("1"):
         log.error("lost the lock %s while still working on it", key)
         return False
