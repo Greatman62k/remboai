@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import re
 import unicodedata
+import json
 
 from . import lexicon
 from .channels import outbound
+from .contact import display_contact
 
 MAX_TEXT = 1000
 MAX_NAME = 40
@@ -119,15 +121,21 @@ async def hand_off(ctx, salon: dict, client: dict, lang: str, category: str, tex
     if owner:
         try:
             wa_id = client.get("wa_id") or ""
-            who = client.get("name") or f"+{wa_id}"
-            body = f"Needs a human ({category.replace('_',' ')}): {who}\nChat: https://wa.me/{wa_id}\nThey said: \"{(text or '')[:200]}\"\nReply \"resolve {wa_id}\" when done."
+            who = client.get("name") or display_contact(wa_id)
+            if wa_id.startswith("tg:"):
+                contact_line = f"Telegram contact: {display_contact(wa_id)}"
+            else:
+                digits = re.sub(r"\D", "", wa_id)
+                contact_line = f"Chat: https://wa.me/{digits}" if digits else f"Contact: {display_contact(wa_id)}"
+            body = (f"Needs a human ({category.replace('_',' ')}): {who}\n{contact_line}\n"
+                    f"They said: \"{(text or '')[:200]}\"\nReply \"resolve {wa_id}\" when done.")
             await outbound.send_text(ctx, salon, owner, body)
         except Exception:
             log.exception("owner notify failed")
     try:
         await ctx.pool.execute(
             "INSERT INTO conversations (salon_id, wa_id, state) VALUES ($1::uuid,$2,$3::jsonb) ON CONFLICT (salon_id, wa_id) DO UPDATE SET state=EXCLUDED.state, updated_at=now()",
-            salon["id"], client["wa_id"], __import__("json").dumps({"state": "handoff", "category": category}),
+            salon["id"], client["wa_id"], json.dumps({"state": "handoff", "category": category}),
         )
     except Exception:
         log.exception("handoff state save failed")
@@ -146,21 +154,48 @@ async def clear_handoff(pool, salon_id: str, wa_id: str) -> None:
     )
 
 async def owner_command(ctx, salon: dict, wa_id: str, text: str, send) -> bool:
-    import re as _re
     owner = (salon.get("owner_wa_id") or "").strip().lstrip("+")
-    m = _re.match(r"^\s*resolve\s+\+?(\d{9,15})\s*$", text or "", _re.I)
-    if not owner or wa_id != owner or not m:
+    if not owner or wa_id != owner:
         return False
-    target = m.group(1)
+
+    command = (text or "").strip()
+    if re.fullmatch(r"resolve", command, re.I):
+        rows = await ctx.pool.fetch(
+            "SELECT c.wa_id, c.name, h.category FROM handoffs h JOIN clients c ON c.id=h.client_id "
+            "WHERE h.salon_id=$1::uuid AND h.status='open' ORDER BY h.created_at", salon["id"])
+        if not rows:
+            await send.text("There are no open requests to resolve.")
+            return True
+        if len(rows) > 1:
+            lines = "\n".join(f"- {r['name'] or display_contact(r['wa_id'])}: {r['category']} (resolve {r['wa_id']})" for r in rows)
+            await send.text("There are several open requests. Reply with the customer to resolve:\n" + lines)
+            return True
+        target = rows[0]["wa_id"]
+    else:
+        m = re.fullmatch(r"resolve\s+((?:tg:\d{5,15})|(?:\+?\d{9,15}))", command, re.I)
+        if not m:
+            if re.match(r"resolve\b", command, re.I):
+                await send.text("Use RESOLVE for the only open request, or RESOLVE <customer ID> when there are several.")
+                return True
+            return False
+        target = m.group(1)
+        target = target.lower() if target.lower().startswith("tg:") else target.lstrip("+")
+
+    open_request = await ctx.pool.fetchval(
+        "SELECT 1 FROM handoffs h JOIN clients c ON c.id=h.client_id "
+        "WHERE h.salon_id=$1::uuid AND h.status='open' AND c.wa_id=$2 LIMIT 1", salon["id"], target)
+    if not open_request:
+        await send.text(f"There is no open request for {display_contact(target)}.")
+        return True
     await ctx.pool.execute(
         "UPDATE handoffs SET status='resolved', resolved_at=now() WHERE status='open' AND salon_id=$1::uuid AND client_id IN (SELECT id FROM clients WHERE salon_id=$1::uuid AND wa_id=$2)",
         salon["id"], target,
     )
     await ctx.pool.execute(
         "INSERT INTO conversations (salon_id, wa_id, state) VALUES ($1::uuid,$2,$3::jsonb) ON CONFLICT (salon_id, wa_id) DO UPDATE SET state=EXCLUDED.state, updated_at=now()",
-        salon["id"], target, __import__("json").dumps({}),
+        salon["id"], target, json.dumps({}),
     )
-    await send.text(f"Done. The bot will handle {target} again.")
+    await send.text(f"Resolved for {display_contact(target)}. The bot will handle them again.")
     return True
 
 async def strike(pool, sender: str, reason: str) -> None:

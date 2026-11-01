@@ -12,6 +12,8 @@ log = logging.getLogger("rembo")
 async def _process(ctx, msg: Message) -> None:
     """Everything done with one message once it has been accepted. Returning normally means "dealt with" (including messages deliberately
     dropped for abuse or rate limits); raising means "not dealt with, try again"."""
+    msg = dataclasses.replace(msg, text=guard.clean(msg.text), name=guard.clean_name(msg.name))
+    await outbound.record_inbound(ctx, msg)
     if await guard.blocked(ctx.pool, msg.sender, ctx.settings.strike_limit):
         log.warning("ignoring %s: too many abuse signals today", mask(msg.sender))
         return
@@ -46,7 +48,6 @@ async def _process(ctx, msg: Message) -> None:
             log.warning("daily limit: ignoring %s (%d messages in 24 hours)", mask(msg.sender), day)
             return
     log.info("message from %s kind=%s", mask(msg.sender), msg.kind)
-    msg = dataclasses.replace(msg, text=guard.clean(msg.text), name=guard.clean_name(msg.name))
     await converse(ctx, msg)
 
 
@@ -79,7 +80,7 @@ async def inbound(ctx, msg: Message) -> None:
             return
         log.warning("message %s was accepted earlier but never finished: handling it again", msg.id)
     try:
-        async with outbound.message_scope(msg.id):
+        async with outbound.message_scope(msg.id, conversational=True):
             await _process(ctx, msg)
     except Exception:
         log.exception("failed handling message %s; it stays open for a retry", msg.id)

@@ -29,8 +29,12 @@ async def delete_salon(pool, salon_id: str) -> dict:
     out = {}
     out["reviews"] = int((await pool.execute(
         "DELETE FROM payment_reviews WHERE payment_id IN (SELECT id FROM payments WHERE salon_id=$1::uuid)", salon_id)).split()[-1])
+    out["callbacks"] = int((await pool.execute(
+        "DELETE FROM mpesa_callbacks c USING payments p WHERE p.salon_id=$1::uuid "
+        "AND c.checkout_request_id=p.checkout_request_id", salon_id)).split()[-1])
     out["payments"] = int((await pool.execute("DELETE FROM payments WHERE salon_id=$1::uuid", salon_id)).split()[-1])
     await pool.execute("DELETE FROM visit_checks WHERE salon_id=$1::uuid", salon_id)
+    await pool.execute("DELETE FROM agent_turns WHERE salon_id=$1::uuid", salon_id)
     await pool.execute("DELETE FROM reminder_jobs WHERE salon_id=$1::uuid", salon_id)
     out["bookings"] = int((await pool.execute("DELETE FROM bookings WHERE salon_id=$1::uuid", salon_id)).split()[-1])
     out["salons"] = int((await pool.execute("DELETE FROM salons WHERE id=$1::uuid", salon_id)).split()[-1])

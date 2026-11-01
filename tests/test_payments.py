@@ -78,7 +78,7 @@ def test_successful_payment_confirms_the_booking_once_even_if_safaricom_repeats_
         mine = [x for x in out.bodies(A) if "200" in x and "QAB1CD2EF3" in x]
         assert len(mine) == 1 and "booked" in mine[0].lower() and "Fade" in mine[0]
         assert len(out.bodies(OWNER)) == 1 and out.bodies(OWNER)[0].startswith("New booking: Cust, Fade")
-        assert await pool.fetchval("SELECT count(*) FROM mpesa_callbacks") == 2
+        assert await pool.fetchval("SELECT count(*) FROM mpesa_callbacks") == 1
         assert await pool.fetchval("SELECT state FROM conversations") in ("{}", {})
         await pool.close()
     asyncio.run(run())

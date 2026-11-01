@@ -47,6 +47,9 @@ class Outside:
         self.queries: dict[str, dict] = {}
         self.refuse_text = False
         self.refuse_all = False
+        self.agent = None                 # callable(request body) -> the next scripted action; see tests/test_agent.py
+        self.agent_requests: list[dict] = []
+        self.refuse_tools = False         # a host with no native tool calling: answers 400 when `tools` is sent
 
     def handler(self, req: httpx.Request) -> httpx.Response:
         host = req.url.host
@@ -71,6 +74,27 @@ class Outside:
                 return httpx.Response(400, json={"error": {"code": 131047, "message": "Re-engagement message"}})
             self.sent.append(sent)
             return httpx.Response(200, json={"messages": [{"id": "x"}]})
+        if req.url.path.endswith("/chat/completions") and self.agent is not None and any(
+            k in json.loads(req.content)["messages"][0]["content"]
+            for k in ("booking receptionist", "diary assistant", "salon registration assistant", "platform administrator assistant")
+        ):
+            body = json.loads(req.content)
+            self.calls.append(host)
+            if host in self.down:
+                return httpx.Response(503, json={"error": "down"})
+            if self.refuse_tools and "tools" in body:
+                return httpx.Response(400, json={"error": "tools are not supported"})
+            self.agent_requests.append(body)
+            action = self.agent(body)
+            if "ONE JSON object" not in body["messages"][0]["content"]:
+                if action[0] == "tool":
+                    msg = {"role": "assistant", "content": None, "tool_calls": [{"id": f"c{len(self.agent_requests)}", "type": "function",
+                                                                               "function": {"name": action[1], "arguments": json.dumps(action[2])}}]}
+                else:
+                    msg = {"role": "assistant", "content": action[1]}
+            else:
+                msg = {"role": "assistant", "content": json.dumps({"tool": action[1], "args": action[2]} if action[0] == "tool" else {"reply": action[1]})}
+            return httpx.Response(200, json={"choices": [{"message": msg}], "usage": {"prompt_tokens": 100, "completion_tokens": 20}})
         if req.url.path.endswith("/chat/completions") and isinstance(json.loads(req.content)["messages"][-1]["content"], list):
             body = json.loads(req.content)
             image = next(p for p in body["messages"][-1]["content"] if p["type"] == "image_url")["image_url"]["url"]
@@ -207,6 +231,9 @@ async def build(dsn: str, till: bool = True, **over):
     await pool.execute("UPDATE salons SET tg_bot_id='tg:111'")
     app.state.tg = tg
     app.state.ctx = Ctx(settings, pool, Channels(wa, tg), llm, None, Daraja(http, settings), Transcriber(http, settings), StyleMatcher(http, settings, llm.endpoints))
+    if settings.agent_mode == "on":
+        from app.agent import AgentModel
+        app.state.ctx.agent = AgentModel(http, settings, None, llm.endpoints, pool)
     return pool, out, salon
 
 

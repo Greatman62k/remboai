@@ -1,8 +1,5 @@
-"""The salon owner's side of WhatsApp. A small fixed vocabulary matched by code (no model): an owner is giving
-orders that change real bookings, so the words are exact and the effect is predictable.
-
-An owner message that is not a command falls through to the customer conversation, so the owner can also try
-the booking flow from his own phone."""
+"""Salon owner actions use a small fixed vocabulary matched by code. Owner messages stay in the
+owner role; customer booking tests require a separate sender account."""
 from __future__ import annotations
 
 import json
@@ -15,6 +12,7 @@ import asyncpg
 
 from . import payments, waitlist
 from .channels import outbound
+from .contact import display_contact
 from .availability import day_slots
 from .bookings import busy_times
 from .messages import t
@@ -41,10 +39,98 @@ SUMMARY = re.compile(r"^\s*(summary|muhtasari)\W*$", re.I)
 TILL_TAP = re.compile(r"^till:(yes|no):([0-9a-fA-F-]{36})$")
 SWAHILI = re.compile(r"\b(leo|kesho|ratiba|miadi|funga|fungua|ghairi|muhtasari|msaada|kiungo|chelewa|hamisha|sogeza|amana|jumatatu|jumanne|jumatano|alhamisi|ijumaa|jumamosi|jumapili)\b", re.I)
 RANGE = re.compile(r"(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s*(?:-|–|to|hadi|mpaka)\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)", re.I)
+_DATE_ONLY = re.compile(r"^\s*(?:today|tomorrow|leo|kesho(?:\s+kutwa)?)\s*[?.!]*$", re.I)
+_CUSTOMER_SHORT_REPLY = re.compile(
+    r"^\s*(?:yes|yeah|yep|yup|no|nope|nah|ok(?:ay)?|sawa|ndiyo|ndio|hapana|sio|"
+    r"[1-3]|first|second|third|the first|the second|the third|this one|that one)\s*[?.!]*$", re.I)
+_CUSTOMER_QUESTION = re.compile(
+    r"\b(?:which|what)\s+(?:day|date|time|service)\b|\bday\s+(?:works|would be|is convenient)\b|"
+    r"\bwhen\s+(?:would|works|is)\b|\bsiku gani\b|\btarehe gani\b|\blini\b|"
+    r"\b(?:would|do) you like to book\b|\bwhich one works\b|\bpreferred time\b", re.I)
 
 
 def is_owner(salon: dict, sender: str) -> bool:
     return bool(salon.get("owner_wa_id")) and salon["owner_wa_id"] == sender
+
+
+async def owner_followup_is_pending(ctx, salon: dict, sender: str, text: str) -> bool:
+    """Keep short replies with the owner's latest agent prompt when owner and customer share a chat."""
+    if not _CUSTOMER_SHORT_REPLY.fullmatch(text or ""):
+        return False
+    raw = await ctx.pool.fetchval(
+        "SELECT state FROM conversations WHERE salon_id=$1::uuid AND wa_id=$2", salon["id"], sender)
+    state = raw if isinstance(raw, dict) else json.loads(raw or "{}")
+    if not isinstance(state, dict):
+        return False
+    history, owner_at = state.get("owner_history"), state.get("owner_history_at")
+    if not isinstance(history, list) or not history or not isinstance(history[-1], dict):
+        return False
+    if history[-1].get("role") != "assistant" or not owner_at:
+        return False
+    try:
+        owner_stamp = datetime.fromisoformat(owner_at) if isinstance(owner_at, str) else owner_at
+        if owner_stamp.tzinfo is None:
+            owner_stamp = owner_stamp.replace(tzinfo=ZoneInfo("UTC"))
+        owner_stamp = owner_stamp.astimezone(ZoneInfo("UTC"))
+        age = (datetime.now(ZoneInfo("UTC")) - owner_stamp).total_seconds()
+        if not 0 <= age <= 600:
+            return False
+        customer_history = state.get("history")
+        last_customer = next((h for h in reversed(customer_history or [])
+                              if isinstance(h, dict) and h.get("role") == "assistant"), None)
+        if last_customer and last_customer.get("ts"):
+            customer_stamp = datetime.fromisoformat(last_customer["ts"])
+            if customer_stamp.tzinfo is None:
+                customer_stamp = customer_stamp.replace(tzinfo=ZoneInfo("UTC"))
+            if customer_stamp.astimezone(ZoneInfo("UTC")) > owner_stamp:
+                return False
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+async def customer_followup_is_pending(ctx, salon: dict, sender: str, text: str) -> bool:
+    """Route short answers to whichever owner/customer prompt was most recently sent."""
+    is_date = bool(_DATE_ONLY.fullmatch(text or ""))
+    if not is_date and not _CUSTOMER_SHORT_REPLY.fullmatch(text or ""):
+        return False
+    raw = await ctx.pool.fetchval(
+        "SELECT state FROM conversations WHERE salon_id=$1::uuid AND wa_id=$2", salon["id"], sender)
+    state = raw if isinstance(raw, dict) else json.loads(raw or "{}")
+    if not isinstance(state, dict):
+        return False
+    history = state.get("history")
+    if not isinstance(history, list):
+        return False
+    last = next((h for h in reversed(history) if isinstance(h, dict) and h.get("role") == "assistant"), None)
+    if not last or not last.get("ts"):
+        return False
+    try:
+        stamp = datetime.fromisoformat(last["ts"])
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=ZoneInfo("UTC"))
+        customer_stamp = stamp.astimezone(ZoneInfo("UTC"))
+        age = (datetime.now(ZoneInfo("UTC")) - customer_stamp).total_seconds()
+    except (TypeError, ValueError):
+        return False
+    if not 0 <= age <= 600:
+        return False
+
+    owner_history = state.get("owner_history")
+    owner_at = state.get("owner_history_at")
+    if (isinstance(owner_history, list) and owner_history and isinstance(owner_history[-1], dict)
+            and owner_history[-1].get("role") == "assistant" and owner_at):
+        try:
+            owner_stamp = datetime.fromisoformat(owner_at) if isinstance(owner_at, str) else owner_at
+            if owner_stamp.tzinfo is None:
+                owner_stamp = owner_stamp.replace(tzinfo=ZoneInfo("UTC"))
+            if owner_stamp.astimezone(ZoneInfo("UTC")) >= customer_stamp:
+                return False
+        except (TypeError, ValueError):
+            pass
+    if state.get("state") not in (None, "", "idle"):
+        return True
+    return bool(_CUSTOMER_QUESTION.search(str(last.get("text") or "")))
 
 
 def _clock(s: str) -> time | None:
@@ -87,21 +173,40 @@ async def _bookings(ctx, salon: dict, day: date, tz: ZoneInfo) -> list[dict]:
 def _lines(rows: list[dict], tz: ZoneInfo, lang: str) -> str:
     out = []
     for i, r in enumerate(rows, 1):
-        pay = t(lang, "owner_paid", amount=r["paid"]) if r["paid"] else t(lang, "owner_unpaid")
+        if r["paid"]:
+            pay = t(lang, "owner_paid", amount=r["paid"])
+        elif r["status"] == "held":
+            pay = t(lang, "owner_unpaid")
+        else:
+            pay = t(lang, "owner_no_deposit_recorded")
         out.append(t(lang, "owner_line", n=i, time=r["starts_at"].astimezone(tz).strftime("%H:%M"), service=r["service"],
-                     client=r["client"] or "customer", phone="+" + r["phone"], pay=pay))
+                     client=r["client"] or "customer", phone=display_contact(r["phone"]), pay=pay))
     return "\n".join(out)
 
 
-async def _remember_list(ctx, salon: dict, owner: str, rows: list[dict]) -> None:
+async def _remember_list(ctx, salon: dict, owner: str, rows: list[dict], user_text: str | None = None,
+                        response: str | None = None) -> None:
+    raw = await ctx.pool.fetchval("SELECT state FROM conversations WHERE salon_id=$1::uuid AND wa_id=$2", salon["id"], owner)
+    state = raw if isinstance(raw, dict) else json.loads(raw or "{}")
+    state = state if isinstance(state, dict) else {}
+    state["owner_list"] = [r["id"] for r in rows]
+    if user_text is not None and response is not None:
+        history = state.get("owner_history")
+        history = list(history) if isinstance(history, list) else []
+        history.extend([
+            {"role": "user", "content": user_text[:300]},
+            {"role": "assistant", "content": response[:500]},
+        ])
+        state["owner_history"] = history[-6:]
+        state["owner_history_at"] = datetime.now(ZoneInfo("UTC")).isoformat()
     await ctx.pool.execute(
         "INSERT INTO conversations (salon_id, wa_id, state) VALUES ($1::uuid,$2,$3::jsonb) "
-        "ON CONFLICT (salon_id, wa_id) DO UPDATE SET state=EXCLUDED.state, updated_at=now()",
-        salon["id"], owner, json.dumps({"owner_list": [r["id"] for r in rows]}))
+        "ON CONFLICT (salon_id, wa_id) DO UPDATE SET state=COALESCE(conversations.state,'{}'::jsonb) || EXCLUDED.state, updated_at=now()",
+        salon["id"], owner, json.dumps(state))
 
 
 async def handle(ctx, salon: dict, to: str, text: str, tz: ZoneInfo, now: datetime) -> bool:
-    """Run an owner command. Returns False if `text` is not one (then it is treated as a customer message)."""
+    """Run a salon-owner command. Unknown owner text stays in owner mode."""
     if not is_owner(salon, to):
         return False
     today, lang = now.date(), "sw" if SWAHILI.search(text) else "en"
@@ -155,8 +260,9 @@ async def handle(ctx, salon: dict, to: str, text: str, tz: ZoneInfo, now: dateti
         day = parse_day(text, today) or today
         rows = await _bookings(ctx, salon, day, tz)
         label = _label(day, today, lang)
-        await _remember_list(ctx, salon, to, rows)
-        await say(t(lang, "owner_day", label=label, lines=_lines(rows, tz, lang)) if rows else t(lang, "owner_none", label=label))
+        response = t(lang, "owner_day", label=label, lines=_lines(rows, tz, lang)) if rows else t(lang, "owner_none", label=label)
+        await _remember_list(ctx, salon, to, rows, user_text=text, response=response)
+        await say(response)
         return True
     return False
 
@@ -273,7 +379,9 @@ async def cancel_booking(ctx, salon: dict, booking_id: str, tz: ZoneInfo) -> dic
         "UPDATE bookings b SET status='cancelled' FROM services sv, clients c WHERE b.id=$1::uuid AND b.salon_id=$2::uuid "
         "AND b.status IN ('held','confirmed') AND sv.id=b.service_id AND c.id=b.client_id "
         "RETURNING b.id::text, b.starts_at, sv.name AS service, c.name AS client, c.wa_id AS phone, c.lang, "
-        "(SELECT sum(amount_kes) FROM payments p WHERE p.booking_id=b.id AND p.status='paid') AS paid", booking_id, salon["id"])
+        "(SELECT sum(amount_kes) FROM payments p WHERE p.booking_id=b.id AND p.status='paid') AS paid, "
+        "(SELECT p.phone FROM payments p WHERE p.booking_id=b.id AND p.status IN ('paid','needs_refund') "
+        "ORDER BY p.settled_at DESC NULLS LAST LIMIT 1) AS refund_phone", booking_id, salon["id"])
     if row is None:
         return None
     row = dict(row)
@@ -348,7 +456,7 @@ async def _report_cancel(ctx, salon, to, row: dict | None, tz, lang: str, n: int
     if row is None:
         await _say(ctx, salon, to, t(lang, "owner_bad_number", n=n))
         return
-    refund = t(lang, "owner_refund_hint", amount=row["paid"], phone="+" + row["phone"]) if row["paid"] else ""
+    refund = t(lang, "owner_refund_hint", amount=row["paid"], phone=display_contact(row.get("refund_phone") or row["phone"])) if row["paid"] else ""
     await _say(ctx, salon, to, t(lang, "owner_cancelled", service=row["service"], when=row["when"], client=row["client"] or "customer", refund=refund))
 
 
@@ -361,7 +469,7 @@ async def _cancel_who(ctx, salon, to, spec: str, tz, lang: str) -> None:
         await _remember_list(ctx, salon, to, rows)
         lines = "\n".join(t(lang, "owner_cust_line", n=i, service=r["service"],
                                           when=r["starts_at"].astimezone(tz).strftime("%a %d %b, %H:%M")) for i, r in enumerate(rows, 1))
-        await _say(ctx, salon, to, t(lang, "owner_cust_pick", phone="+" + rows[0]["phone"], lines=lines))
+        await _say(ctx, salon, to, t(lang, "owner_cust_pick", phone=display_contact(rows[0]["phone"]), lines=lines))
         return
     await _report_cancel(ctx, salon, to, await cancel_booking(ctx, salon, rows[0]["id"], tz), tz, lang)
 
@@ -375,7 +483,7 @@ async def _move_who(ctx, salon, to, spec: str, rest: str, tz, today: date, lang:
         await _remember_list(ctx, salon, to, rows)
         lines = "\n".join(t(lang, "owner_cust_line", n=i, service=r["service"],
                                           when=r["starts_at"].astimezone(tz).strftime("%a %d %b, %H:%M")) for i, r in enumerate(rows, 1))
-        await _say(ctx, salon, to, t(lang, "owner_cust_pick", phone="+" + rows[0]["phone"], lines=lines))
+        await _say(ctx, salon, to, t(lang, "owner_cust_pick", phone=display_contact(rows[0]["phone"]), lines=lines))
         return
     day, now = parse_day(rest, today), datetime.now(tz)
     at = parse_time(rest)
@@ -429,7 +537,7 @@ async def _move_who(ctx, salon, to, spec: str, rest: str, tz, today: date, lang:
     clang = b["lang"] or "en"
     await outbound.send_text(ctx, salon, b["phone"], t(clang, "moved", salon=salon["name"], service=b["service"],
                                                        when=want.strftime("%a %d %b, %H:%M"), stylist=b["stylist"]))
-    await _say(ctx, salon, to, t(lang, "owner_moved", client=b["phone"], service=b["service"],
+    await _say(ctx, salon, to, t(lang, "owner_moved", client=display_contact(b["phone"]), service=b["service"],
                                  when=want.strftime("%a %d %b, %H:%M"), stylist=b["stylist"]))
     log.info("owner moved booking %s to %s", rows[0]["id"], want.isoformat())
 
@@ -442,7 +550,7 @@ async def _cancel(ctx, salon, to, n: int, tz, lang: str) -> None:
     if row is None:
         await _say(ctx, salon, to, t(lang, "owner_bad_number", n=n))
         return
-    refund = t(lang, "owner_refund_hint", amount=row["paid"], phone="+" + row["phone"]) if row["paid"] else ""
+    refund = t(lang, "owner_refund_hint", amount=row["paid"], phone=display_contact(row.get("refund_phone") or row["phone"])) if row["paid"] else ""
     await _say(ctx, salon, to, t(lang, "owner_cancelled", service=row["service"], when=row["when"], client=row["client"] or "customer", refund=refund))
 
 
@@ -485,6 +593,7 @@ async def _late(ctx, salon, to, name: str, minutes: str, tz: ZoneInfo, today: da
             moved = [dict(r) for r in await con.fetch(
                 "UPDATE bookings SET starts_at=starts_at + make_interval(mins => $3), ends_at=ends_at + make_interval(mins => $3) "
                 "WHERE salon_id=$1::uuid AND staff_id=$2::uuid AND status IN ('held','confirmed') "
+                "AND (status='confirmed' OR hold_expires_at > now()) "
                 "AND starts_at > $4 AND starts_at >= $5 AND starts_at < $6 "
                 "RETURNING id::text, client_id::text, starts_at", salon["id"], stylist["id"], mins, now, start, end)]
             if moved:
@@ -505,9 +614,22 @@ async def _late(ctx, salon, to, name: str, minutes: str, tz: ZoneInfo, today: da
                    (f"late-move:{m['id']}", t(row["lang"], "late_btn_move")[:20])]
         await outbound.send_buttons(ctx, salon, row["phone"], body, buttons)
     rows = await _bookings(ctx, salon, today, tz)
+    moved_ids = {m["id"] for m in moved if m["starts_at"].astimezone(tz).date() > today}
+    if moved_ids:
+        next_day_rows = [row for row in await _bookings(ctx, salon, today + timedelta(days=1), tz)
+                         if row["id"] in moved_ids]
+        if next_day_rows:
+            next_label = _label(today + timedelta(days=1), today, lang)
+            lines = _lines(rows, tz, lang) if rows else t(lang, "owner_none", label=_label(today, today, lang))
+            lines += "\n" + t(lang, "owner_late_next_day", label=next_label,
+                               lines=_lines(next_day_rows, tz, lang))
+        else:
+            lines = _lines(rows, tz, lang) if rows else t(lang, "owner_none", label=_label(today, today, lang))
+    else:
+        lines = _lines(rows, tz, lang) if rows else t(lang, "owner_none", label=_label(today, today, lang))
     label = _label(today, today, lang)
     await _say(ctx, salon, to, t(lang, "owner_late_done", stylist=stylist["name"], mins=mins, label=label,
-                                   lines=_lines(rows, tz, lang) if rows else t(lang, "owner_none", label=label)))
+                                   lines=lines))
     log.info("owner pushed %s by %d minutes: %d booking(s)", stylist["name"], mins, len(moved))
 
 

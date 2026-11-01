@@ -1,4 +1,4 @@
-"""Chat onboarding and salon binding: deterministic code, real Postgres, Telegram fakes at the HTTP layer."""
+"""Chat onboarding and salon binding: real Postgres, validated flows, and Telegram fakes at the HTTP layer."""
 import asyncio
 import os
 
@@ -50,7 +50,10 @@ def test_slugify_and_service_and_time_parsing_are_deterministic():
 
 def test_mangled_pairs_are_rejected_and_bare_evenings_roll():
     from datetime import time
-    assert parse_time_pair("0900-1800") is None
+    assert parse_time_pair("0900-1800") == (time(9), time(18))
+    assert parse_time_pair("0900 to 1800") == (time(9), time(18))
+    assert parse_time_pair("800-1900") is None
+    assert parse_time_pair("2500-1800") is None
     assert parse_time_pair("9:3-17") is None
     assert parse_time_pair("25:00-9:99") is None
     assert parse_time_pair("open 9-17") is None
@@ -379,7 +382,7 @@ def test_interruptions_back_and_corrections_stay_in_setup():
         assert "Updated: Fade: 600 (30 min)" in out.tg_bodies(chat)[-1]
         await onboarding_chat.advance(ctx, sender, BOT, "YES")
         await onboarding_chat.advance(ctx, sender, BOT, "45")
-        assert "keep the times" in out.tg_bodies(chat)[-1].lower()
+        assert "keep the estimates" in out.tg_bodies(chat)[-1].lower()
         await onboarding_chat.advance(ctx, sender, BOT, "Braids 3h")
         assert "opening hours" in out.tg_bodies(chat)[-1].lower()
         await onboarding_chat.advance(ctx, sender, BOT, "09:00-18:00")
@@ -413,11 +416,11 @@ def test_kinyozi_flow_many_stylists_and_plain_language_changes():
         assert "Amina, Brian" in out.tg_bodies(chat)[-1]
         await onboarding_chat.advance(ctx, sender, BOT, "Brian, Kevin\nAmina")
         body = out.tg_bodies(chat)[-1]
-        assert "Fade 500 30" in body and "Braids" not in body
+        assert "one service per line" in body.lower() and "[service name]" in body
         await onboarding_chat.advance(ctx, sender, BOT, "Fade 500 30\nClean shave 300")
         assert "(~" in out.tg_bodies(chat)[-1]
         await onboarding_chat.advance(ctx, sender, BOT, "YES")
-        assert "Fade 30" in out.tg_bodies(chat)[-1]
+        assert "Fade: 30 min" in out.tg_bodies(chat)[-1]
         await onboarding_chat.advance(ctx, sender, BOT, "YES")
         await onboarding_chat.advance(ctx, sender, BOT, "08:00-20:00")
         assert "deposit" in out.tg_bodies(chat)[-1].lower()

@@ -82,6 +82,26 @@ async def test_cancel_offers_oldest_first_and_yes_books():
 
 @needs_db
 @pytest.mark.asyncio
+async def test_offer_uses_salon_day_and_time_when_slot_crosses_utc_midnight():
+    pool, out, salon = await build(DSN)
+    ctx, ids, staff, svc, salon_d, _starts, _ends = await setup(pool, salon, 2)
+    starts = datetime.now(NBO).replace(hour=0, minute=30, second=0, microsecond=0) + timedelta(days=1)
+    ends = starts + timedelta(minutes=45)
+    await waitlist.join(pool, salon, ids[B], svc, starts.date())
+    bid = await pool.fetchval(
+        "INSERT INTO bookings (salon_id, staff_id, service_id, client_id, starts_at, ends_at, status) "
+        "VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,'cancelled') RETURNING id::text",
+        salon, staff, svc, ids[A], starts, ends)
+
+    await waitlist.offer_for_booking(ctx, salon_d, bid)
+
+    assert await pool.fetchval("SELECT status FROM waitlist WHERE client_id=$1::uuid", ids[B]) == "offered"
+    assert "00:30" in out.bodies(B)[-1]
+    await pool.close()
+
+
+@needs_db
+@pytest.mark.asyncio
 async def test_no_taps_yes_after_expiry_passes_to_next():
     pool, out, salon = await build(DSN)
     ctx, ids, staff, svc, salon_d, starts, ends = await setup(pool, salon, 3)

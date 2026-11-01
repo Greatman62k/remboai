@@ -19,6 +19,7 @@ from . import guard, mpesa, payments, waitlist
 from .availability import Slot, choose, day_slots
 from .bookings import busy_times, hold_slot, release
 from .channels import outbound
+from .contact import display_contact
 from .messages import t
 from .reminders import cancel_reminders, schedule_reminders
 
@@ -146,13 +147,13 @@ def example_for(services: list[dict], lang: str) -> str:
     return f"{svc} Saturday afternoon"
 
 
-async def _cancel(ctx, salon, client, st, services, tz, now, chat, lang) -> None:
+async def _cancel(ctx, salon, client, st, services, tz, now, chat, lang, booking_id: str | None = None) -> None:
     mid = outbound.current_message_id()
     row = await ctx.pool.fetchrow("SELECT id::text, starts_at FROM bookings WHERE client_id=$1::uuid AND cancel_message_id=$2", client["id"], mid) if mid else None
     if row is None:
         row = await ctx.pool.fetchrow(
             "UPDATE bookings SET status='cancelled', cancel_message_id=$2 WHERE id = (SELECT id FROM bookings WHERE client_id=$1::uuid AND status IN ('held','confirmed') "
-            "AND starts_at > now() ORDER BY starts_at LIMIT 1) RETURNING id::text, starts_at", client["id"], mid)
+            "AND starts_at > now() AND ($3::uuid IS NULL OR id = $3::uuid) ORDER BY starts_at LIMIT 1) RETURNING id::text, starts_at", client["id"], mid, booking_id)
     if row is None:
         await _reply(ctx, salon["id"], chat.to, st, chat, t(lang, "nothing_to_cancel"))
         return
@@ -162,13 +163,16 @@ async def _cancel(ctx, salon, client, st, services, tz, now, chat, lang) -> None
     await payments.fail_open_manual_claims(ctx.pool, row["id"])
     await cancel_reminders(ctx.pool, row["id"])
     await waitlist.offer_for_booking(ctx, salon, row["id"])
-    paid = await ctx.pool.fetchval("SELECT amount_kes FROM payments WHERE booking_id=$1::uuid AND status IN ('paid','needs_refund')", row["id"])
+    payment = await ctx.pool.fetchrow(
+        "SELECT amount_kes, phone FROM payments WHERE booking_id=$1::uuid AND status IN ('paid','needs_refund') "
+        "ORDER BY settled_at DESC NULLS LAST LIMIT 1", row["id"])
+    paid = payment["amount_kes"] if payment else None
     key = "cancelled_paid" if paid else "cancelled"
     await _reply(ctx, salon["id"], chat.to, cleared, chat, t(lang, key, when=when_label(row["starts_at"], tz), salon=salon["name"]))
     if paid and salon["owner_wa_id"]:
         await outbound.send_text(ctx, salon, salon["owner_wa_id"],
                                  t("en", "owner_refund", amount=paid,
-                                   phone=mpesa.normalize_msisdn(chat.to) or chat.to, ref="", when=when_label(row["starts_at"], tz), why="the customer cancelled"))
+                                   phone=display_contact(payment["phone"]), ref="", when=when_label(row["starts_at"], tz), why="the customer cancelled"))
 
 
 async def _late_tap(ctx, salon, client, st, services, tz, now, chat, lang, reply_id: str) -> None:
@@ -192,14 +196,17 @@ async def _late_tap(ctx, salon, client, st, services, tz, now, chat, lang, reply
         await payments.fail_open_manual_claims(ctx.pool, row["id"])
         await cancel_reminders(ctx.pool, row["id"])
         await waitlist.offer_for_booking(ctx, salon, row["id"])
-        paid = await ctx.pool.fetchval("SELECT amount_kes FROM payments WHERE booking_id=$1::uuid AND status IN ('paid','needs_refund')", row["id"])
+        payment = await ctx.pool.fetchrow(
+            "SELECT amount_kes, phone FROM payments WHERE booking_id=$1::uuid AND status IN ('paid','needs_refund') "
+            "ORDER BY settled_at DESC NULLS LAST LIMIT 1", row["id"])
+        paid = payment["amount_kes"] if payment else None
         key = "cancelled_paid" if paid else "cancelled"
         cleared_late = {"history": st.get("history", [])}
         await _save(ctx, salon["id"], chat.to, cleared_late)
         await _reply(ctx, salon["id"], chat.to, cleared_late, chat, t(lang, key, when=when_label(row["starts_at"], tz), salon=salon["name"]))
         if paid and salon["owner_wa_id"]:
             await outbound.send_text(ctx, salon, salon["owner_wa_id"],
-                                     t("en", "owner_refund", amount=paid, phone=mpesa.normalize_msisdn(chat.to) or chat.to, ref="",
+                                     t("en", "owner_refund", amount=paid, phone=display_contact(payment["phone"]), ref="",
                                        when=when_label(row["starts_at"], tz), why="the customer cancelled"))
         return
     if action == "move":
@@ -237,7 +244,7 @@ async def _visit_tap(ctx, salon, client, st, tz, chat, lang, reply_id: str) -> N
     when = row["starts_at"].astimezone(tz).strftime("%a %d %b, %H:%M") if row["starts_at"] else ""
     if row["owner_wa_id"]:
         await outbound.send_text(ctx, salon, row["owner_wa_id"],
-                                 t("en", "owner_visit_missed", client=row["client_name"] or row["phone"], phone="+" + row["phone"],
+                                 t("en", "owner_visit_missed", client=row["client_name"] or display_contact(row["phone"]), phone=display_contact(row["phone"]),
                                    service=row["service"], when=when))
     await _reply(ctx, salon["id"], chat.to, cleared_visit, chat, t(clang, "visit_owner_told"))
 

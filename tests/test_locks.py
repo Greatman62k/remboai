@@ -11,6 +11,17 @@ DSN = os.environ.get("TEST_DATABASE_URL")
 needs_db = pytest.mark.skipif(not DSN, reason="needs TEST_DATABASE_URL")
 
 
+def test_a_database_error_during_renewal_fails_closed():
+    class BrokenPool:
+        async def execute(self, *_args):
+            raise OSError("database unavailable")
+
+    async def run():
+        assert await locks._renew_once(BrokenPool(), "sender:k", uuid.uuid4()) is False
+
+    asyncio.run(run())
+
+
 @needs_db
 def test_a_renewal_fails_once_the_lock_is_stolen():
     async def run():

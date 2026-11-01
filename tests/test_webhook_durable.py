@@ -129,7 +129,7 @@ async def test_reserialized_mpesa_callback_redelivers_into_the_same_job():
         assert (await c.post("/mpesa/callback/" + CB_SECRET, content=raw,
                              headers={"x-hub-signature-256": sig, "content-type": "application/json"})).status_code == 200
     assert await pool.fetchval("SELECT count(*) FROM webhook_jobs WHERE provider='mpesa'") == 1
-    assert await pool.fetchval("SELECT count(*) FROM mpesa_callbacks") == 2
+    assert await pool.fetchval("SELECT count(*) FROM mpesa_callbacks") == 1
     await pool.close()
 
 
@@ -235,6 +235,47 @@ async def test_ops_endpoints_require_key():
         finally:
             app.state.ctx.settings.ops_api_key = orig
     await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_payment_review_resolutions_are_atomic_and_single_winner():
+    from tests.harness import build
+    from app.main import app
+    pool, out, salon = await build(DSN)
+    staff = await pool.fetchval("SELECT id::text FROM staff LIMIT 1")
+    service = await pool.fetchval("SELECT id::text FROM services LIMIT 1")
+    client_id = await pool.fetchval(
+        "INSERT INTO clients (salon_id, wa_id) VALUES ($1::uuid,'254711000099') RETURNING id::text", salon)
+    starts = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=2)
+    booking = await pool.fetchval(
+        "INSERT INTO bookings (salon_id,staff_id,service_id,client_id,starts_at,ends_at,status) "
+        "VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,'confirmed') RETURNING id::text",
+        salon, staff, service, client_id, starts, starts + datetime.timedelta(minutes=30))
+    payment = await pool.fetchval(
+        "INSERT INTO payments (booking_id,salon_id,phone,amount_kes,status,checkout_request_id) "
+        "VALUES ($1::uuid,$2::uuid,'254711000099',200,'needs_refund','review-race') RETURNING id::text",
+        booking, salon)
+    review = await pool.fetchval(
+        "INSERT INTO payment_reviews (payment_id,reason,status,expected_amount,received_amount) "
+        "VALUES ($1::uuid,'payment_unresolved','refund_due',200,200) RETURNING id::text", payment)
+    transport = httpx.ASGITransport(app=app)
+    key_value = "0123456789abcdef" * 4
+    original_key = app.state.ctx.settings.ops_api_key
+    app.state.ctx.settings.ops_api_key = key_value
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            responses = await asyncio.gather(
+                c.post(f"/ops/payment-reviews/{review}/resolve", json={"action": "refunded"}, headers={"x-ops-key": key_value}),
+                c.post(f"/ops/payment-reviews/{review}/resolve", json={"action": "closed_no_refund"}, headers={"x-ops-key": key_value}),
+            )
+        assert sorted(r.status_code for r in responses) == [200, 409]
+        statuses = await pool.fetchrow(
+            "SELECT r.status AS review, p.status AS payment FROM payment_reviews r "
+            "JOIN payments p ON p.id=r.payment_id WHERE r.id=$1::uuid", review)
+        assert (statuses["review"] == "refunded") == (statuses["payment"] == "refunded")
+    finally:
+        app.state.ctx.settings.ops_api_key = original_key
+        await pool.close()
 
 @pytest.mark.asyncio
 async def test_purge_expired():

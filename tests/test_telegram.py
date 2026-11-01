@@ -87,7 +87,9 @@ def test_voice_notes_and_photos_work_over_telegram():
         out.script["nataka fade kesho mchana"] = {"intent": "book", "service": "Fade", "date": open_day().isoformat(), "window": "afternoon", "language": "sw"}
         async with client() as c:
             await post_tg(c, tg_update(1, C1, voice={"file_id": "VOICE1", "duration": 3}))
-            assert "nataka fade kesho mchana" in out.tg_bodies(str(C1))[0]
+            assert "Nafasi za mapema za Fade" in out.tg_bodies(str(C1))[0]
+            assert len(out.tg_bodies(str(C1))) == 1
+            assert all("Nimesikia:" not in body for body in out.tg_bodies(str(C1)))
             assert out.asr[0]["bytes"] == b"TG-FILE-BYTES" and out.asr[0]["type"] == "audio/ogg"
             await post_tg(c, tg_update(2, C2, caption="I want this", photo=[{"file_id": "PHOTO1", "file_size": 500}]))
         assert any(v["image"].startswith("data:image/jpeg;base64,") for v in out.vision)

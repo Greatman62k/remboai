@@ -39,8 +39,8 @@ def test_a_voice_note_becomes_a_booking_conversation_and_the_customer_is_told_wh
         out.script["nataka fade kesho mchana"] = {"intent": "book", "service": "Fade", "date": open_day().isoformat(), "window": "afternoon", "language": "sw"}
         async with client() as c:
             await post(c, voice())
-        assert "nataka fade kesho mchana" in out.bodies(A)[0]
-        assert "Nafasi za mapema za Fade" in out.bodies(A)[1]
+        assert "Nafasi za mapema za Fade" in out.bodies(A)[0]
+        assert all("Nimesikia:" not in body for body in out.bodies(A))
         [call] = out.asr
         assert call["auth"] == "asrtok" and call["type"] == "audio/ogg" and call["bytes"] == b"OggS-fake-voice-note"
         assert call["lang"] is None
@@ -57,7 +57,8 @@ def test_a_known_swahili_speaker_gets_swahili_recognition_and_replies():
             await post(c, voice(mid="v1"))
             await post(c, voice(mid="v2"))
         assert [x["lang"] for x in out.asr] == [None, "swh_Latn"]
-        assert out.bodies(A)[2].startswith("Nimesikia:")
+        assert any("Nafasi za mapema za Fade" in body for body in out.bodies(A))
+        assert all("Nimesikia:" not in body for body in out.bodies(A))
         await pool.close()
     asyncio.run(run())
 

@@ -2,6 +2,16 @@
 
 Everything in this repository was written during the Meta Global AI Developer Hackathon (building period Oct 27 - Nov 4, 2026).
 
+## Nov 1 (the Meta model runs the receptionist)
+
+- **Agent mode** (`AGENT_MODE=on`, `app/agent/`): Muse Spark decides each step through tools - `find_slots`, `reserve_slot`, `my_bookings`, `cancel_booking`, `join_waitlist`, `hand_to_owner` - and code validates and executes every call on the existing booking engine. Native function calling with an automatic fall back to JSON steps for hosts without it.
+- **Grounding checker**: a reply with a price, time, link, phone number, payment claim, confirmation or deposit waiver the model was not given is rejected, repaired once, then replaced by code-written templates built from the same tool results. Holds, payment steps and cancellations are always worded by code.
+- **Owner assistant**: plain-words questions about bookings and deposits, and owner-requested cancellations, through `bookings_on`, `deposits`, `cancel_booking`.
+- **Fails soft**: model down, breaker open or budget spent falls back to the keyword flow; a retried message resends the stored reply (`agent_turns`, migration 028) instead of asking the model again.
+- **Proof**: `/ops/agent-trace`, `python scripts/probe_tools.py` (does this host do tool calling), `python scripts/agent_eval.py` (model vs keyword rules on 33 messages the rules were not tuned for; rules alone score 19/33), `docs/AGENT.md`, doctor agent lines.
+- Mid-conversation follow-ups with no salon words ("ok Brian then") are no longer screened out when agent mode is on.
+- Telegram typing indicator while the model thinks; `_cancel` can target one booking.
+
 ## Oct 31 (waitlist, Still-coming, proxy auth, site)
 
 352 tests, all passing.
@@ -10,7 +20,7 @@ Everything in this repository was written during the Meta Global AI Developer Ha
 - Still-coming 3h reminders (migration 027): approved `reminder_3h` templates send with Keep/Cancel buttons; Keep marks the nudge answered, Cancel frees the slot at once, and a minute sweep releases never-answered bookings under 2h out toward the waitlist.
 - Voice notes run behind Modal proxy auth: the endpoint requires a proxy token before any container starts, our own token moved to the `X-Asr-Token` header, and the app sends both (`ASR_PROXY_KEY`/`ASR_PROXY_SECRET` in `.env`). Image also lifts NumPy to 2 for pyarrow.
 - Marketing site started in `site/` (Home, Pricing, Setup guide) in the reference house style with Telegram blue and WhatsApp green accents; contact links are still placeholders.
-- README verify section, `roadmap file` with dates, secrets scan clean, keyword eval baseline re-run (40 messages: 98 percent intent, 100 percent language).
+- README verification section and keyword evaluation baseline re-run (40 messages: 98 percent intent, 100 percent language).
 
 ## Oct 31 (dependency refresh)
 

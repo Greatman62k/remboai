@@ -12,3 +12,4 @@ class Ctx:
     daraja: Any = None
     voice: Any = None
     vision: Any = None
+    agent: Any = None

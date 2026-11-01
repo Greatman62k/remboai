@@ -121,7 +121,7 @@ def test_repeated_picker_pumping_gets_a_nudge_and_a_strike():
 
 
 @needs_db
-def test_owner_who_asks_identity_meets_the_assistant_not_a_lecture():
+def test_owner_identity_and_id_help_do_not_enter_customer_flow():
     async def run():
         pool, out, _salon = await build(DSN)
         await pool.execute("UPDATE salons SET owner_wa_id=$1", A)

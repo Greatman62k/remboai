@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     per_sender_daily_limit: int = 300
     strike_limit: int = 3
     platform_owner_id: str = ""
+    platform_owner_ids: str = ""
     max_active_bookings: int = 3
     llm_fallback_base_url: str = ""
     llm_fallback_api_key: str = ""
@@ -63,13 +64,21 @@ class Settings(BaseSettings):
     asr_token: str = ""
     asr_proxy_key: str = ""
     asr_proxy_secret: str = ""
-    asr_timeout_s: float = 45.0
+    asr_timeout_s: float = 120.0
     vision_enabled: bool = True
     rate_limit_per_min: int = 20
     rate_burst: int = 10
     rate_window_s: int = 60
     rate_daily: int = 300
     llm_daily_per_salon: int = 5000
+    # Agent mode: the Meta model runs the receptionist through tools; code validates and executes every action.
+    agent_mode: str = "off"              # "on" or "off"; off keeps the keyword/extraction flow only
+    agent_protocol: str = "auto"         # "auto" tries native tool calling and falls back to JSON steps; or force "tools" / "json"
+    agent_max_steps: int = 5
+    agent_call_timeout_s: float = 12.0
+    agent_turn_timeout_s: float = 30.0
+    agent_reasoning_effort: str = "low"
+    agent_retention_days: int = 14
     ingress_rate_burst: int = 120
     ingress_rate_global: int = 600
     ingress_rate_window_s: int = 60
@@ -92,6 +101,9 @@ class Settings(BaseSettings):
     webhook_max_pending_per_sender: int = 100
     webhook_retention_days: int = 30
     inbound_retention_days: int = 90
+    handoff_retention_days: int = 30
+    mpesa_callback_retention_days: int = 90
+    unmatched_raw_retention_days: int = 90
     handoff_hours: float = 4.0
     webhook_workers: int = 4
     db_pool_max: int = 10
