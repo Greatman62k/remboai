@@ -50,8 +50,12 @@ def thanks(text: str) -> tuple[str, str] | None:
 
 
 _IDENTITY = re.compile(
-    r"\b(who are you|what are you(?!\s+(charging|costing|price|prices|bei|gharama))|who is rembo\w*|what is rembo\w*"
+    r"\b(who are you|who am i talking to|what are you(?!\s+(charging|costing|price|prices|bei|gharama))|who is rembo\w*|what is rembo\w*"
     r"|introduce yourself|what is your name|wewe ni nani|nani wewe|jina lako(\s+nani)?|rembo\w*\s+ni\s+(nani|nini))\b", re.I)
+_USER_IDENTITY = re.compile(
+    r"\b(?:who am i(?!\s+talking\b)|what(?:'s| is) my (?:role|account|status)|what role (?:do i have|am i)|"
+    r"am i (?:(?:a|the) )?(?:(?:business|salon|platform|customer|account) )?owner|"
+    r"am i (?:(?:a|the) )?(?:customer|platform admin)|mimi ni nani|nafasi yangu ni nini|jukumu langu ni nini)\b", re.I)
 _HELP = re.compile(r"^\W*(help|msaada|nisaidie|/help)\W*$", re.I)
 _HELP_Q = re.compile(r"\b(what can you do|how do i use|how does this work|jinsi ya kutumia|how to use)\b", re.I)
 
@@ -59,6 +63,11 @@ _HELP_Q = re.compile(r"\b(what can you do|how do i use|how does this work|jinsi 
 def asks_identity(text: str) -> bool:
     """The sender wants to know who they are talking to, in English or Swahili."""
     return bool(_IDENTITY.search(text or ""))
+
+
+def asks_user_identity(text: str) -> bool:
+    """The sender asks which role or account identity this chat has recorded for them."""
+    return bool(_USER_IDENTITY.search(text or ""))
 
 
 def asks_help(text: str) -> bool:

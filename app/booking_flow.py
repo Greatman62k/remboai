@@ -212,7 +212,7 @@ async def _late_tap(ctx, salon, client, st, services, tz, now, chat, lang, reply
     if action == "move":
         service = next((s for s in services if s["id"] == row["service_id"]), None)
         if service is None:
-            await _reply(ctx, salon["id"], chat.to, st, chat, t(lang, "fallback", example=example_for(services, lang)))
+            await _reply(ctx, salon["id"], chat.to, st, chat, t(lang, "fallback", salon=salon["name"], example=example_for(services, lang)))
             return
         move_state = {"state": "idle", "history": st.get("history", []), "late_move_booking": row["id"]}
         await _offer(ctx, salon, move_state, service, row["starts_at"].astimezone(tz).date(), None, None, tz, now, chat, lang, note_key="late_move_ask")
@@ -334,12 +334,12 @@ async def _book(ctx, salon, client, st, services, tz, now, chat, lang, ex: Extra
 async def _choose(ctx, salon, client, st, services, tz, now, chat, lang, choice: int, tap_id: str | None = None) -> None:
     slots = st.get("slots") or []
     if st.get("state") != "offered" or not 1 <= choice <= len(slots):
-        await _reply(ctx, salon["id"], chat.to, st, chat, t(lang, "fallback", example=example_for(services, lang)))
+        await _reply(ctx, salon["id"], chat.to, st, chat, t(lang, "fallback", salon=salon["name"], example=example_for(services, lang)))
         return
     service = next((s for s in services if s["id"] == st["service_id"]), None)
     pick = slots[choice - 1]
     if service is None:
-        await _reply(ctx, salon["id"], chat.to, st, chat, t(lang, "fallback", example=example_for(services, lang)))
+        await _reply(ctx, salon["id"], chat.to, st, chat, t(lang, "fallback", salon=salon["name"], example=example_for(services, lang)))
         return
     if st.get("late_move_booking"):
         await _move_choice(ctx, salon, client, st, pick, tz, chat, lang)

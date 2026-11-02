@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 import httpx
 
 from app.ai.llm import _breaker_note, _breaker_open, strip_reasoning
+from app.agent.policy import load_policy
 
 log = logging.getLogger("rembo.agent")
 _NO_TOOLS: set[str] = set()      # backends that refused native tool calling in this process
@@ -53,13 +54,11 @@ def _json_object(content: str) -> dict:
     return json.loads(m.group(0))
 
 
-def json_protocol_note(tools: list[dict]) -> str:
+def json_protocol_note(tools: list[dict], policy: dict | None = None) -> str:
+    protocol = (policy or load_policy())["tool_protocol"]
     if not tools:
-        return 'Reply with exactly ONE JSON object and nothing else: {"reply": "<what to say to the customer>"}'
-    lines = ["You act in steps. Reply with exactly ONE JSON object and nothing else:",
-             '  {"tool": "<tool name>", "args": {...}}   to use a tool, or',
-             '  {"reply": "<what to say to the customer>"}   when you are ready to answer.',
-             "Tool results come back as messages starting with TOOL RESULT. Available tools:"]
+        return protocol["reply_without_tools"]
+    lines = list(protocol["tool_steps"])
     for t in tools:
         f = t["function"]
         lines.append(f'- {f["name"]}: {f["description"]} args schema: {json.dumps(f["parameters"])}')
@@ -110,7 +109,8 @@ class AgentModel:
     def _body(self, model: str, system: str, messages: list[dict], tools: list[dict], protocol: str) -> dict:
         role = self.s.llm_system_role
         if protocol == "json":
-            body = {"model": model, "messages": [{"role": role, "content": system + "\n\n" + json_protocol_note(tools)}, *to_json_transcript(messages)]}
+            policy = load_policy(getattr(self.s, "agent_policy_path", None))
+            body = {"model": model, "messages": [{"role": role, "content": system + "\n\n" + json_protocol_note(tools, policy)}, *to_json_transcript(messages)]}
         else:
             body = {"model": model, "messages": [{"role": role, "content": system}, *messages]}
             if tools:

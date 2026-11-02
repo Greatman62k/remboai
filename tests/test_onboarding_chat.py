@@ -487,13 +487,15 @@ def test_plain_register_sentences_begin_onboarding_in_either_language():
         async with client() as c:
             await post_tg(c, tg_update(1, 7001, "i want to register a business"))
             bodies = out.tg_bodies("7001")
-            assert "Sure, I can help you with that" in bodies[0]
-            assert "salon name" in bodies[-1].lower()
+            assert len(bodies) == 1
+            assert "welcome!" in bodies[0].lower()
+            assert "salon name" in bodies[0].lower()
             assert await pool.fetchval("SELECT state->>'step' FROM onboarding_sessions WHERE sender='tg:7001'") == "ask_name"
             await post_tg(c, tg_update(2, 7002, "nataka kusajili saluni yangu"))
             bodies = out.tg_bodies("7002")
-            assert "nitakusaidia" in bodies[0]
-            assert "inaitwaje" in bodies[-1].lower()
+            assert len(bodies) == 1
+            assert "karibu" in bodies[0].lower() and "nitakuandalia" in bodies[0].lower()
+            assert "inaitwaje" in bodies[0].lower()
         assert out.calls == []
         await pool.close()
     asyncio.run(run())

@@ -747,6 +747,41 @@
    "niko ready kuja"
   ]
  },
+ "booking_followups": {
+  "en": [
+   "i don't have it",
+   "i do not have it",
+   "i don't have the link",
+   "i do not have the invite link",
+   "where is the link",
+   "where's the link",
+   "where can i find it",
+   "where can i find the link",
+   "where can i get the invite link",
+   "i lost the link"
+  ],
+  "sw": [
+   "sina link",
+   "sina hiyo link",
+   "sina hio link",
+   "sina kiungo",
+   "sina kiungo cha mwaliko",
+   "sijapata link",
+   "sijapata hiyo link",
+   "link iko wapi",
+   "iko wapi link",
+   "kiungo kiko wapi",
+   "kiungo cha mwaliko kiko wapi",
+   "nimepoteza link",
+   "nimepoteza hiyo link"
+  ],
+  "sheng": [
+   "sina hiyo link maze",
+   "hio link iko wapi",
+   "link iko wapi maze",
+   "nimepoteza hiyo link maze"
+  ]
+ },
  "request_words": {
   "en": [
    "can i get",

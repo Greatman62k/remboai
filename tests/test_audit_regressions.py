@@ -1046,7 +1046,7 @@ async def test_a_customer_is_told_what_to_do_when_the_model_is_unreachable(monke
     async with client() as c:
         await post(c, payload(A, "blorp wobble xyzq", mid="up1"))
     await _run_job_to_exhaustion(pool, app.state.ctx)
-    assert "rephrase" in out.bodies(A)[-1]
+    assert "send the service and day" in out.bodies(A)[-1].lower()
     await pool.close()
 
 

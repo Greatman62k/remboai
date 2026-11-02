@@ -14,6 +14,8 @@ Target: one small VPS (2 GB RAM is plenty), Ubuntu 24.04, a domain you control. 
 - `POSTGRES_PASSWORD` a long random string; `MPESA_CALLBACK_SECRET` another (`openssl rand -hex 24`)
 - `WA_ACCESS_TOKEN` must be a **permanent system-user token** (Meta Business settings > System users). A temporary token dies after about 24 hours and the bot goes silent.
 
+Assistant instructions live in `config/remboai_agent_policy.json`. Docker mounts this file into the app, so policy edits take effect on the next assistant turn without rebuilding or restarting the container. See [the agent policy notes](AGENT.md#remboai-assistant-policy).
+
 Sensitive operational records are cleaned by the daily retention job: resolved/old handoffs after 30 days, callback bodies after 90 days (pending-payment callbacks are kept), and raw unmatched-payment payloads after 90 days. Adjust `HANDOFF_RETENTION_DAYS`, `MPESA_CALLBACK_RETENTION_DAYS`, and `UNMATCHED_RAW_RETENTION_DAYS` to match your operating policy.
 
 ## 3. Start

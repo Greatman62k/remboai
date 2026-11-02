@@ -57,29 +57,24 @@ class CaptureChat:
         return "\n\n".join(self.texts)
 
 
-def _fn(name: str, description: str, properties: dict, required: list[str] | None = None) -> dict:
-    return {"type": "function", "function": {"name": name, "description": description,
+def _fn(name: str, properties: dict, required: list[str] | None = None) -> dict:
+    return {"type": "function", "function": {"name": name, "description": "",
                                               "parameters": {"type": "object", "properties": properties, "required": required or []}}}
 
 
 TOOLS = [
-    _fn("find_slots", "Look up free appointment slots in the real diary for a service on a day. Returns up to 3 slots with slot_ids. "
-        "Call this before saying anything about availability.",
-        {"service": {"type": "string", "description": "A service name exactly as on the menu"},
-         "date": {"type": "string", "description": "YYYY-MM-DD, from the calendar"},
-         "window": {"type": "string", "enum": ["morning", "afternoon", "evening"], "description": "Rough part of the day, if the customer gave one"},
-         "time": {"type": "string", "description": "HH:MM 24-hour, only if the customer named an exact time"},
-         "stylist": {"type": "string", "description": "Only if the customer asked for a particular stylist"}},
+    _fn("find_slots",
+        {"service": {"type": "string"},
+         "date": {"type": "string"},
+         "window": {"type": "string", "enum": ["morning", "afternoon", "evening"]},
+         "time": {"type": "string"},
+         "stylist": {"type": "string"}},
         ["service", "date"]),
-    _fn("reserve_slot", "Hold one of the slots the customer has picked, using its slot_id from find_slots. The system then handles the deposit.",
-        {"slot_id": {"type": "string", "description": "s1, s2 or s3"}}, ["slot_id"]),
-    _fn("my_bookings", "List this customer's upcoming bookings.", {}),
-    _fn("cancel_booking", "Cancel one of this customer's upcoming bookings. Only when they clearly ask to cancel.",
-        {"booking_ref": {"type": "string", "description": "b1, b2... from my_bookings; optional when they have just one"}}),
-    _fn("join_waitlist", "Put the customer on the waitlist for a service on a day with no free slots; they are offered any slot that frees up.",
-        {"service": {"type": "string"}, "date": {"type": "string", "description": "YYYY-MM-DD"}}, ["service", "date"]),
-    _fn("hand_to_owner", "Pass the conversation to the salon owner for anything you cannot or should not decide: complaints, refunds, health, special requests, or a request for a person.",
-        {"reason": {"type": "string", "enum": list(HANDOFF)}, "note": {"type": "string", "description": "One line on what the customer needs"}}, ["reason"]),
+    _fn("reserve_slot", {"slot_id": {"type": "string"}}, ["slot_id"]),
+    _fn("my_bookings", {}),
+    _fn("cancel_booking", {"booking_ref": {"type": "string"}}),
+    _fn("join_waitlist", {"service": {"type": "string"}, "date": {"type": "string"}}, ["service", "date"]),
+    _fn("hand_to_owner", {"reason": {"type": "string", "enum": list(HANDOFF)}, "note": {"type": "string"}}, ["reason"]),
 ]
 TOOL_NAMES = {t_["function"]["name"] for t_ in TOOLS}
 

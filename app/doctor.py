@@ -141,7 +141,9 @@ async def run_checks(s, http: httpx.AsyncClient, pool) -> list[Check]:
         add("photo matching", False, "switched off (VISION_ENABLED=false or no LLM_API_KEY)", warn=True)
     for _backend, base, key, model, _ in ext.endpoints() if matcher.enabled else []:
         try:
-            body = matcher.body(model, 'Reply with ONE JSON object: {"color": <the main colour of the image, one word>}', make_png((220, 20, 20), 256), "image/png")
+            from .agent.policy import load_policy
+            color_prompt = load_policy(getattr(s, "agent_policy_path", None))["diagnostics"]["vision_color_test"]
+            body = matcher.body(model, color_prompt, make_png((220, 20, 20), 256), "image/png")
             r = await http.post(base.rstrip("/") + "/chat/completions", json=body, headers={"Authorization": f"Bearer {key}"}, timeout=s.llm_timeout_s * 2)
             r.raise_for_status()
             answer = str(_json_from(r.json()["choices"][0]["message"]["content"]).get("color", ""))

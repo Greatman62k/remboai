@@ -15,10 +15,13 @@ services:
     environment:
       DATABASE_URL: "postgresql://rembo:rembo@db:5432/rembo"
       REDIS_URL: "redis://redis:6379/0"
+      AGENT_POLICY_PATH: "/srv/config/remboai_agent_policy.json"
     depends_on:
       db: {condition: service_healthy}
       redis: {condition: service_healthy}
     ports: ["8080:8080"]
+    volumes:
+      - ./config/remboai_agent_policy.json:/srv/config/remboai_agent_policy.json:ro
     logging:
       driver: json-file
       options:
