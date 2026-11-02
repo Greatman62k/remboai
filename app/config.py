@@ -71,6 +71,7 @@ class Settings(BaseSettings):
     rate_window_s: int = 60
     rate_daily: int = 300
     llm_daily_per_salon: int = 5000
+    bare_llm_daily_per_sender: int = 30
     # Agent mode: the Meta model runs the receptionist through tools; code validates and executes every action.
     agent_mode: str = "off"              # "on" or "off"; off keeps the keyword/extraction flow only
     agent_protocol: str = "auto"         # "auto" tries native tool calling and falls back to JSON steps; or force "tools" / "json"
@@ -78,6 +79,7 @@ class Settings(BaseSettings):
     agent_call_timeout_s: float = 12.0
     agent_turn_timeout_s: float = 30.0
     agent_reasoning_effort: str = "low"
+    agent_policy_path: str = ""
     agent_retention_days: int = 14
     ingress_rate_burst: int = 120
     ingress_rate_global: int = 600

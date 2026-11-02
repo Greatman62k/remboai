@@ -39,6 +39,12 @@ The registration agent cannot create salons or issue invite links. `app/onboardi
 
 This project uses its existing custom tool loop; it does not add LangChain as another orchestration dependency.
 
+## RemboAI assistant policy
+
+`config/remboai_agent_policy.json` is the editable source for the booking receptionist, salon-owner assistant, platform administrator assistant, bare assistant, registration assistant, legacy booking extractor, photo matcher, JSON tool protocol, tool descriptions, and reply-repair instructions. Registration reply-quality checks and the bare assistant topic allowlist are also in the versioned file. Function names, argument schemas, tool execution, identity checks, booking and payment validation, registration state changes, and grounding enforcement remain in Python.
+
+Both Docker Compose configurations mount this file read-only into the app. The app checks its contents on each assistant turn and reloads a valid change immediately, so editing this JSON does not require an image rebuild or app restart. If an edit has invalid JSON, a bad schema, or an invalid regex, the process logs the problem and keeps using its last valid policy. With an invalid file on a fresh process, model-assisted turns fall back to the existing deterministic flow. Update the whole file atomically when possible. The optional `AGENT_POLICY_PATH` setting can point a directly run app at another policy file; without it, the app uses this repository file.
+
 ## What cannot go wrong, by construction
 
 - The model never supplies a price, a deposit amount or a payment state. Amounts come from the menu and the salon's deposit setting; payment is settled by the Daraja callback or the owner's tap.
@@ -64,4 +70,4 @@ curl -s -H "X-Ops-Key: $OPS_API_KEY" https://$DOMAIN/ops/conversation-trace?limi
 docker compose exec -T app python scripts/doctor.py        # includes an agent line per backend
 ```
 
-Settings: `AGENT_MODE`, `AGENT_PROTOCOL` (`auto`, `tools`, `json`), `AGENT_MAX_STEPS`, `AGENT_CALL_TIMEOUT_S`, `AGENT_TURN_TIMEOUT_S`, `AGENT_REASONING_EFFORT`, `AGENT_RETENTION_DAYS`. Each step is a model call counted against `LLM_DAILY_LIMIT`.
+Settings: `AGENT_MODE`, `AGENT_PROTOCOL` (`auto`, `tools`, `json`), `AGENT_MAX_STEPS`, `AGENT_CALL_TIMEOUT_S`, `AGENT_TURN_TIMEOUT_S`, `AGENT_REASONING_EFFORT`, `AGENT_RETENTION_DAYS`, and optional `AGENT_POLICY_PATH`. Each step is a model call counted against `LLM_DAILY_LIMIT`.

@@ -42,8 +42,9 @@ class RateLimiter:
                 return "notify" if d == self.daily + 1 else "drop"
         return "ok"
 
-    async def llm_allowed(self, salon_id: str, kind: str = "llm") -> bool:
-        if self.llm_daily <= 0:
+    async def llm_allowed(self, scope_id: str, kind: str = "llm", limit: int | None = None) -> bool:
+        daily_limit = self.llm_daily if limit is None else int(limit)
+        if daily_limit <= 0:
             return True
         day = datetime.now(timezone.utc).strftime("%Y%m%d")
-        return await self._incr(f"rl:{kind}:{salon_id}:{day}", 172800) <= self.llm_daily
+        return await self._incr(f"rl:{kind}:{scope_id}:{day}", 172800) <= daily_limit

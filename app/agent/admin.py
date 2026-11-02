@@ -35,32 +35,27 @@ def looks_like_admin_followup(text: str) -> bool:
 
 
 ADMIN_TOOLS = [
-    _fn("bookings_on", "List the salon's bookings (held or confirmed) on one day, with whether each deposit is paid. Gives refs o1, o2... for cancel_booking.",
-        {"date": {"type": "string", "description": "YYYY-MM-DD"}}, ["date"]),
-    _fn("deposits", "Total M-Pesa deposits collected between two dates, inclusive.",
-        {"from_date": {"type": "string", "description": "YYYY-MM-DD"}, "to_date": {"type": "string", "description": "YYYY-MM-DD"}}, ["from_date", "to_date"]),
-    _fn("cancel_booking", "Cancel one booking at the owner's request (the customer is told and any refund is queued). Use a ref from bookings_on in this conversation turn. Only when the owner clearly asks.",
-        {"booking_ref": {"type": "string", "description": "o1, o2... from bookings_on"}}, ["booking_ref"]),
+    _fn("bookings_on", {"date": {"type": "string"}}, ["date"]),
+    _fn("deposits", {"from_date": {"type": "string"}, "to_date": {"type": "string"}}, ["from_date", "to_date"]),
+    _fn("cancel_booking", {"booking_ref": {"type": "string"}}, ["booking_ref"]),
 ]
 ADMIN_NAMES = {x["function"]["name"] for x in ADMIN_TOOLS}
 
 
-def admin_prompt(salon: dict, now: datetime) -> str:
+def admin_prompt(salon: dict, now: datetime, policy: dict) -> str:
     cal = "\n".join(f"{(now + timedelta(days=i - 7)).strftime('%a')} = {(now + timedelta(days=i - 7)).date().isoformat()}" for i in range(22))
-    return f"""You are the diary assistant for the owner of "{salon['name']}", a salon or barbershop in Kenya. The person writing is the owner or manager.
+    persona = policy["salon_owner_assistant"]
+    return f"""{persona['identity']}
+{persona['purpose']}
+{"\n".join(policy["prompt_wrapper"])}
+{json.dumps(persona, ensure_ascii=False, indent=2)}
+
+LIVE SALON CONTEXT
+Salon: {salon['name']}
 Today is {now.strftime('%A')} {now.date().isoformat()}, time {now.strftime('%H:%M')} (Africa/Nairobi). Calendar:
 {cal}
 Opening hours:
 {hours_lines(salon.get('open_hours') or {})}
-
-HOW YOU WORK
-- Reply in the language the owner wrote in (English, Swahili or Sheng), briefly and plainly, like a sharp assistant.
-- You cannot see the diary or the money yourself. Use bookings_on for who is booked and who has paid, and deposits for money collected. Never guess or estimate a number.
-- State only times, names, contact labels and amounts that appear in tool results. Do not add up money yourself: use the totals the tool gives.
-- A held booking with no paid deposit is waiting for a deposit. A confirmed booking with no paid deposit is confirmed, but no deposit is recorded; do not call it unpaid or waiting.
-- cancel_booking: only when the owner clearly asks to cancel a particular booking. Call bookings_on first to get its ref; if it is unclear which booking they mean, ask. After a cancellation the system adds the official confirmation, so write one short sentence only.
-- You cannot move bookings, block days or change prices here; say so and mention the owner can type `help` for commands.
-- Keep it under 6 short lines. No markdown. Never mention tools or JSON.
 """
 
 

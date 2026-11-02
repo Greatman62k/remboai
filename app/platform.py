@@ -45,19 +45,14 @@ HELP_TEXT = (
 )
 
 ROLE_TEXT = (
-    "You are authenticated as a RemboAI platform administrator.\n\n"
-    "Your access\n"
+    "You are authenticated as a RemboAI platform administrator. This role is tied to this account and remains if you register a salon. "
+    "The same account can be both platform administrator and salon owner.\n\n"
+    "Platform tasks\n"
     "1. View businesses: shops. View platform totals: stats.\n"
     "2. Close or reopen a business: off <business> or on <business>.\n"
     "3. Send an owner notice: warn <business>.\n"
-    "4. Delete a business: del <business>, then confirm with "
-    "del <business> YES.\n\n"
-    "Business ownership\n"
-    "1. Register your own salon: /start register. This account becomes its owner.\n"
-    "2. For someone else's salon, have that owner register from their own account.\n"
-    "3. Use salon-owner commands: /owner <command>. For multiple salons, use "
-    "/owner <salon-slug> | <command>.\n"
-    "4. Test as a customer: use a separate account."
+    "4. Delete a business: del <business>, then confirm with del <business> YES.\n\n"
+    "For salon-owner actions, use /owner <command>. To test customer booking, use a separate account."
 )
 
 

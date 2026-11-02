@@ -72,6 +72,63 @@ TIME_PAIR = re.compile(
 _TIME_TOKEN = re.compile(r"(?<![\w])(?:[01]?\d|2[0-3])(?::[0-5]\d)?\s*(?:[ap]\.?m\.?)?(?![\w])", re.I)
 
 
+_SPOKEN_HOURS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+    "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+    "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
+    "twenty one": 21, "twenty two": 22, "twenty three": 23,
+}
+_SWAHILI_HOURS = {
+    "moja": 1, "mbili": 2, "mvili": 2, "tatu": 3, "nne": 4, "tano": 5,
+    "sita": 6, "saba": 7, "nane": 8, "tisa": 9, "kumi": 10,
+    "kumi na moja": 11, "kumi na mbili": 12,
+}
+_SWAHILI_TIME = re.compile(
+    r"\bsaa\s+(?P<number>kumi\s+na\s+(?:moja|mbili)|kumi|moja|mbili|mvili|tatu|nne|tano|sita|saba|nane|tisa|\d{1,2})"
+    r"\s+(?P<period>asubuhi|mchana|jioni|usiku)\b", re.I)
+
+
+def _normalize_spoken_hours(text: str) -> str:
+    """Turn clear spoken clock hours such as 'eight in the morning' into numeric clock tokens."""
+    raw = text or ""
+    if not re.search(r"\b(?:morning|afternoon|evening|night)\b", raw, re.I):
+        return raw
+    raw = re.sub(r"\bin\s+(?:the\s+)?(morning|afternoon|evening|night)\b", r"\1", raw, flags=re.I)
+    raw = re.sub(r"\bmorning\b", "am", raw, flags=re.I)
+    raw = re.sub(r"\b(?:afternoon|evening|night)\b", "pm", raw, flags=re.I)
+    for phrase, value in sorted(_SPOKEN_HOURS.items(), key=lambda pair: len(pair[0]), reverse=True):
+        pattern = r"\b" + re.escape(phrase).replace(r"\ ", r"\s+") + r"\b"
+        raw = re.sub(pattern, str(value), raw, flags=re.I)
+    return raw
+
+
+def _parse_swahili_time_pair(text: str):
+    matches = list(_SWAHILI_TIME.finditer(text or ""))
+    if len(matches) != 2:
+        return None
+    hours = []
+    for match in matches:
+        number_text = " ".join(match.group("number").casefold().split())
+        number = int(number_text) if number_text.isdigit() else _SWAHILI_HOURS.get(number_text)
+        if number is None or not 1 <= number <= 12:
+            return None
+        period = match.group("period").casefold()
+        traditional_hour = (number + 6) % 12 or 12
+        if period == "asubuhi":
+            hour = 12 if number == 6 else traditional_hour
+        elif period == "mchana":
+            if number < 6:
+                return None
+            hour = 12 if number == 6 else traditional_hour + 12
+        else:
+            hour = (traditional_hour + 12) % 24
+        hours.append(hour)
+    from datetime import time as _time
+    opening, closing = (_time(hour) for hour in hours)
+    return (opening, closing) if opening < closing and opening.hour >= 5 else None
+
+
 def detect_lang(text: str) -> str:
     return "sw" if SW_HINTS.search(text or "") else "en"
 
@@ -105,6 +162,21 @@ def parse_price(value: str) -> int | None:
 
 MAX_DEPOSIT = 100000
 _NO_DEPOSIT = re.compile(r"\b(no|hapana|free|bure|none|bila|sifuna|zero|sifuri)\b", re.I)
+_DEPOSIT_AMOUNT = re.compile(
+    r"\b(?:deposit|depos\w*|amana)\b\D{0,20}(\d[\d,]*)|"
+    r"(\d[\d,]*)\D{0,20}\b(?:deposit|depos\w*|amana)\b", re.I)
+
+
+def deposit_amount_mentions(words: str) -> list[int]:
+    """Return numeric amounts explicitly attached to a deposit mention."""
+    values = []
+    for match in _DEPOSIT_AMOUNT.finditer(words or ""):
+        raw = match.group(1) or match.group(2)
+        try:
+            values.append(int(raw.replace(",", "")))
+        except ValueError:
+            continue
+    return values
 
 
 def parse_deposit(words: str) -> int | None:
@@ -113,12 +185,14 @@ def parse_deposit(words: str) -> int | None:
     text = (words or "").strip()
     if not text:
         return None
-    m = re.search(r"\d[\d,]*", text)
-    if m:
+    matches = list(re.finditer(r"\d[\d,]*", text))
+    if len(matches) > 1:
+        return None
+    if matches:
         if _NO_DEPOSIT.search(text):
             return None
         try:
-            amount = int(m.group(0).replace(",", ""))
+            amount = int(matches[0].group(0).replace(",", ""))
         except ValueError:
             return None
         return amount if 0 <= amount <= MAX_DEPOSIT else None
@@ -150,7 +224,10 @@ def parse_service_line(line: str) -> dict | None:
 def parse_time_pair(text: str):
     """Parse a stated opening-hours pair. Four-digit '0900-1800' is read as 09:00-18:00;
     three-digit '800-1900' is rejected, never guessed at. A bare evening close ('9-5') rolls past noon."""
-    raw = (text or "").strip()
+    swahili_pair = _parse_swahili_time_pair(text)
+    if swahili_pair:
+        return swahili_pair
+    raw = _normalize_spoken_hours((text or "").strip())
     mil = re.fullmatch(r"(\d{2})(\d{2})\s*(?:-|–|to)\s*(\d{2})(\d{2})", raw, re.I)
     if mil and all(int(mil.group(i)) <= 23 for i in (1, 3)) and all(int(mil.group(i)) <= 59 for i in (2, 4)):
         raw = f"{mil.group(1)}:{mil.group(2)}-{mil.group(3)}:{mil.group(4)}"
@@ -274,6 +351,10 @@ def _service_lines(services: list[dict], mark_guessed: bool = False) -> str:
 _FILLERS = _THANKS_FIRST_WORDS | _FILLER_EXTRA | {"thank you"}
 _BOOKING_MARKERS = re.compile(r"\b(nataka|naomba|book|booking|bei|price|fungua|miadi|appointment)\b", re.I)
 _EXPLAIN_MARKERS = re.compile(r"\b(sorry|pole|samahani|actually|kumbe|maana|yaani|oops|tengo|badili|rejea)\b", re.I)
+_NAME_SENTENCE = re.compile(
+    r"\b(?:is|are)\s+(?:do|does|doing|a|an|the|open|located|called)\b|"
+    r"\b(?:i|we|my|our)\s+(?:am|are|do|run|own|offer|provide|operate)\b|"
+    r"\b(?:does|offers?|provides?|operates?|speciali[sz]es)\b", re.I)
 
 
 def looks_off_topic(text: str) -> bool:
@@ -285,6 +366,11 @@ def looks_off_topic(text: str) -> bool:
     if low in _FILLERS or words.endswith("?") or len(words) > 60:
         return True
     return bool(_BOOKING_MARKERS.search(words) or _EXPLAIN_MARKERS.search(words))
+
+
+def looks_like_name_sentence(text: str) -> bool:
+    """Reject a sentence fragment at the business-name step so details are clarified, not saved as the name."""
+    return bool(_NAME_SENTENCE.search(guard.clean(text)))
 
 
 EXAMPLES = {
@@ -340,6 +426,19 @@ _REDIRECTS = (
 
 _REGISTER_VERB = re.compile(r"\b(register|registration|sajili|kusajili|anzisha|kuanzisha|fungua|kufungua|open|opening|add|ongeza|create|tengeneza|andikisha|set\s?up|sign\s?up|join|jiunge|kujiunga)\b", re.I)
 _REGISTER_NOUN = re.compile(r"\b(business|biashara|salon|saloon|saluni|kinyozi|barbershop|barber|shop|duka|company|kampuni)\b", re.I)
+_REGISTER_ONLY = re.compile(
+    r"^\s*(?:/start\s+(?:register|sajili|anzisha)|start\s+(?:register|sajili|anzisha)|"
+    r"register|sajili|anzisha|(?:register|sajili|anzisha)\s+(?:(?:a|my|the)\s+)?"
+    r"(?:business|biashara|salon|saloon|saluni|kinyozi|barbershop|barber|shop|duka|company|kampuni)|"
+    r"(?:i\s+(?:want|need)\s+to|i(?:'d|\s+would)\s+like\s+to)\s+(?:register|sign\s?up)"
+    r"(?:\s+(?:(?:a|my|the)\s+)?(?:business|biashara|salon|saloon|saluni|kinyozi|barbershop|barber|shop|duka|company|kampuni))?|"
+    r"please\s+(?:register|sign\s?up)(?:\s+(?:(?:a|my|the)\s+)?(?:business|biashara|salon|saloon|saluni|kinyozi|barbershop|barber|shop|duka|company|kampuni))?|"
+    r"nataka\s+kusajili(?:\s+(?:biashara|saluni|kinyozi))?|naomba\s+kusajili(?:\s+(?:biashara|saluni|kinyozi))?)\s*[.!?]*$", re.I)
+
+
+def registration_start_only(text: str) -> bool:
+    """True for a start command that does not contain any registration details."""
+    return bool(_REGISTER_ONLY.fullmatch(" ".join(guard.clean(text or "").split())))
 
 
 def wants_register(text: str) -> bool:
@@ -370,6 +469,33 @@ def wants_keep(words: str, redirected: bool) -> bool:
     if _KEEP_FULL.search(text) or _KEEP_WORDS.search(text):
         return True
     return redirected and text.lower() in _KEEP_AFFIRM
+
+
+_DURATION_CONFIRM_PROMPT = re.compile(
+    r"\b(?:estimate(?:d)?|default)\b.{0,120}\b(?:keep|confirm|accept|change|different)\b|"
+    r"\b(?:keep|confirm|accept|change)\b.{0,120}\b(?:estimate(?:d)?|default|minutes?|hours?|duration|time)\b", re.I)
+_AFFIRMATIVE_PREFIX = re.compile(r"^(?:yes|yeah|yep|yup|ndiyo|ndio|sawa|ok|okay)\b", re.I)
+_STATED_DURATION = re.compile(r"\b\d+\s*(?:m|min|mins|minute|minutes|h|hr|hrs|hour|hours)\b", re.I)
+
+
+def awaiting_duration_approval(state: dict) -> bool:
+    """True only when the latest assistant turn explicitly asked to keep or change an estimate."""
+    history = state.get("agent_history")
+    if not isinstance(history, list):
+        return False
+    last = next((row.get("text", "") for row in reversed(history)
+                 if isinstance(row, dict) and row.get("role") == "assistant"), "")
+    return bool(_DURATION_CONFIRM_PROMPT.search(str(last)))
+
+
+def is_duration_approval(text: str) -> bool:
+    """Recognize a clear yes to an estimated duration, including 'keep it' and 'yes, 30 min'."""
+    words = " ".join((text or "").strip().lower().split())
+    if re.search(r"\b(?:don't|dont|do not|not|different|instead|change it|change to)\b", words):
+        return False
+    if wants_keep(words, False) or is_affirmative(words):
+        return True
+    return bool(_AFFIRMATIVE_PREFIX.search(words) and _STATED_DURATION.search(words))
 
 
 def _keep_data_present(state: dict) -> bool:
@@ -538,6 +664,9 @@ def registration_next_step(state: dict) -> str:
 
 async def _go_live(ctx, pid: str, sender: str, state: dict) -> bool:
     """Create the salon, its stylists, and its services, then hand back the invite link."""
+    if not state.get("final_confirmation_pending"):
+        await _present_final_confirmation(ctx, pid, sender, state)
+        return False
     if not registration_complete(state):
         log.error("refusing to create an incomplete salon registration for %s", sender[-4:])
         state["step"] = registration_next_step(state)
@@ -607,7 +736,24 @@ def _question_for(state: dict) -> str:
     return t(lang, "ob_ask_name")
 
 
+async def _present_final_confirmation(ctx, pid: str, sender: str, state: dict) -> None:
+    """Show the validated final summary and record that the next clear yes confirms this exact draft."""
+    if not registration_complete(state):
+        state["final_confirmation_pending"] = False
+        state["step"] = registration_next_step(state)
+        await _save_session(ctx.pool, sender, state)
+        await _resend(ctx, pid, sender, state)
+        return
+    state["step"] = "confirm_all"
+    state["final_confirmation_pending"] = True
+    await _save_session(ctx.pool, sender, state)
+    await _say(ctx, pid, sender, _question_for(state))
+
+
 async def _resend(ctx, pid: str, sender: str, state: dict, prefix: str | None = None) -> None:
+    if state.get("step") == "confirm_all" and registration_complete(state):
+        state["final_confirmation_pending"] = True
+        await _save_session(ctx.pool, sender, state)
     body = _question_for(state)
     if prefix:
         body = prefix + "\n\n" + body
@@ -627,6 +773,36 @@ async def _maybe_return(ctx, pid: str, sender: str, state: dict) -> bool:
     state["return_to"] = None
     state["stack"] = [state.get("step", "ask_hours")]
     state["step"] = dest
+    await _save_session(ctx.pool, sender, state)
+    await _resend(ctx, pid, sender, state)
+    return True
+
+
+async def _accept_duration_estimates(ctx, pid: str, sender: str, state: dict, words: str) -> bool:
+    """Record an explicit yes to the displayed durations and keep any other clear details in that reply."""
+    data = state.get("data", {})
+    services = data.get("services", [])
+    if not services:
+        return False
+    previous_step = state.get("step", "ask_durations")
+    for service in services:
+        if isinstance(service, dict):
+            service["explicit"] = True
+    state["services_confirmed"] = True
+    state["duration_defaults_accepted"] = True
+
+    hours = parse_time_pair(words)
+    if hours:
+        data["open"], data["close"] = hours[0].strftime("%H:%M"), hours[1].strftime("%H:%M")
+    if re.search(r"\b(?:deposit|amana)\b", words, re.I):
+        deposit = parse_deposit(words)
+        if deposit is not None:
+            data["deposit"] = deposit
+
+    state["stack"] = [previous_step]
+    state["step"] = registration_next_step(state)
+    if await _maybe_return(ctx, pid, sender, state):
+        return True
     await _save_session(ctx.pool, sender, state)
     await _resend(ctx, pid, sender, state)
     return True
@@ -676,16 +852,26 @@ async def advance(ctx, sender: str, pid: str, text: str, media: dict | None = No
             await _save_session(ctx.pool, sender, state)
         await _resend(ctx, pid, sender, state)
         return True
-    if wants_keep(words, bool(state.get("return_to"))):
+    duration_prompt = step == "confirm_services" and awaiting_duration_approval(state)
+    duration_reply = is_duration_approval(words) and (
+        step == "ask_durations" or (step == "confirm_services" and duration_prompt))
+    if wants_keep(words, bool(state.get("return_to"))) and not duration_reply:
         if _keep_data_present(state) and await _maybe_return(ctx, pid, sender, state):
             return True
         await _resend(ctx, pid, sender, state, t(lang, "ob_steer"))
         return True
     step = state.get("step", "ask_name")
 
-    if step == "confirm_all" and is_affirmative(words):
-        await _go_live(ctx, pid, sender, state)
-        return True
+    if step == "confirm_all":
+        if is_affirmative(words):
+            if state.get("final_confirmation_pending"):
+                await _go_live(ctx, pid, sender, state)
+            else:
+                await _present_final_confirmation(ctx, pid, sender, state)
+            return True
+        if state.get("final_confirmation_pending"):
+            state["final_confirmation_pending"] = False
+            await _save_session(ctx.pool, sender, state)
 
     # A model conversation runs only when enabled. The parser and state machine
     # below remain the authoritative fallback for outages and model refusals.
@@ -699,7 +885,7 @@ async def advance(ctx, sender: str, pid: str, text: str, media: dict | None = No
                 return True
 
     if step == "ask_name":
-        if low in _NEVER_A_NAME or looks_off_topic(words):
+        if low in _NEVER_A_NAME or registration_start_only(words) or looks_off_topic(words) or looks_like_name_sentence(words):
             await _resend(ctx, pid, sender, state, t(lang, "ob_steer"))
             return True
         name = " ".join(words.split())
@@ -797,7 +983,9 @@ async def advance(ctx, sender: str, pid: str, text: str, media: dict | None = No
 
     if step == "confirm_services":
         ex = registration_format()
-        if low in YES_WORDS:
+        if duration_prompt and is_duration_approval(words):
+            await _accept_duration_estimates(ctx, pid, sender, state, words)
+        elif low in YES_WORDS:
             if await _maybe_return(ctx, pid, sender, state):
                 return True
             state["stack"] = ["confirm_services"]
@@ -837,16 +1025,8 @@ async def advance(ctx, sender: str, pid: str, text: str, media: dict | None = No
         return True
 
     if step == "ask_durations":
-        if low in YES_WORDS:
-            if await _maybe_return(ctx, pid, sender, state):
-                return True
-            state["duration_defaults_accepted"] = True
-            for service in data.get("services", []):
-                service["explicit"] = True
-            state["stack"] = ["ask_durations"]
-            state["step"] = "ask_hours"
-            await _save_session(ctx.pool, sender, state)
-            await _say(ctx, pid, sender, t(lang, "ob_ask_hours"))
+        if is_duration_approval(words):
+            await _accept_duration_estimates(ctx, pid, sender, state, words)
             return True
         if low in NO_WORDS:
             ex = registration_format()
@@ -899,7 +1079,10 @@ async def advance(ctx, sender: str, pid: str, text: str, media: dict | None = No
     if step == "confirm_all":
         ex = registration_format()
         if low in YES_WORDS:
-            await _go_live(ctx, pid, sender, state)
+            if state.get("final_confirmation_pending"):
+                await _go_live(ctx, pid, sender, state)
+            else:
+                await _present_final_confirmation(ctx, pid, sender, state)
         elif low in NO_WORDS:
             state["return_to"] = None
             state["step"] = "ask_name"
@@ -938,7 +1121,8 @@ async def begin(ctx, sender: str, pid: str, text: str) -> bool:
     if is_platform_owner:
         await _say(ctx, pid, sender, t(state["lang"], "ob_platform_owner_confirm"))
         return True
-    if getattr(ctx, "agent", None) is not None and getattr(ctx.settings, "agent_mode", "off") == "on":
+    if (not registration_start_only(text) and getattr(ctx, "agent", None) is not None
+            and getattr(ctx.settings, "agent_mode", "off") == "on"):
         from .onboarding_agent import advance as agent_advance
         if await agent_advance(ctx, sender, pid, text, state):
             return True

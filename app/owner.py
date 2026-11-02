@@ -34,6 +34,11 @@ MOVE = re.compile(r"^\s*(move|hamisha|sogeza)\s+(\S+)\s+(.+)$", re.I | re.S)
 LATE = re.compile(r"^\s*(late|chelewa)\s+(.+?)\s+(\d{1,3})\s*$", re.I | re.S)
 INVITE = re.compile(r"^\s*(invite|mwaliko|share)\W*$", re.I)
 KEEP = re.compile(r"^\s*(keep|endelea)\W*$", re.I)
+DELETE_REQUEST = re.compile(
+    r"\b(?:(?:delete|remove|terminate|close|shut down|deactivate|cancel|futa|ondoa|sitisha)\s+"
+    r"(?:my|the|this|our)?\s*(?:business|salon|barbershop|kinyozi|biashara|saluni)|"
+    r"(?:my|the|this|our)?\s*(?:business|salon|barbershop|kinyozi|biashara|saluni)\s+"
+    r"(?:delete|remove|terminate|close|shut down|deactivate|cancel|futa|ondoa|sitisha))\b", re.I)
 DEPOSIT = re.compile(r"^\s*(deposit|amana)\b\s*(.*?)\s*$", re.I | re.S)
 SUMMARY = re.compile(r"^\s*(summary|muhtasari)\W*$", re.I)
 TILL_TAP = re.compile(r"^till:(yes|no):([0-9a-fA-F-]{36})$")

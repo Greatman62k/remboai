@@ -26,6 +26,7 @@ from app.ratelimit import RateLimiter
 
 from .client import AgentModel, AgentUnavailable
 from .grounding import MAX_REPLY, check
+from .policy import PolicyError, load_policy, with_tool_descriptions
 from .prompt import system_prompt
 from .tools import TOOLS, Outcome, Toolbox
 
@@ -103,7 +104,7 @@ class Run:
     ms: int = 0
 
 
-async def drive(ctx, system: str, messages: list[dict], toolbox, tools: list[dict]) -> Run:
+async def drive(ctx, system: str, messages: list[dict], toolbox, tools: list[dict], repair_prompt: str) -> Run:
     """The loop shared by the customer and owner agents: the model picks tools until it has an answer, then the answer is checked."""
     s, model = ctx.settings, ctx.agent
     run = Run()
@@ -138,8 +139,7 @@ async def drive(ctx, system: str, messages: list[dict], toolbox, tools: list[dic
             if run.problems:
                 log.warning("agent reply rejected (%s); asking once more", "; ".join(run.problems))
                 messages.append({"role": "assistant", "content": final_text})
-                messages.append({"role": "user", "content": "[system check] Your reply was rejected: " + "; ".join(run.problems) +
-                                 ". Write it again in the user's language using only the facts and tool results, in at most two short sentences. Reply text only."})
+                messages.append({"role": "user", "content": repair_prompt.format(problems="; ".join(run.problems))})
                 try:
                     again = await model.step(system, messages, [])
                     final_text = again.text
@@ -186,8 +186,15 @@ async def turn(ctx, salon: dict, client: dict, st: dict, services: list[dict], t
     toolbox = Toolbox(ctx, salon, client, st, services, tz, now, lang, chat.to, text)
     view = dict(toolbox.st)
     view["_offered_view"] = toolbox.view_slots()
+    try:
+        policy = load_policy(getattr(s, "agent_policy_path", None))
+    except PolicyError:
+        log.exception("booking receptionist policy is unavailable; using the established conversation flow")
+        return False
     system = system_prompt(salon=salon, services=services, staff_by_service=staff_by_service, now=now, st=view, deposit_line=deposit_line,
-                           channel="Telegram" if chat.to.startswith("tg:") else "WhatsApp", lang_hint="Swahili or Sheng" if lang == "sw" else "English")
+                           channel="Telegram" if chat.to.startswith("tg:") else "WhatsApp", lang_hint="Swahili or Sheng" if lang == "sw" else "English",
+                           policy=policy)
+    tools = with_tool_descriptions(TOOLS, policy, "booking_receptionist")
     facts = toolbox.facts
     facts.add(system, *[(h.get("text") or "") for h in st.get("history", [])[-10:] if h.get("role") == "assistant"])
     facts.add_user(*[(h.get("text") or "") for h in st.get("history", [])[-10:] if h.get("role") != "assistant"], text)
@@ -198,7 +205,8 @@ async def turn(ctx, salon: dict, client: dict, st: dict, services: list[dict], t
     messages = _history_messages(st.get("history", []))
     if not messages or messages[-1]["role"] != "user":
         messages.append({"role": "user", "content": text[:500]})
-    run = await drive(ctx, system, messages, toolbox, TOOLS)
+    run = await drive(ctx, system, messages, toolbox, tools,
+                      policy["repair_prompts"]["booking_receptionist"])
     outcomes = toolbox.outcomes
     if not outcomes and not run.lead:
         await _trace(ctx, mid=mid, salon=salon, sender=mask(chat.to), user_text=text, steps=run.steps, final_text=None, buttons=None, state_after=None,
@@ -239,6 +247,11 @@ async def owner_turn(ctx, salon: dict, to: str, text: str, tz: ZoneInfo, now: da
             recent_context = False
     if not looks_like_admin(text) and not (recent_context and looks_like_admin_followup(text)):
         return False
+    try:
+        policy = load_policy(getattr(ctx.settings, "agent_policy_path", None))
+    except PolicyError:
+        log.exception("salon owner assistant policy is unavailable; using the established conversation flow")
+        return False
     mid = outbound.current_message_id()
     if mid:
         done = await ctx.pool.fetchrow("SELECT final_text FROM agent_turns WHERE message_id=$1 AND final_text IS NOT NULL", mid)
@@ -250,12 +263,14 @@ async def owner_turn(ctx, salon: dict, to: str, text: str, tz: ZoneInfo, now: da
     except Exception:
         pass
     toolbox = AdminToolbox(ctx, salon, to, tz, now)
-    system = admin_prompt(salon, now)
+    system = admin_prompt(salon, now, policy)
+    tools = with_tool_descriptions(ADMIN_TOOLS, policy, "salon_owner_assistant")
     history = history if isinstance(history, list) else []
     messages = [*history[-6:], {"role": "user", "content": text[:500]}]
     toolbox.facts.add(system)
     toolbox.facts.add_user(text, *[h["content"] for h in history[-6:] if h["role"] == "user"])
-    run = await drive(ctx, system, messages, toolbox, ADMIN_TOOLS)
+    run = await drive(ctx, system, messages, toolbox, tools,
+                      policy["repair_prompts"]["salon_owner_assistant"])
     body, _ = _compose(toolbox.outcomes, run.lead)
     if not body:
         await _trace(ctx, mid=mid, salon=salon, sender="owner", user_text=text, steps=run.steps, final_text=None, buttons=None, state_after=None,

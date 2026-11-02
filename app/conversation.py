@@ -39,6 +39,24 @@ from .channels.whatsapp import Message, mask
 log = logging.getLogger("rembo.conv")
 PAY_WORDS = re.compile(r"^\s*(pay|paid|lipa|nimelipa|nimeshalipa|nimetuma|nimeshatuma|done|sent|tuma|retry|resend|tena|try again)(\s+(now|sasa|hivi|tayari))?\W*$", re.I)
 WAITLIST_WORDS = re.compile(r"^\s*(waitlist|waiting list|notify me|let me know|nijulishe|niweke|weka jina)\W*$", re.I)
+DIRECT_CUSTOMER_BOOKING = re.compile(
+    r"\b(?:i\s+(?:want|need|would like|'d like)\s+to\s+book|book\s+me(?:\s+for)?|can\s+i\s+book|"
+    r"naomba\s+kuweka\s+miadi|nataka\s+kuweka\s+miadi)\b", re.I)
+
+
+def _explicit_customer_booking(text: str, services: list[dict]) -> bool:
+    if onboarding_chat.wants_customer_booking(text) or DIRECT_CUSTOMER_BOOKING.search(text or ""):
+        return True
+    for service in services:
+        for name in (service.get("name"), *service.get("aliases", [])):
+            if not name:
+                continue
+            term = re.escape(str(name).strip())
+            if re.search(rf"\b(?:nataka|naomba)\s+(?:a\s+)?{term}\b", text or "", re.I):
+                return True
+            if re.search(rf"\b(?:book|schedule)\s+(?:me\s+)?(?:a\s+)?{term}\b", text or "", re.I):
+                return True
+    return False
 
 
 class Chat:
@@ -149,12 +167,20 @@ async def _owned_channel_salons(ctx, sender: str, phone_number_id: str, selector
     return [dict(row) for row in rows]
 
 
+_REGISTRATION_HYPOTHETICAL = re.compile(
+    r"\b(?:if\s+i|what\s+if|what\s+happens|suppose\s+i|will\s+i|would\s+i|can\s+i|could\s+i|should\s+i|"
+    r"how\s+(?:do|can|should|would|to)|can\s+you|could\s+you|are\s+you\s+able|"
+    r"je|naweza|nitaweza|nitabaki)\b", re.I)
 def _registration_start(msg: Message) -> bool:
     if msg.kind != "text":
         return False
-    text = (msg.text or "").strip().lower()
-    return text in ("/start register", "/start sajili", "/start anzisha", "start register", "start sajili",
-                    "start anzisha", "register", "sajili", "anzisha") or onboarding_chat.wants_register(msg.text or "")
+    text = msg.text or ""
+    explicit = onboarding_chat.registration_start_only(text)
+    if explicit:
+        return True
+    request = onboarding_chat.wants_register(text)
+    inquiry = text.strip().endswith("?") or _REGISTRATION_HYPOTHETICAL.search(text)
+    return request and not inquiry
 
 
 async def _platform_registration(ctx, msg: Message, session: dict | None) -> None:
@@ -162,12 +188,6 @@ async def _platform_registration(ctx, msg: Message, session: dict | None) -> Non
     text = msg.text or ""
     if session is None:
         if _registration_start(msg):
-            low = text.strip().lower()
-            if onboarding_chat.wants_register(text) and low not in (
-                "/start register", "/start sajili", "/start anzisha", "start register", "start sajili",
-                "start anzisha", "register", "sajili", "anzisha",
-            ):
-                await outbound.send_plain(ctx, msg.sender, t(onboarding_chat.detect_lang(text), "ob_register_ack"))
             await onboarding_chat.begin(ctx, msg.sender, msg.phone_number_id, text)
             return
         await outbound.send_plain(ctx, msg.sender, platform.HELP_TEXT)
@@ -396,11 +416,10 @@ _PICKER_YES = {"yes", "yeah", "yep", "ndiyo", "ndio", "sawa", "ok"}
 
 
 async def _unallocated(ctx, msg: Message) -> None:
-    """The shared bot with no businesses on it yet. It can only introduce itself,
-    tell a sender their own id for setup, and register the first business.
+    """The shared bot with no business selected. It can answer general questions,
+    explain setup, tell a sender their own id, and start registration.
 
-    Every exchange lands in stranger_state, so these visits stay checkable, and the
-    third unrecognized message gets a one-line nudge instead of the full intro."""
+    It has no access to salon records. Each exchange is retained in stranger_state."""
     text = msg.text or ""
     st = await stranger_state(ctx, msg.sender)
     hist = list(st.get("history") or []) + [{"role": "user", "text": text[:500], "ts": datetime.now(ZoneInfo("UTC")).isoformat()}]
@@ -426,12 +445,7 @@ async def _unallocated(ctx, msg: Message) -> None:
     if msg.kind == "text" and lowered in ("/id", "my id", "myid", "id"):
         await answer(t(smalltalk.language(text, "en"), "my_id", id=msg.sender))
         return
-    if msg.kind == "text" and (lowered in ("/start register", "/start sajili", "/start anzisha", "start register", "start sajili",
-                                           "start anzisha", "register", "sajili", "anzisha") or onboarding_chat.wants_register(text)):
-        if lowered not in ("register", "sajili", "anzisha") and onboarding_chat.wants_register(text):
-            ack = t(onboarding_chat.detect_lang(text), "ob_register_ack")
-            hist.append({"role": "assistant", "text": ack[:500], "ts": datetime.now(ZoneInfo("UTC")).isoformat()})
-            await outbound.send_plain(ctx, msg.sender, ack)
+    if _registration_start(msg):
         await onboarding_chat.begin(ctx, msg.sender, msg.phone_number_id, text)
         await save_stranger(ctx, msg.sender, {**st, "history": hist})
         return
@@ -442,6 +456,13 @@ async def _unallocated(ctx, msg: Message) -> None:
     if msg.kind == "image":
         await answer(t(lang, "main_photo"))
         return
+    if smalltalk.asks_user_identity(text):
+        await answer(t(lang, "main_unallocated_identity"))
+        return
+    if agent.enabled(ctx):
+        from .agent import bare_assistant
+        if await bare_assistant.turn(ctx, msg, st, hist):
+            return
     if smalltalk.asks_help(text):
         await answer(t(lang, "main_help"))
         return
@@ -551,6 +572,10 @@ async def _handle(ctx, msg: Message) -> None:
     await outbound.set_conversation_salon(ctx, salon["id"])
     chat = Chat(ctx, salon, msg.sender)
     owner_mode = owner.is_owner(salon, msg.sender)
+    if owner_mode and msg.kind == "text" and smalltalk.asks_user_identity(msg.text or ""):
+        lang = smalltalk.language(msg.text or "", "en")
+        await chat.text(t(lang, "owner_self_identity", salon=salon["name"]))
+        return
     if owner_mode and msg.kind == "interactive" and msg.reply_id and await owner.handle_tap(ctx, salon, msg.sender, msg.reply_id):
         return
     if owner_mode and msg.kind == "text" and await guard.owner_command(ctx, salon, msg.sender, msg.text or "", chat):
@@ -558,6 +583,15 @@ async def _handle(ctx, msg: Message) -> None:
 
     sess = await onboarding_chat.load_session(ctx.pool, msg.sender)
     registration_start = _registration_start(msg)
+
+    if owner_mode and msg.kind == "text" and msg.text and not registration_start:
+        booking_request = _explicit_customer_booking(msg.text, [])
+        if not booking_request and re.match(r"\s*(?:nataka|naomba|book|schedule)\b", msg.text, re.I):
+            booking_request = _explicit_customer_booking(msg.text, await _catalog(ctx, salon["id"]))
+        if booking_request:
+            lang = smalltalk.language(msg.text, "en")
+            await chat.text(t(lang, "owner_self_identity", salon=salon["name"]))
+            return
 
     if owner_mode and (explicit_owner_route or sess is None) and not registration_start:
         if msg.kind == "text" and msg.text:
@@ -588,7 +622,10 @@ async def _handle(ctx, msg: Message) -> None:
             if await owner.owner_followup_is_pending(ctx, salon, msg.sender, msg.text):
                 if agent.enabled(ctx) and await agent.owner_turn(ctx, salon, msg.sender, msg.text, tz0, datetime.now(tz0), chat):
                     return
-                await chat.text(t(smalltalk.language(msg.text, "en"), "owner_help"))
+                await chat.text(t(smalltalk.language(msg.text, "en"), "owner_unrecognized"))
+                return
+            if owner.DELETE_REQUEST.search(msg.text):
+                await chat.text(t(lang, "owner_business_delete"))
                 return
             if await owner.handle(ctx, salon, msg.sender, msg.text, tz0, datetime.now(tz0)):
                 return
@@ -596,8 +633,7 @@ async def _handle(ctx, msg: Message) -> None:
                 return
         if explicit_owner_route or sess is None:
             lang = smalltalk.language(msg.text or "", "en")
-            body = t(lang, "owner_role_only") + "\n\n" + t(lang, "owner_help")
-            await chat.text(body)
+            await chat.text(t(lang, "owner_unrecognized"))
             return
 
     if platform_owner_route and registration_start:
@@ -642,14 +678,9 @@ async def _handle(ctx, msg: Message) -> None:
             return
     if owner_mode and not registration_start:
         lang = smalltalk.language(msg.text or "", "en")
-        await chat.text(t(lang, "owner_role_only") + "\n\n" + t(lang, "owner_help"))
+        await chat.text(t(lang, "owner_unrecognized"))
         return
-    if msg.kind == "text" and (msg.text or "").strip().lower() in ("/start register", "/start sajili", "/start anzisha", "start register", "start sajili", "start anzisha", "register", "sajili", "anzisha"):
-        await onboarding_chat.begin(ctx, msg.sender, msg.phone_number_id, msg.text or "")
-        return
-    if msg.kind == "text" and onboarding_chat.wants_register(msg.text or ""):
-        lang = onboarding_chat.detect_lang(msg.text or "")
-        await chat.text(t(lang, "ob_register_ack"))
+    if _registration_start(msg):
         await onboarding_chat.begin(ctx, msg.sender, msg.phone_number_id, msg.text or "")
         return
     if msg.kind == "text" and (smalltalk.asks_identity(msg.text or "") or (smalltalk.asks_help(msg.text or "") and not owner.is_owner(salon, msg.sender))):
@@ -661,6 +692,10 @@ async def _handle(ctx, msg: Message) -> None:
     if arrival:
         msg = dataclasses.replace(msg, kind="text", text="hi", reply_id=None)
     chat = Chat(ctx, salon, msg.sender)
+    if msg.kind == "text" and smalltalk.asks_user_identity(msg.text or ""):
+        lang = smalltalk.language(msg.text or "", "en")
+        await chat.text(t(lang, "customer_self_identity", salon=salon["name"]))
+        return
     if msg.kind == "text" and (msg.text or "").strip().lower() in ("/id", "my id", "myid", "id"):
         lang = smalltalk.language(msg.text or "", "en")
         if owner.is_owner(salon, msg.sender):
@@ -671,7 +706,7 @@ async def _handle(ctx, msg: Message) -> None:
         return
     if owner.is_owner(salon, msg.sender):
         lang = smalltalk.language(msg.text or "", "en")
-        await chat.text(t(lang, "owner_role_only") + "\n\n" + t(lang, "owner_help"))
+        await chat.text(t(lang, "owner_unrecognized"))
         return
     client, st = await _load(ctx, salon["id"], msg.sender, msg.name)
     st = await _replay_aware_state(ctx, salon["id"], msg, st)
@@ -893,7 +928,7 @@ async def _handle(ctx, msg: Message) -> None:
     else:
         lang = await _speak(ctx, client, lang, msg.text or "")
         key = "fallback_degraded" if res.degraded else "fallback"
-        await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, key, example=example_for(services, lang)))
+        await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, key, salon=salon["name"], example=example_for(services, lang)))
 
 
 async def _voice_typing(ctx, to: str) -> None:

@@ -23,6 +23,7 @@ services:
       DATABASE_URL: postgresql://rembo:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db:5432/rembo
       REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/0
       TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-172.16.0.0/12}
+      AGENT_POLICY_PATH: /srv/config/remboai_agent_policy.json
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
@@ -35,6 +36,7 @@ services:
     networks: [internal]
     volumes:
       - applogs:/tmp/logs
+      - ../config/remboai_agent_policy.json:/srv/config/remboai_agent_policy.json:ro
     logging:
       driver: json-file
       options:

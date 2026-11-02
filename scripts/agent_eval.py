@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import httpx
 
 from app.agent.client import AgentModel
+from app.agent.policy import load_policy, with_tool_descriptions
 from app.agent.prompt import system_prompt
 from app.agent.tools import TOOLS
 from app.ai.llm import Extractor, rule_extract
@@ -57,7 +58,11 @@ def brief(item: dict) -> str:
     st = {"state": "offered", "service_id": "1", "_offered_view": OFFERED} if item["offered"] else {}
     return system_prompt(salon=SALON, services=SERVICES, staff_by_service=STAFF, now=NOW, st=st,
                          deposit_line="Deposit: KES 200 (never more than the service price) is requested by M-Pesa when a slot is held.",
-                         channel="Telegram", lang_hint="English")
+                         channel="Telegram", lang_hint="English", policy=load_policy(get_settings().agent_policy_path))
+
+
+def eval_tools() -> list[dict]:
+    return with_tool_descriptions(TOOLS, load_policy(get_settings().agent_policy_path), "booking_receptionist")
 
 
 def judge(item: dict, tool: str | None, args: dict, reply: str | None) -> tuple[bool, bool]:
@@ -95,7 +100,7 @@ def rules_decide(item: dict) -> tuple[str | None, dict]:
 
 
 async def model_decide(model: AgentModel, item: dict) -> tuple[str | None, dict, str | None, int]:
-    step = await model.step(brief(item), [{"role": "user", "content": item["text"]}], TOOLS)
+    step = await model.step(brief(item), [{"role": "user", "content": item["text"]}], eval_tools())
     if step.calls:
         return step.calls[0].name, step.calls[0].args, None, step.ms
     return None, {}, step.text, step.ms

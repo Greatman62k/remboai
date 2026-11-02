@@ -4,6 +4,7 @@ ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt && useradd --system --uid 10001 --no-create-home rembo
 COPY app ./app
+COPY config ./config
 COPY migrations ./migrations
 COPY scripts ./scripts
 USER rembo

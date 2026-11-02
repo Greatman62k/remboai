@@ -138,7 +138,7 @@ def test_platform_owner_can_register_own_salon_after_confirming_ownership():
             assert "Businesses:" in out.tg_bodies("9001")[-1]
 
             await post_tg(c, tg_update(3, 9001, "I want to register a business"))
-            assert "salon owned by your current platform-admin account" in out.tg_bodies("9001")[-1]
+            assert "salon owned by the same account" in out.tg_bodies("9001")[-1]
             assert await pool.fetchval("SELECT state->>'step' FROM onboarding_sessions WHERE sender=$1", P) == "confirm_platform_owner"
             assert await pool.fetchval("SELECT count(*) FROM salons") == initial_salons
 
