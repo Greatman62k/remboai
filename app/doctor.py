@@ -70,7 +70,9 @@ async def run_checks(s, http: httpx.AsyncClient, pool) -> list[Check]:
         label = f"salon '{sl['name']}'"
         add(label, sl["services"] > 0 and sl["staff"] > 0, f"{sl['staff']} stylist(s), {sl['services']} service(s)")
         if sl["deposit_kes"] > 0 and not sl["kind"]:
-            add(label + " deposits", False, "deposit is set but no till/paybill: bookings will be confirmed with NO deposit (use --till)", warn=True)
+            add(label + " deposits", False,
+                "deposit is set but no till/paybill: bookings will be confirmed with NO deposit. Configure Daraja with --till HEAD_OFFICE:TILL, or a manual till with --till SEVEN_DIGIT_NUMBER --manual-till.",
+                warn=True)
         elif sl["kind"]:
             manual = "manual till, owner confirms each deposit" if sl["manual"] else f"Daraja STK (shortcode {sl['shortcode']})"
             add(label + " deposits", True, f"KES {sl['deposit_kes']} to {sl['kind']} {sl['party_b']} ({manual})")

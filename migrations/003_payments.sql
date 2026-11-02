@@ -3,7 +3,7 @@
 CREATE TABLE salon_payment (
     salon_id    uuid PRIMARY KEY REFERENCES salons ON DELETE CASCADE,
     kind        text NOT NULL CHECK (kind IN ('till', 'paybill')),
-    shortcode   text NOT NULL,   -- Daraja BusinessShortCode. For a till this is the head-office number.
+    shortcode   text NOT NULL,   -- Daraja BusinessShortCode. For a Daraja-backed till this is the head-office number.
     party_b     text NOT NULL,   -- who is paid: the till number, or the paybill number itself
     account_ref text NOT NULL DEFAULT 'RemboAI'
 );

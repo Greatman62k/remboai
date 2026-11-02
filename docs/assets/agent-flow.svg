@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 508" role="img" aria-labelledby="t d">
+  <title id="t">Where Meta AI fires</title>
+  <desc id="d">A customer message goes to Muse Spark, which decides each step. Its tool calls are checked and run by code on the booking engine, and the results go back to the model. Its draft reply is checked against the salon's facts, then sent with code-written confirmations. If configured, Muse Spark Open is tried after a Meta Model API failure; otherwise the keyword flow answers, as it also does when no usable model is available or the budget is spent.</desc>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Helvetica, Arial, sans-serif; text-anchor: middle; }
+    .t { font-size: 17px; font-weight: 700; }
+    .s { font-size: 14px; font-weight: 600; }
+    .m { font-size: 13px; font-weight: 600; fill: #fff; text-anchor: start; }
+    .r { font-size: 13px; font-weight: 600; fill: #fff; text-anchor: end; }
+    .k { fill: #000; }
+    .w { fill: #fff; }
+    .ln { stroke: #fff; stroke-width: 3; fill: none; }
+  </style>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerUnits="userSpaceOnUse" markerWidth="13" markerHeight="13" orient="auto"><path d="M0 0L10 5L0 10z" fill="#fff"/></marker>
+  </defs>
+  <rect width="520" height="508" rx="16" fill="#000"/>
+
+  <rect x="24" y="12" width="250" height="32" rx="16" fill="#fff"/>
+  <text class="s k" x="149" y="33">Message (text, voice note or photo)</text>
+  <path class="ln" d="M60 44V70" marker-end="url(#a)"/>
+
+  <rect x="24" y="70" width="250" height="56" rx="10" fill="#0057FF"/>
+  <text class="t w" x="149" y="95">Muse Spark 1.3</text>
+  <text class="s w" x="149" y="115">Decides each next step</text>
+
+  <path class="ln" d="M60 126V164" marker-end="url(#a)"/>
+  <text class="m" x="72" y="150">tool call</text>
+  <path class="ln" d="M240 164V126" marker-end="url(#a)"/>
+  <text class="r" x="228" y="150">result</text>
+
+  <rect x="24" y="164" width="250" height="56" rx="10" fill="#FF7A00"/>
+  <text class="t w" x="149" y="189">Booking tools</text>
+  <text class="s w" x="149" y="209">Code checks and runs each call</text>
+
+  <path class="ln" d="M60 220V258" marker-end="url(#a)"/>
+  <text class="m" x="72" y="244">draft reply</text>
+
+  <rect x="24" y="258" width="250" height="56" rx="10" fill="#fff"/>
+  <text class="t k" x="149" y="283">Grounding check</text>
+  <text class="s k" x="149" y="303">Times, prices, links, payments</text>
+
+  <path class="ln" d="M60 314V352" marker-end="url(#a)"/>
+  <text class="m" x="72" y="338">passes, or code rewrites it</text>
+
+  <rect x="24" y="352" width="250" height="56" rx="10" fill="#00A651"/>
+  <text class="t w" x="149" y="377">Send</text>
+  <text class="s w" x="149" y="397">Confirmations written by code</text>
+
+  <path class="ln" d="M274 98H318" marker-end="url(#a)"/>
+  <rect x="318" y="70" width="178" height="56" rx="10" fill="#E5101D"/>
+  <text class="t w" x="407" y="95">Muse Spark Open</text>
+  <text class="s w" x="407" y="115">If configured</text>
+
+  <path class="ln" d="M407 126V164" marker-end="url(#a)"/>
+  <rect x="318" y="164" width="178" height="56" rx="10" fill="#FF7A00"/>
+  <text class="t w" x="407" y="189">Keyword flow</text>
+  <text class="s w" x="407" y="209">No usable model or budget</text>
+
+  <rect x="318" y="258" width="178" height="150" rx="12" fill="#fff"/>
+  <text class="k" x="407" y="288" style="font-size:20px;font-weight:700">Code decides</text>
+  <text class="s k" x="407" y="318">The model never sets a</text>
+  <text class="s k" x="407" y="338">price, marks a payment</text>
+  <text class="s k" x="407" y="358">paid, or books a slot it</text>
+  <text class="s k" x="407" y="378">has not offered.</text>
+
+  <rect x="24" y="428" width="472" height="56" rx="12" fill="#000" stroke="#fff" stroke-width="2"/>
+  <text class="s w" x="260" y="451">Per-salon daily allowances and a circuit breaker:</text>
+  <text class="s w" x="260" y="471">If configured, Muse Spark Open is tried before keywords.</text>
+</svg>

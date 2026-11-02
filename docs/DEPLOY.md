@@ -33,11 +33,12 @@ docker compose -f deploy/docker-compose.prod.yml exec app python scripts/seed_sa
   --till <HEAD_OFFICE>:<TILL> --owner 2547XXXXXXXX --deposit 200
 docker compose -f deploy/docker-compose.prod.yml exec app python scripts/doctor.py
 ```
+The command above configures Daraja STK. For a manual till, use only the bare seven-digit till number: `--till 5012345 --manual-till`. Do not include the head-office shortcode or any other details. Customers pay at that till, send the amount and M-Pesa code in chat, and the owner confirms each claim with one tap.
 `doctor` must end with "All set" (warnings about sandbox mode or failover are fine for a demo).
 
 ## 5. Connect Meta and Safaricom
 - Meta developer dashboard > WhatsApp > Configuration: callback URL `https://<DOMAIN>/webhook`, verify token = `WA_VERIFY_TOKEN`, subscribe to **messages**.
-- Daraja needs nothing pasted: the callback URL is built from `PUBLIC_BASE_URL` and `MPESA_CALLBACK_SECRET`. For real money, the salon's till must be approved for production (Go Live) and `MPESA_ENV=production` set with the passkey Safaricom issues. A till with no Daraja API is seeded with `--till <HEAD_OFFICE>:<TILL> --manual-till`: no STK push goes out, the customer claims amount plus M-Pesa code in chat, and the owner confirms with one tap.
+- The Daraja callback URL is built from `PUBLIC_BASE_URL` and `MPESA_CALLBACK_SECRET`. For real-money Daraja STK, each salon's till or paybill must be approved for production (Go Live), with `MPESA_ENV=production` and the passkey Safaricom issues. Manual till payments do not use Daraja or send an STK prompt. Configure a manual till with only its bare seven-digit number; customers send the amount and M-Pesa code in chat, and the owner confirms the claim with one tap.
 - While the WhatsApp number is a test number, only recipients added under API Setup > To (maximum 5) can chat with it.
 
 - Telegram (optional): see [TELEGRAM.md](TELEGRAM.md). Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET`; with an https `PUBLIC_BASE_URL` the webhook is registered on start.
@@ -58,4 +59,4 @@ Put `ASR_URL=<url>/transcribe` and the same `ASR_TOKEN` in `.env`, restart the a
 - Logs: `docker compose -f deploy/docker-compose.prod.yml logs --since 1h app`. Look for `DELIVERY FAILED` (Meta delivery problems, with the reason), `REFUND NEEDED` (money to return), `rate limit`.
 
 ## 8. Before you demo
-Send `invite` from the owner number to get the customer link. Book a fade from a customer number, pay the prompt, and watch the booking appear. Cancel it with `cancel 1` and confirm the customer is told.
+Send `invite` from the owner number to get the customer link. Book a fade from a customer number and complete the configured payment flow. For a manual till, send the amount and M-Pesa code in chat, then confirm the claim from the owner account. Cancel the booking with `cancel 1` and confirm the customer is told.

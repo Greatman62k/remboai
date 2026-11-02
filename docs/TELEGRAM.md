@@ -1,8 +1,8 @@
 # Telegram channel
 
-The same receptionist, on Telegram: free text, tap buttons, voice notes, hairstyle photos, M-Pesa deposits and the owner commands.
+The same receptionist, on Telegram: free text, tap buttons, voice notes, hairstyle photos, Daraja STK or manual till deposits, and the owner commands.
 Telegram bots need no business verification, which makes this the quickest way to test everything from a phone. A customer's Telegram id is
-not a phone number, so the bot asks "which M-Pesa number?" before the deposit prompt (a shared contact works too).
+not a phone number, so the bot asks for a phone number before continuing. Daraja uses it for the STK prompt; manual till payments are made at the salon's till and confirmed from the customer's chat. A shared contact works too.
 
 ## Create the bot (2 minutes)
 1. In Telegram open **@BotFather**, send `/newbot`, choose a name and a username ending in `bot`.
@@ -13,7 +13,7 @@ not a phone number, so the bot asks "which M-Pesa number?" before the deposit pr
    python scripts/seed_salon.py --name "Brian's Kinyozi" --telegram-bot-id 123456789 --stylist Brian \
      --service "Fade:500:45:kinyozi,cut" --till <HEAD_OFFICE>:<TILL> --owner 2547XXXXXXXX --deposit 200
    ```
-   A salon can have a WhatsApp number and a Telegram bot at once (`--phone-number-id` too). Add `--manual-till` after `--till` when the till has no Daraja API: deposits then confirm on the owner's tap.
+   The command above configures Daraja STK. A salon can have a WhatsApp number and a Telegram bot at once (`--phone-number-id` too). For a manual till, use `--till 5012345 --manual-till` with only the bare seven-digit till number. Do not add a head-office shortcode or other details. Customers pay at that till, send the amount and M-Pesa code in chat, and the owner confirms the claim with one tap.
 5. Start the app. With no https `PUBLIC_BASE_URL` it **polls** Telegram, so a laptop is enough. With an https `PUBLIC_BASE_URL` it registers a webhook
    (`TELEGRAM_WEBHOOK_SECRET` required). Force one with `TELEGRAM_MODE=poll|webhook`.
 

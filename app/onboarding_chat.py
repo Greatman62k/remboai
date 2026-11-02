@@ -79,6 +79,14 @@ _SPOKEN_HOURS = {
     "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
     "twenty one": 21, "twenty two": 22, "twenty three": 23,
 }
+_SPOKEN_HOUR_PATTERN = "|".join(
+    re.escape(hour).replace(r"\ ", r"\s+")
+    for hour in sorted(_SPOKEN_HOURS, key=len, reverse=True)
+)
+_SPOKEN_EQUAL_HOURS = re.compile(
+    rf"^\s*(?:(?:we(?:'re| are)\s+open\s+)?from\s+)?"
+    rf"(?P<hour>\d{{1,2}}|{_SPOKEN_HOUR_PATTERN})\s+(?:to|until|till)\s+(?P=hour)"
+    r"(?:\s+daily)?\s*[.!?]*$", re.I)
 _SWAHILI_HOURS = {
     "moja": 1, "mbili": 2, "mvili": 2, "tatu": 3, "nne": 4, "tano": 5,
     "sita": 6, "saba": 7, "nane": 8, "tisa": 9, "kumi": 10,
@@ -92,9 +100,7 @@ _SWAHILI_TIME = re.compile(
 def _normalize_spoken_hours(text: str) -> str:
     """Turn clear spoken clock hours such as 'eight in the morning' into numeric clock tokens."""
     raw = text or ""
-    if not re.search(r"\b(?:morning|afternoon|evening|night)\b", raw, re.I):
-        return raw
-    raw = re.sub(r"\bin\s+(?:the\s+)?(morning|afternoon|evening|night)\b", r"\1", raw, flags=re.I)
+    raw = re.sub(r"\b(?:in|at)\s+(?:the\s+)?(morning|afternoon|evening|night)\b", r"\1", raw, flags=re.I)
     raw = re.sub(r"\bmorning\b", "am", raw, flags=re.I)
     raw = re.sub(r"\b(?:afternoon|evening|night)\b", "pm", raw, flags=re.I)
     for phrase, value in sorted(_SPOKEN_HOURS.items(), key=lambda pair: len(pair[0]), reverse=True):
@@ -227,6 +233,13 @@ def parse_time_pair(text: str):
     swahili_pair = _parse_swahili_time_pair(text)
     if swahili_pair:
         return swahili_pair
+    spoken_equal = _SPOKEN_EQUAL_HOURS.fullmatch((text or "").strip())
+    if spoken_equal:
+        raw_hour = " ".join(spoken_equal.group("hour").casefold().split())
+        hour = int(raw_hour) if raw_hour.isdigit() else _SPOKEN_HOURS.get(raw_hour)
+        if hour is not None and 5 <= hour <= 11:
+            from datetime import time as _time
+            return _time(hour), _time(hour + 12)
     raw = _normalize_spoken_hours((text or "").strip())
     mil = re.fullmatch(r"(\d{2})(\d{2})\s*(?:-|–|to)\s*(\d{2})(\d{2})", raw, re.I)
     if mil and all(int(mil.group(i)) <= 23 for i in (1, 3)) and all(int(mil.group(i)) <= 59 for i in (2, 4)):
@@ -427,7 +440,8 @@ _REDIRECTS = (
 _REGISTER_VERB = re.compile(r"\b(register|registration|sajili|kusajili|anzisha|kuanzisha|fungua|kufungua|open|opening|add|ongeza|create|tengeneza|andikisha|set\s?up|sign\s?up|join|jiunge|kujiunga)\b", re.I)
 _REGISTER_NOUN = re.compile(r"\b(business|biashara|salon|saloon|saluni|kinyozi|barbershop|barber|shop|duka|company|kampuni)\b", re.I)
 _REGISTER_ONLY = re.compile(
-    r"^\s*(?:/start\s+(?:register|sajili|anzisha)|start\s+(?:register|sajili|anzisha)|"
+    r"^\s*(?:(?:ok(?:ay)?|yes|yeah|yep|sure|please|alright|all\s+right)[,!\s]+)*"
+    r"(?:/start\s+(?:register|sajili|anzisha)|start\s+(?:register|sajili|anzisha)|"
     r"register|sajili|anzisha|(?:register|sajili|anzisha)\s+(?:(?:a|my|the)\s+)?"
     r"(?:business|biashara|salon|saloon|saluni|kinyozi|barbershop|barber|shop|duka|company|kampuni)|"
     r"(?:i\s+(?:want|need)\s+to|i(?:'d|\s+would)\s+like\s+to)\s+(?:register|sign\s?up)"
@@ -835,7 +849,9 @@ async def advance(ctx, sender: str, pid: str, text: str, media: dict | None = No
         return True
     step = state.get("step", "ask_name")
     if step == "confirm_platform_owner":
-        if low in YES_WORDS:
+        # This only acknowledges the ownership notice; salon creation still
+        # requires the separate, explicit final confirmation below.
+        if low in YES_WORDS or low.strip(" .,!? ") == "ye":
             state["step"] = "ask_name"
             await _save_session(ctx.pool, sender, state)
             await _say(ctx, pid, sender, t(lang, "ob_ask_name"))
