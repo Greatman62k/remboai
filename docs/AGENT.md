@@ -6,7 +6,7 @@
 
 1. **Brief.** The model gets the salon's real facts (services with prices and stylists, opening hours, deposit policy, today's calendar), the recent conversation, and the current situation (for example the three slots just offered).
 2. **Decide.** It calls tools, one step at a time, until it has an answer. Native function calling is used when the host supports it; otherwise the same loop runs with JSON steps (`AGENT_PROTOCOL=auto` switches by itself).
-3. **Do.** Each tool call is validated and executed by code (`app/agent/tools.py`) on top of the booking engine that already existed: holds with an advisory lock plus a Postgres exclusion constraint, idempotent cancellation, the deposit prompt, the waitlist.
+3. **Do.** Each tool call is validated and executed by code (`app/agent/tools.py`) on top of the booking engine that already existed: holds with an advisory lock plus a Postgres exclusion constraint, idempotent cancellation, the configured deposit flow, and the waitlist.
 4. **Check.** The model's draft reply is compared with what it was given (`app/agent/grounding.py`). Rejected: a price or time that was not in the facts, a link or phone number nobody provided, "paid" or "confirmed" or "cancelled" when no tool did it, a deposit waiver the salon never offered, mentions of tools or JSON. The model gets one chance to repair the reply; after that code's templates answer.
 5. **Send.** The customer gets the model's words around code's words. Anything that changed something (the hold, the payment steps, a cancellation, the waitlist, the hand-over) is worded by code from the tool result and is always included.
 

@@ -1065,3 +1065,19 @@ async def test_off_and_on_clear_the_cached_salon_row():
         await post_tg(c, tg_update(1, 9001, "off zuri"))
     assert not _db._salon_cache
     await pool.close()
+
+
+@needs_db
+@pytest.mark.asyncio
+async def test_delete_salon_removes_its_conversation_traces():
+    """Customer chat text kept for the ops trace must not outlive the business it belongs to (replies go with it by cascade)."""
+    from app import lifecycle
+    pool, out, salon = await build(DSN)
+    await pool.execute("INSERT INTO conversation_trace (message_id, thread, channel, message_kind, user_text, salon_id) VALUES ('m-del','tg:…1234','telegram','text','hello',$1::uuid)", salon)
+    await pool.execute("INSERT INTO conversation_trace_replies (message_id, sequence, message_kind, body, send_ok) VALUES ('m-del',1,'text','hi',true)")
+    await pool.execute("INSERT INTO conversation_trace (message_id, thread, channel, message_kind, user_text) VALUES ('m-keep','tg:…9999','telegram','text','no salon yet')")
+    await lifecycle.delete_salon(pool, salon)
+    assert await pool.fetchval("SELECT count(*) FROM conversation_trace WHERE message_id='m-del'") == 0
+    assert await pool.fetchval("SELECT count(*) FROM conversation_trace_replies WHERE message_id='m-del'") == 0
+    assert await pool.fetchval("SELECT count(*) FROM conversation_trace WHERE message_id='m-keep'") == 1
+    await pool.close()

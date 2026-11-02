@@ -261,7 +261,7 @@ def test_claim_parsing_reads_amount_and_code_but_trusts_nothing():
 
 async def manual_salon(pool, salon):
     await pool.execute("UPDATE salons SET owner_wa_id=$1", OWNER)
-    await pool.execute("UPDATE salon_payment SET manual=true WHERE salon_id=$1::uuid", salon)
+    await pool.execute("UPDATE salon_payment SET manual=true, shortcode=NULL WHERE salon_id=$1::uuid", salon)
 
 
 @needs_db

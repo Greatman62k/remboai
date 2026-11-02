@@ -4,14 +4,16 @@
     DATABASE_URL=... python scripts/seed_salon.py --name "Brian's Kinyozi" --phone-number-id 1234567890 \
         --stylist Brian --service "Fade:500:45:kinyozi,cut" --service "Shave:300:20"
 
-Deposits: add --till HEADOFFICE:TILL (Buy Goods till; the head-office number is the Daraja shortcode) or --paybill NUMBER.
-With neither, or --deposit 0, bookings are confirmed without a deposit. --owner is the owner's WhatsApp number (254...), or tg:<chat id> on Telegram (send /id to the bot to see it).
+Deposits: Daraja STK uses --till HEAD_OFFICE:TILL (the head-office number is the shortcode), or --paybill NUMBER.
+A manual till uses only its seven-digit number: --till 5012345 --manual-till. Do not include a head-office number or other details.
+With no payment account, or --deposit 0, bookings are confirmed without a deposit. --owner is the owner's WhatsApp number (254...), or tg:<chat id> on Telegram (send /id to the bot to see it).
 Telegram: add --telegram-bot-id (the number before the colon in the bot token), with or without a WhatsApp number.
 
 --service is NAME:PRICE_KES:MINUTES[:alias,alias]. The phone number ID is the one on Meta's API Setup page (not the phone number)."""
 import argparse
 import asyncio
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -19,11 +21,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app import db  # noqa: E402
 
 
-def parse_till(spec: str) -> tuple[str, str, str]:
-    """HEADOFFICE:TILL -> (kind, shortcode, party_b). Raises ValueError with a usable message."""
-    parts = (spec or "").split(":")
+def parse_till(spec: str, *, manual: bool = False) -> tuple[str, str | None, str]:
+    """Parse a Daraja HEAD_OFFICE:TILL or a manual till's bare seven-digit number."""
+    raw = (spec or "").strip()
+    if manual:
+        if not re.fullmatch(r"[0-9]{7}", raw):
+            raise ValueError("a manual till must be exactly seven digits, e.g. --till 5012345 --manual-till")
+        return "till", None, raw
+    parts = raw.split(":")
     if len(parts) != 2 or not all(p.strip() for p in parts):
-        raise ValueError("--till must look like HEADOFFICE:TILL, e.g. --till 0712345678:5012345")
+        raise ValueError("Daraja --till must look like HEAD_OFFICE:TILL, e.g. --till 0712345678:5012345; manual tills use --till 5012345 --manual-till")
     return "till", parts[0].strip(), parts[1].strip()
 
 
@@ -48,13 +55,19 @@ async def main() -> int:
     ap.add_argument("--stylist", action="append", required=True)
     ap.add_argument("--service", action="append", required=True)
     ap.add_argument("--deposit", type=int, default=200)
-    ap.add_argument("--till", help="HEADOFFICE:TILL")
-    ap.add_argument("--manual-till", action="store_true", help="till has no Daraja API: deposits go by owner one-tap confirm")
+    ap.add_argument("--till", help="Daraja: HEAD_OFFICE:TILL; manual: bare seven-digit till number")
+    ap.add_argument("--manual-till", action="store_true", help="use with --till <seven-digit-number>; owner confirms each deposit")
     ap.add_argument("--paybill")
     ap.add_argument("--owner", help="owner's WhatsApp number (2547...) or Telegram id (tg:123456789, send /id to the bot to find it)")
     a = ap.parse_args()
+    if a.manual_till and not a.till:
+        ap.error("--manual-till requires --till with only the seven-digit till number")
+    if a.till and a.paybill:
+        ap.error("choose --till or --paybill, not both")
+    if a.manual_till and a.paybill:
+        ap.error("--manual-till applies to a till, not a paybill")
     try:
-        till = parse_till(a.till) if a.till else None
+        till = parse_till(a.till, manual=a.manual_till) if a.till else None
         services = [parse_service(s) for s in a.service]
     except ValueError as e:
         ap.error(str(e))

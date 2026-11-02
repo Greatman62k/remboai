@@ -19,7 +19,7 @@ log = logging.getLogger("rembo.platform")
 SHOPS = re.compile(
     r"^\s*(?:shops|businesses|salons|orodha|list(?:\s+(?:businesses|shops|salons))?|"
     r"show\s+(?:the\s+)?(?:list|businesses|shops|salons)|return\s+(?:the\s+)?(?:list|businesses|shops|salons))\s*[?.!]*$", re.I)
-STATS = re.compile(r"^\s*(stats|takwimu)\s*$", re.I)
+STATS = re.compile(r"^\s*(stats|status|takwimu)\s*[?.!]*$", re.I)
 OFF = re.compile(r"^\s*off\s+(.+?)\s*$", re.I)
 ON = re.compile(r"^\s*on\s+(.+?)\s*$", re.I)
 DEL = re.compile(r"^\s*del(?:ete)?\s+(.+?)(?:\s+(YES|NDIYO))?\s*$", re.I)
@@ -27,6 +27,54 @@ WARN = re.compile(r"^\s*warn\s+(.+?)\s*$", re.I)
 HELP = re.compile(r"^\s*(help|msaada|platform)\s*$", re.I)
 ROLE = re.compile(r"^\s*(?:what\s+is\s+my\s+role|who\s+am\s+i|role\s+yangu|mimi\s+ni\s+nani|niko\s+role\s+gani)\s*[?.!]*$", re.I)
 OWNER_ROUTE = re.compile(r"^\s*/owner(?:@\w+)?(?:\s+(.+?))?\s*$", re.I | re.S)
+_SUGGESTION_OFFER = re.compile(
+    r"^\s*(?:can|could|may)\s+i\s+(?:recommend|suggest|propose)"
+    r"(?:\s+(?:something|a\s+recommendation|a\s+suggestion|an\s+idea|a\s+feature|a\s+change))?\s*[?.!]*$", re.I)
+_SAFE_READ_ONLY_ALIASES = {
+    "shops": ("shops", "businesses", "salons", "orodha"),
+    "stats": ("stats", "status", "takwimu"),
+    "help": ("help", "msaada", "platform"),
+}
+
+
+def _one_typo_apart(left: str, right: str) -> bool:
+    """Match one insertion, deletion, substitution, or adjacent transposition."""
+    if left == right:
+        return True
+    if abs(len(left) - len(right)) > 1:
+        return False
+    if len(left) == len(right):
+        mismatches = [i for i, (a, b) in enumerate(zip(left, right)) if a != b]
+        if len(mismatches) == 1:
+            return True
+        return (len(mismatches) == 2 and mismatches[1] == mismatches[0] + 1
+                and left[mismatches[0]] == right[mismatches[1]]
+                and left[mismatches[1]] == right[mismatches[0]])
+    short, long = (left, right) if len(left) < len(right) else (right, left)
+    i = j = skipped = 0
+    while i < len(short) and j < len(long):
+        if short[i] == long[j]:
+            i += 1
+            j += 1
+        else:
+            skipped += 1
+            j += 1
+            if skipped > 1:
+                return False
+    return True
+
+
+def _correct_read_only_command(text: str) -> str | None:
+    """Correct a one-character typo only when it resolves to one safe read command."""
+    match = re.fullmatch(r"\s*([a-z]+)\s*[?.!]*\s*", text or "", re.I)
+    if not match:
+        return None
+    word = match.group(1).casefold()
+    if len(word) < 4:
+        return None
+    possible = {command for command, aliases in _SAFE_READ_ONLY_ALIASES.items()
+                if any(_one_typo_apart(word, alias) for alias in aliases)}
+    return next(iter(possible)) if len(possible) == 1 else None
 
 HELP_TEXT = (
     "Platform administrator commands\n"
@@ -111,6 +159,11 @@ async def handle(ctx, sender: str, text: str) -> bool:
     """Run a platform command. True means dealt with (even 'I don't know that one')."""
     pool = ctx.pool
     say = lambda body: outbound.send_plain(ctx, sender, body)  # noqa: E731
+
+    if _SUGGESTION_OFFER.fullmatch(text or ""):
+        await say("Of course. What would you like to recommend?")
+        return True
+    text = _correct_read_only_command(text) or text
 
     if ROLE.match(text or ""):
         await say(ROLE_TEXT)

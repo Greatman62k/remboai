@@ -2,6 +2,22 @@
 
 Everything in this repository was written during the Meta Global AI Developer Hackathon (building period Oct 27 - Nov 4, 2026).
 
+## Nov 2 (assistant policy, registration agent, conversation evidence)
+
+399 tests, all passing.
+
+- **Editable policy** (`config/remboai_agent_policy.json`, `app/agent/policy.py`): the prompts, topic allowlist and reply-quality rules for every assistant live in one versioned JSON file mounted read-only by both Compose files. A valid edit is picked up on the next turn; an invalid one is logged and the last valid policy keeps running.
+- **Bare assistant** (`app/agent/bare_assistant.py`): chats not linked to a salon get a model-written reply about RemboAI itself, with no tools or business data; out-of-scope requests never reach the model.
+- **Registration agent** (`app/onboarding_agent.py`): the model reads the owner's free-form message, every extracted value must be backed by evidence in that message and pass the existing parsers, and only the deterministic onboarding code creates the salon after an explicit final yes.
+- **Platform assistant** (`app/agent/platform_assistant.py`): read-only natural-language questions for platform administrators (`PLATFORM_OWNER_IDS` adds backup admins); changes still go through the confirmed commands in `app/platform.py`.
+- **Conversation evidence** (migrations 029-032): `/ops/conversation-trace` shows each inbound turn, every reply with its send result, and the model/tool trace, for the agent retention period (14 days by default); deleting a salon deletes its traces.
+- **Hardening** (migration 033): webhook job leases are fenced to one claim token so a stale worker cannot complete or retry a reclaimed job; exact M-Pesa callback replays are not stored twice; handoffs, callback bodies and raw unmatched-payment payloads are purged on `HANDOFF_RETENTION_DAYS`, `MPESA_CALLBACK_RETENTION_DAYS`, `UNMATCHED_RAW_RETENTION_DAYS`.
+- **Manual till format** (migration 034): manual tills store and accept only the seven-digit till number. Daraja shortcode details remain required only for STK configuration.
+- **Conversation polish from live traces**: onboarding accepts spoken hours such as "from eight to eight" and acknowledgement-prefixed registration commands; the short "ye" affirmative is accepted only at the non-creating ownership notice; platform status commands tolerate one-character typos, and suggestion offers get a natural follow-up.
+- Diagrams: the README flow chart is now `docs/assets/agent-flow.svg` (renders everywhere, matches agent mode); the old keyword-first `model-fallback.svg` is removed and the other two diagrams no longer say rules read the intent.
+- README rewritten for judges: honest channel status, Meta-model-at-the-core section with the technical design, measured results (keyword baselines and the 33/33 Muse Spark result), trust table, privacy note covering the 14-day trace.
+- Owner-facing replies show Telegram customers as "Telegram ID ..." instead of a fake phone number (`app/contact.py`).
+
 ## Nov 1 (the Meta model runs the receptionist)
 
 - **Agent mode** (`AGENT_MODE=on`, `app/agent/`): Muse Spark decides each step through tools - `find_slots`, `reserve_slot`, `my_bookings`, `cancel_booking`, `join_waitlist`, `hand_to_owner` - and code validates and executes every call on the existing booking engine. Native function calling with an automatic fall back to JSON steps for hosts without it.
@@ -61,7 +77,7 @@ Everything in this repository was written during the Meta Global AI Developer Ha
 - Model gateway with labeled backends, tunable breaker, call logging and reasoning strip, plus `/model-info` and a 40-item eval corpus.
 
 ### Removed
-- The owner web page, its API, and web setup are deleted ahead of remboai.co.ke; chat is the only setup. Dead routes left the proxy allowlist and metrics labels with them.
+- The owner web page, its API, and web setup were deleted before launch; chat is the only setup path. Dead routes left the proxy allowlist and metrics labels with them.
 
 ### Housekeeping
 - Channel code grouped into `app/channels`, model code into `app/ai`; comment-only lines stripped from all Python files; weak secrets rotated; docs rewritten for the chat-first product with private notes moved out of the commit path.

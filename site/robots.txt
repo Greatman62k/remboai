@@ -1,2 +1,3 @@
 User-agent: *
 Allow: /
+Sitemap: https://remboai.duckdns.org/sitemap.xml
