@@ -1,5 +1,6 @@
 """Control hub and lifecycle: the platform owner runs shops, the quiet get warned twice, then deleted."""
 import asyncio
+import json
 import os
 
 import pytest
@@ -61,6 +62,50 @@ def test_platform_model_failure_is_explained_before_command_fallback():
     assert platform.HELP_TEXT in body
     sw_body = _fallback_reply(SimpleNamespace(unavailable=True, problems=[]), "sw")
     assert platform.help_text("sw") in sw_body
+
+
+def test_platform_delete_confirmation_reply_saves_history_and_sends_message(monkeypatch):
+    class Pool:
+        def __init__(self):
+            self.saved = None
+            self.lookups = 0
+
+        async def fetchrow(self, _query, _sender):
+            return {"history": '[{"role":"assistant","content":"Earlier reply"}]'}
+
+        async def fetch(self, _query, *_args):
+            self.lookups += 1
+            if self.lookups == 1:
+                return []
+            return [{"id": "business-1", "name": "Brian Cuts", "slug": "brian-cuts", "active": True}]
+
+        async def execute(self, _query, sender, history):
+            self.saved = (sender, history)
+
+    class Context:
+        def __init__(self):
+            self.pool = Pool()
+
+    sent = []
+
+    async def send_plain(_ctx, sender, body):
+        sent.append((sender, body))
+
+    monkeypatch.setattr(platform.outbound, "send_plain", send_plain)
+    ctx = Context()
+
+    async def run():
+        assert await platform.handle(ctx, P, "Del brian") is True
+
+    asyncio.run(run())
+
+    assert ctx.pool.saved is not None
+    assert ctx.pool.saved[0] == P
+    reply = json.loads(ctx.pool.saved[1])[-1]
+    assert reply["role"] == "assistant"
+    assert "Delete Brian Cuts" in reply["content"]
+    assert "del Brian Cuts YES" in reply["content"]
+    assert sent == [(P, reply["content"])]
 
 
 def test_primary_and_backup_platform_admin_ids_are_recognized():
