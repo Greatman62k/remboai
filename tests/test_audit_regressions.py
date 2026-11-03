@@ -902,10 +902,10 @@ async def test_doctor_warns_when_a_salon_has_no_approved_templates():
     http = httpx.AsyncClient(transport=httpx.MockTransport(out.handler))
     try:
         first = {(c.name, c.ok) for c in await _doctor.run_checks(app.state.ctx.settings, http, pool)}
-        assert ("salon 'Zuri Cuts' reminders", False) in first
+        assert ("business 'Zuri Cuts' reminders", False) in first
         await pool.execute("INSERT INTO reminder_templates (salon_id, name, body, approved) VALUES ($1::uuid,'reminder_24h','Hi',true)", salon)
         second = {(c.name, c.ok) for c in await _doctor.run_checks(app.state.ctx.settings, http, pool)}
-        assert ("salon 'Zuri Cuts' reminders", False) not in second
+        assert ("business 'Zuri Cuts' reminders", False) not in second
     finally:
         await http.aclose()
     await pool.close()
@@ -1038,7 +1038,8 @@ async def test_a_customer_is_told_what_to_do_when_the_model_is_unreachable(monke
     await _run_job_to_exhaustion(pool, app.state.ctx)
     bodies = out.bodies(A)
     assert len(bodies) == 1, bodies
-    assert "keep it short" in bodies[0] and "contact the salon directly" in bodies[0]
+    assert "keep it short" in bodies[0] and "contact the shop directly" in bodies[0]
+    assert bodies[0].endswith("Type HELP anytime to see what I can do.")
     for secret in ("primary.test", "fallback.test", "401", "traceback", "Exception"):
         assert secret not in bodies[0]
 
@@ -1062,7 +1063,7 @@ async def test_off_and_on_clear_the_cached_salon_row():
     assert await _db.salon_by_phone_id(pool, PID, app.state.ctx.settings) is not None
     assert _db._salon_cache
     async with client() as c:
-        await post_tg(c, tg_update(1, 9001, "off zuri"))
+        await post_tg(c, tg_update(1, 9001, "off zuri-cuts"))
     assert not _db._salon_cache
     await pool.close()
 

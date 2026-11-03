@@ -64,7 +64,7 @@ def test_platform_model_failure_is_explained_before_command_fallback():
     assert platform.help_text("sw") in sw_body
 
 
-def test_platform_delete_confirmation_reply_saves_history_and_sends_message(monkeypatch):
+def test_platform_partial_business_name_is_rejected_and_reply_history_is_saved(monkeypatch):
     class Pool:
         def __init__(self):
             self.saved = None
@@ -75,12 +75,11 @@ def test_platform_delete_confirmation_reply_saves_history_and_sends_message(monk
 
         async def fetch(self, _query, *_args):
             self.lookups += 1
-            if self.lookups == 1:
-                return []
-            return [{"id": "business-1", "name": "Brian Cuts", "slug": "brian-cuts", "active": True}]
+            return []
 
-        async def execute(self, _query, sender, history):
-            self.saved = (sender, history)
+        async def execute(self, query, *args):
+            if "INSERT INTO platform_agent_sessions" in query:
+                self.saved = args
 
     class Context:
         def __init__(self):
@@ -103,8 +102,7 @@ def test_platform_delete_confirmation_reply_saves_history_and_sends_message(monk
     assert ctx.pool.saved[0] == P
     reply = json.loads(ctx.pool.saved[1])[-1]
     assert reply["role"] == "assistant"
-    assert "Delete Brian Cuts" in reply["content"]
-    assert "del Brian Cuts YES" in reply["content"]
+    assert "No exact business match" in reply["content"]
     assert sent == [(P, reply["content"])]
 
 
@@ -158,7 +156,7 @@ def test_platform_owner_defaults_to_hub_and_can_route_only_to_owned_salon():
         await pool.execute("INSERT INTO clients (salon_id, wa_id) VALUES ($1::uuid,$2)", salon, P)
         async with client() as c:
             await post_tg(c, tg_update(1, 9001, "nataka fade tomorrow afternoon"))
-            assert out.tg_bodies("9001")[-1].startswith("Platform administrator commands")
+            assert out.tg_bodies("9001")[-1] == platform.help_text("sw")
             assert await pool.fetchval("SELECT count(*) FROM bookings") == 0
             assert await pool.fetchval("SELECT count(*) FROM clients WHERE wa_id=$1", P) == 1
 
@@ -254,7 +252,8 @@ def test_platform_owner_voice_is_transcribed_and_never_runs_mutating_commands():
         async with client() as c:
             out.asr_text = "How many businesses do we have?"
             await post_tg(c, tg_update(1, 9001, voice={"file_id": "VOICE1", "duration": 4}))
-            assert out.tg_bodies("9001") == ["The platform has 1 business and 0 bookings."]
+            assert out.tg_bodies("9001") == [
+                "The platform has 1 business and 0 bookings.\n\nType HELP anytime to see what I can do."]
             trace = await pool.fetchrow(
                 "SELECT message_kind, user_text FROM conversation_trace WHERE message_id='tg:1'")
             assert trace["message_kind"] == "audio"
@@ -321,7 +320,7 @@ def test_delete_asks_first_then_removes_everything():
     async def run():
         pool, out, salon = await build(DSN, platform_owner_id=P)
         async with client() as c:
-            await post_tg(c, tg_update(1, 9001, "del zuri"))
+            await post_tg(c, tg_update(1, 9001, "del zuri-cuts"))
             assert "YES" in out.tg_bodies("9001")[-1]
             assert await pool.fetchval("SELECT count(*) FROM salons") == 1
             await post_tg(c, tg_update(2, 9001, "del Zuri Cuts YES"))
@@ -334,12 +333,44 @@ def test_delete_asks_first_then_removes_everything():
 
 
 @needs_db
+def test_similar_business_names_require_an_exact_target_and_bound_confirmation():
+    async def run():
+        pool, out, target = await build(DSN, platform_owner_id=P)
+        await pool.execute("UPDATE salons SET name='Brian Cuts', slug='brian-cuts'")
+        other = await pool.fetchval(
+            "INSERT INTO salons (name, slug) VALUES ('Brian Cuts Studio', 'brian-cuts-studio') RETURNING id::text")
+        async with client() as c:
+            await post_tg(c, tg_update(1, 9001, "del Brian Cuts YES"))
+            assert "No matching deletion is awaiting confirmation" in out.tg_bodies("9001")[-1]
+            assert await pool.fetchval("SELECT count(*) FROM salons") == 2
+
+            await post_tg(c, tg_update(2, 9001, "del brian"))
+            assert "No exact business match" in out.tg_bodies("9001")[-1]
+            assert await pool.fetchval("SELECT count(*) FROM salons") == 2
+
+            await post_tg(c, tg_update(3, 9001, "del Brian Cuts"))
+            assert "Review: Brian Cuts" in out.tg_bodies("9001")[-1]
+            await post_tg(c, tg_update(4, 9001, "del Brian Cuts Studio YES"))
+            assert "No matching deletion is awaiting confirmation" in out.tg_bodies("9001")[-1]
+            assert await pool.fetchval("SELECT count(*) FROM salons") == 2
+
+            await post_tg(c, tg_update(5, 9001, "del Brian Cuts"))
+            await post_tg(c, tg_update(6, 9001, "del brian-cuts YES"))
+            assert "Deleted Brian Cuts" in out.tg_bodies("9001")[-1]
+            assert await pool.fetchval("SELECT count(*) FROM salons") == 1
+            assert await pool.fetchval("SELECT id::text FROM salons") == other
+            assert await pool.fetchval("SELECT count(*) FROM services WHERE salon_id=$1::uuid", target) == 0
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
 def test_warn_sends_the_notice_now():
     async def run():
         pool, out, salon = await build(DSN, platform_owner_id=P)
         await pool.execute("UPDATE salons SET owner_wa_id=$1", P)
         async with client() as c:
-            await post_tg(c, tg_update(1, 9001, "warn zuri"))
+            await post_tg(c, tg_update(1, 9001, "warn zuri-cuts"))
             body = out.tg_bodies("9001")
             assert "Warning sent" in body[-1]
             warned = await pool.fetchval("SELECT inactivity_warned_at IS NOT NULL FROM salons")

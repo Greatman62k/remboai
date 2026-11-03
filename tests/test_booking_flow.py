@@ -125,7 +125,7 @@ def test_booking_conversation_from_message_to_held_slot():
         async with client() as c:
             await post(c, payload(A, "hello nataka fade kesho mchana"))
             sent = out.to(A)
-            assert sent[0]["text"]["body"] == "Hello!"
+            assert sent[0]["text"]["body"] == "Hello!\n\nTuma MSAADA wakati wowote uone ninavyoweza kukusaidia."
             offer = sent[1]
             assert offer["type"] == "interactive" and "Nafasi za mapema za Fade" in offer["interactive"]["body"]["text"]
             ids = [b["reply"]["id"] for b in offer["interactive"]["action"]["buttons"]]
@@ -166,7 +166,7 @@ def test_language_follows_each_message_and_start_register_needs_no_slash():
             assert "booking assistant" in out.bodies(A)[-1]
             assert await pool.fetchval("SELECT lang FROM clients WHERE wa_id=$1", A) == "en"
             await post(c, payload(B, "Start register", mid="l3"))
-            assert "shop name" in out.bodies(B)[-1].lower()
+            assert "what name do customers know your shop by" in out.bodies(B)[-1].lower()
         await pool.close()
     asyncio.run(run())
 

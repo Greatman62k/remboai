@@ -169,7 +169,7 @@ def test_bot_with_no_businesses_introduces_itself_and_registers():
             await post_tg(c, tg_update(3, 9001, "/id"))
             assert "tg:9001" in out.tg_bodies("9001")[-1]
             await post_tg(c, tg_update(4, 9001, "register"))
-            assert "shop name" in out.tg_bodies("9001")[-1].lower()
+            assert "what name do customers know your shop by" in out.tg_bodies("9001")[-1].lower()
         await pool.close()
     asyncio.run(run())
 
