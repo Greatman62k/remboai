@@ -80,7 +80,7 @@ class Outside:
             return httpx.Response(200, json={"messages": [{"id": "x"}]})
         if req.url.path.endswith("/chat/completions") and self.agent is not None and any(
             k in json.loads(req.content)["messages"][0]["content"]
-            for k in ("booking receptionist", "diary assistant", "salon registration assistant", "platform administrator assistant")
+            for k in ("booking receptionist", "diary assistant", "salon registration assistant", "business registration assistant", "platform administrator assistant")
         ):
             body = json.loads(req.content)
             self.calls.append(host)

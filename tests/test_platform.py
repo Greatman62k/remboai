@@ -320,7 +320,7 @@ def test_delete_asks_first_then_removes_everything():
     async def run():
         pool, out, salon = await build(DSN, platform_owner_id=P)
         async with client() as c:
-            await post_tg(c, tg_update(1, 9001, "del zuri-cuts"))
+            await post_tg(c, tg_update(1, 9001, "del Zuri Cuts"))
             assert "YES" in out.tg_bodies("9001")[-1]
             assert await pool.fetchval("SELECT count(*) FROM salons") == 1
             await post_tg(c, tg_update(2, 9001, "del Zuri Cuts YES"))
@@ -338,7 +338,7 @@ def test_similar_business_names_require_an_exact_target_and_bound_confirmation()
         pool, out, target = await build(DSN, platform_owner_id=P)
         await pool.execute("UPDATE salons SET name='Brian Cuts', slug='brian-cuts'")
         other = await pool.fetchval(
-            "INSERT INTO salons (name, slug) VALUES ('Brian Cuts Studio', 'brian-cuts-studio') RETURNING id::text")
+            "INSERT INTO salons (name, slug, tg_bot_id) VALUES ('Brian Cuts Studio', 'brian-cuts-studio', 'tg:112') RETURNING id::text")
         async with client() as c:
             await post_tg(c, tg_update(1, 9001, "del Brian Cuts YES"))
             assert "No matching deletion is awaiting confirmation" in out.tg_bodies("9001")[-1]
@@ -370,7 +370,7 @@ def test_warn_sends_the_notice_now():
         pool, out, salon = await build(DSN, platform_owner_id=P)
         await pool.execute("UPDATE salons SET owner_wa_id=$1", P)
         async with client() as c:
-            await post_tg(c, tg_update(1, 9001, "warn zuri-cuts"))
+            await post_tg(c, tg_update(1, 9001, "warn Zuri Cuts"))
             body = out.tg_bodies("9001")
             assert "Warning sent" in body[-1]
             warned = await pool.fetchval("SELECT inactivity_warned_at IS NOT NULL FROM salons")
