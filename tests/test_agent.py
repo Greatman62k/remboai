@@ -116,7 +116,7 @@ def test_the_model_cannot_book_a_slot_nobody_offered_or_invent_a_slot_id():
         assert await pool.fetchval("SELECT count(*) FROM bookings") == 0
         tool_msg = next(m for m in out.agent_requests[1]["messages"] if m["role"] == "tool")
         assert "customer_has_not_picked" in tool_msg["content"]
-        assert last(out)["text"] == "Which day would you like?"
+        assert last(out)["text"] == "Which day would you like?\n\nType HELP anytime to see what I can do."
         out.agent = Script(find(), ("say", "Options:"), ("tool", "reserve_slot", {"slot_id": "s9"}), ("say", "ok"))
         async with client() as c:
             await say(c, 2, "fade tomorrow afternoon")
@@ -166,7 +166,7 @@ def test_a_rejected_first_reply_can_be_repaired_by_the_models_second_try():
         out.agent = Script(find(), ("say", "Fade ni KES 99999!"), ("say", "Hizi ndizo nafasi za Fade:"))
         async with client() as c:
             await say(c, 1, "fade tomorrow afternoon")
-        assert last(out)["text"] == "Hizi ndizo nafasi za Fade:"
+        assert last(out)["text"] == "Hizi ndizo nafasi za Fade:\n\nType HELP anytime to see what I can do."
         assert await pool.fetchval("SELECT outcome FROM agent_turns") == "agent"
         await pool.close()
     asyncio.run(run())
@@ -280,7 +280,7 @@ def test_a_host_without_native_tool_calling_is_driven_with_json_steps():
         out.agent = Script(find(), ("say", "Hizi ndizo nafasi:"))
         async with client() as c:
             await say(c, 1, "fade tomorrow afternoon")
-        assert last(out)["text"] == "Hizi ndizo nafasi:"
+        assert last(out)["text"] == "Hizi ndizo nafasi:\n\nType HELP anytime to see what I can do."
         json_requests = [b for b in out.agent_requests if "tools" not in b]
         assert len(json_requests) == 2 and "ONE JSON object" in json_requests[0]["messages"][0]["content"]
         assert any(m["content"].startswith("TOOL RESULT (find_slots)") for m in json_requests[1]["messages"] if m["role"] == "user")
@@ -399,7 +399,8 @@ def test_owner_summary_and_invite_use_model_tools_while_payment_review_stays_cod
         )
         async with client() as c:
             await say(c, 1, "summary", chat=OWNER)
-            assert last(out, OWNER)["text"] == "Here is the verified daily summary."
+            assert last(out, OWNER)["text"] == (
+                "Here is the verified daily summary.\n\nType HELP anytime to see what I can do.")
             summary_trace = await pool.fetchrow("SELECT outcome, steps FROM agent_turns ORDER BY id DESC LIMIT 1")
             assert summary_trace["outcome"] == "agent"
             assert [step["tool"] for step in _j(summary_trace["steps"])] == ["daily_summary"]

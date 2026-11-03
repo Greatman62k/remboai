@@ -220,11 +220,11 @@ def test_chat_onboarding_registers_a_salon_with_no_model_calls():
         sender = f"tg:{OWNER_CHAT}"
         async with client() as c:
             await post_tg(c, tg_update(1, OWNER_CHAT, "/start register"))
-            assert "shop name" in out.tg_bodies(str(OWNER_CHAT))[-1].lower()
+            assert "what name do customers know your shop by" in out.tg_bodies(str(OWNER_CHAT))[-1].lower()
             await post_tg(c, tg_update(2, OWNER_CHAT, "Zuri Cuts"))
             assert "different" in out.tg_bodies(str(OWNER_CHAT))[-1].lower()
             await post_tg(c, tg_update(3, OWNER_CHAT, "NO"))
-            assert "shop name" in out.tg_bodies(str(OWNER_CHAT))[-1].lower()
+            assert "what name do customers know your shop by" in out.tg_bodies(str(OWNER_CHAT))[-1].lower()
             await post_tg(c, tg_update(4, OWNER_CHAT, "Amina Braids"))
             assert "barbershop" in out.tg_bodies(str(OWNER_CHAT))[-1].lower()
             await post_tg(c, tg_update(5, OWNER_CHAT, "2"))
@@ -356,23 +356,28 @@ def test_model_guided_payment_correction_returns_to_summary_and_only_code_create
         }
         await onboarding_chat._save_session(pool, sender, state)
         moves = [
-            ("tool", "capture_registration_details", {
-                "payment_method_evidence": "phone", "payment_type_evidence": "Airtel Money",
-            }),
-            ("say", "What number should customers use for Airtel Money payments?"),
+            ("tool", "capture_registration_details", {"payment_method_evidence": "phone"}),
+            ("say", "Which service receives payments at that number? Reply POCHI, SEND MONEY, or AIRTEL."),
+            ("tool", "capture_registration_details", {"payment_type_evidence": "Airtel Money"}),
+            ("say", "Send the Kenyan mobile number where your shop receives payments through the service you chose."),
             ("tool", "capture_registration_details", {"payment_destination_evidence": "0712 345 678"}),
-            ("say", "I have updated the payment details."),
+            ("say", "I updated the payment details. Please review the summary."),
         ]
         out.agent = lambda _body: moves.pop(0) if moves else ("say", "Please review the summary.")
 
         async with client() as c:
-            await post_tg(c, tg_update(1, 9003, "Change the payment method to phone and Airtel Money"))
+            await post_tg(c, tg_update(1, 9003, "Change the payment method to phone"))
+            interim = await onboarding_chat.load_session(pool, sender)
+            assert interim["step"] == "ask_phone_type"
+            assert "airtel" in out.tg_bodies(chat)[-1].lower()
+            assert await pool.fetchval("SELECT count(*) FROM salons WHERE name='Correction Flow Salon'") == 0
+
+            await post_tg(c, tg_update(2, 9003, "Airtel Money"))
             interim = await onboarding_chat.load_session(pool, sender)
             assert interim["step"] == "ask_payment_phone"
             assert "number" in out.tg_bodies(chat)[-1].lower()
-            assert await pool.fetchval("SELECT count(*) FROM salons WHERE name='Correction Flow Salon'") == 0
 
-            await post_tg(c, tg_update(2, 9003, "0712 345 678"))
+            await post_tg(c, tg_update(3, 9003, "0712 345 678"))
             summary = out.tg_bodies(chat)[-1]
             final_state = await onboarding_chat.load_session(pool, sender)
             assert final_state["step"] == "confirm_all"
@@ -381,7 +386,7 @@ def test_model_guided_payment_correction_returns_to_summary_and_only_code_create
             assert await pool.fetchval("SELECT count(*) FROM salons WHERE name='Correction Flow Salon'") == 0
 
             calls_before_yes = len(out.agent_requests)
-            await post_tg(c, tg_update(3, 9003, "YES"))
+            await post_tg(c, tg_update(4, 9003, "YES"))
             assert len(out.agent_requests) == calls_before_yes
             account = await pool.fetchrow(
                 "SELECT sp.kind, sp.party_b, sp.shortcode, sp.manual, sp.phone_type FROM salon_payment sp "
@@ -473,7 +478,7 @@ def test_affirmations_are_never_stored_as_names():
         sender, chat = "tg:8002", "8002"
         await onboarding_chat.begin(ctx, sender, BOT, "/start register")
         await onboarding_chat.advance(ctx, sender, BOT, "yes")
-        assert "shop name" in out.tg_bodies(chat)[-1].lower()
+        assert "what name do customers know your shop by" in out.tg_bodies(chat)[-1].lower()
         await onboarding_chat.advance(ctx, sender, BOT, "Real Salon")
         await onboarding_chat.advance(ctx, sender, BOT, "1")
         await onboarding_chat.advance(ctx, sender, BOT, "ok")
@@ -569,11 +574,11 @@ def test_interruptions_back_and_corrections_stay_in_setup():
         await onboarding_chat.begin(ctx, sender, BOT, "/start register")
         await onboarding_chat.advance(ctx, sender, BOT, "Ok")
         assert "continue with the setup" in out.tg_bodies(chat)[-1].lower()
-        assert "shop name" in out.tg_bodies(chat)[-1].lower()
+        assert "what name do customers know your shop by" in out.tg_bodies(chat)[-1].lower()
         await onboarding_chat.advance(ctx, sender, BOT, "Amina Cuts")
         assert "barbershop" in out.tg_bodies(chat)[-1].lower()
         await onboarding_chat.advance(ctx, sender, BOT, "BACK")
-        assert "shop name" in out.tg_bodies(chat)[-1].lower()
+        assert "what name do customers know your shop by" in out.tg_bodies(chat)[-1].lower()
         await onboarding_chat.advance(ctx, sender, BOT, "Amina Cuts")
         await onboarding_chat.advance(ctx, sender, BOT, "2")
         await onboarding_chat.advance(ctx, sender, BOT, "nataka fade")
@@ -627,7 +632,7 @@ def test_kinyozi_flow_many_stylists_and_plain_language_changes():
         await onboarding_chat.advance(ctx, sender, BOT, "08:00-20:00")
         assert "deposit" in out.tg_bodies(chat)[-1].lower()
         await onboarding_chat.advance(ctx, sender, BOT, "no deposit")
-        assert "Stylists: Brian, Kevin, Amina" in out.tg_bodies(chat)[-1]
+        assert "Staff: Brian, Kevin, Amina" in out.tg_bodies(chat)[-1]
         await onboarding_chat.advance(ctx, sender, BOT, "i want to change the time")
         assert "How long" in out.tg_bodies(chat)[-1]
         await onboarding_chat.advance(ctx, sender, BOT, "Clean shave 1h")
@@ -668,12 +673,12 @@ def test_keep_old_answer_after_a_stylist_redirect():
         await onboarding_chat.advance(ctx, sender, BOT, "09:00-18:00")
         assert "deposit" in out.tg_bodies(chat)[-1].lower()
         await onboarding_chat.advance(ctx, sender, BOT, "0")
-        assert "Stylists: Juma" in out.tg_bodies(chat)[-1]
+        assert "Staff: Juma" in out.tg_bodies(chat)[-1]
         await onboarding_chat.advance(ctx, sender, BOT, "i want to change stylists")
         assert "your name" in out.tg_bodies(chat)[-1].lower()
         await onboarding_chat.advance(ctx, sender, BOT, "ok")
         assert "Ready to open" in out.tg_bodies(chat)[-1]
-        assert "Stylists: Juma" in out.tg_bodies(chat)[-1]
+        assert "Staff: Juma" in out.tg_bodies(chat)[-1]
         assert "they are ok" not in out.tg_bodies(chat)[-1].lower()
         await onboarding_chat.advance(ctx, sender, BOT, "YES")
         assert "is live" in out.tg_bodies(chat)[-1].lower()
@@ -691,7 +696,7 @@ def test_plain_register_sentences_begin_onboarding_in_either_language():
             bodies = out.tg_bodies("7001")
             assert len(bodies) == 1
             assert "welcome!" in bodies[0].lower()
-            assert "shop name" in bodies[0].lower()
+            assert "what name do customers know your shop by" in bodies[0].lower()
             assert await pool.fetchval("SELECT state->>'step' FROM onboarding_sessions WHERE sender='tg:7001'") == "ask_name"
             await post_tg(c, tg_update(2, 7002, "nataka kusajili saluni yangu"))
             bodies = out.tg_bodies("7002")

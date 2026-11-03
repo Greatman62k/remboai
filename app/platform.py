@@ -185,6 +185,19 @@ async def _find(pool, ref: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def _find_exact(pool, ref: str) -> list[dict]:
+    """Resolve a mutation target by its full slug or complete name only."""
+    ref = (ref or "").strip()
+    if not ref:
+        return []
+    rows = await pool.fetch("SELECT id::text, name, slug, active FROM salons WHERE slug=$1", ref.lower())
+    if rows:
+        return [dict(r) for r in rows]
+    rows = await pool.fetch(
+        "SELECT id::text, name, slug, active FROM salons WHERE lower(name)=lower($1) ORDER BY slug LIMIT 6", ref)
+    return [dict(r) for r in rows]
+
+
 def _age_line(last, now) -> str:
     if last is None:
         return "no bookings yet"
@@ -248,10 +261,13 @@ async def handle(ctx, sender: str, text: str) -> bool:
         return True
     m = OFF.match(text or "") or ON.match(text or "")
     if m:
-        found = await _find(pool, m.group(1))
+        found = await _find_exact(pool, m.group(1))
+        if not found:
+            await say("No exact business match. Send the full business name or its slug.")
+            return True
         if len(found) != 1:
-            await say("Not sure which business you mean." if not found else
-                      "Several match: " + ", ".join(r["name"] for r in found) + ". Use the exact name.")
+            choices = ", ".join(f"{r['name']} ({r['slug']})" for r in found)
+            await say("Several businesses have that exact name: " + choices + ". Use a business slug from shops.")
             return True
         active = text.strip().lower().startswith("on")
         await pool.execute("UPDATE salons SET active=$2 WHERE id=$1::uuid", found[0]["id"], active)
@@ -260,13 +276,32 @@ async def handle(ctx, sender: str, text: str) -> bool:
         return True
     m = DEL.match(text or "")
     if m:
-        found = await _find(pool, m.group(1))
+        await pool.execute("DELETE FROM platform_delete_confirmations WHERE requested_at <= now() - interval '5 minutes'")
+        found = await _find_exact(pool, m.group(1))
+        if not found:
+            await pool.execute("DELETE FROM platform_delete_confirmations WHERE sender=$1", sender)
+            await say("No exact business match. Send the full business name or its slug.")
+            return True
         if len(found) != 1:
-            await say("Not sure which business you mean." if not found else
-                      "Several match: " + ", ".join(r["name"] for r in found) + ". Use the exact name.")
+            await pool.execute("DELETE FROM platform_delete_confirmations WHERE sender=$1", sender)
+            choices = ", ".join(f"{r['name']} ({r['slug']})" for r in found)
+            await say("Several businesses have that exact name: " + choices + ". Use a business slug from shops.")
             return True
         if (m.group(2) or "").upper() not in ("YES", "NDIYO"):
-            await say(f"Delete {found[0]['name']} and everything in it (services, bookings, clients)? Reply: del {found[0]['name']} YES")
+            await pool.execute(
+                "INSERT INTO platform_delete_confirmations (sender, salon_id, requested_at) VALUES ($1,$2::uuid,now()) "
+                "ON CONFLICT (sender) DO UPDATE SET salon_id=EXCLUDED.salon_id, requested_at=now()",
+                sender, found[0]["id"])
+            await say(f"Review: {found[0]['name']} and everything in it (services, bookings, clients) will be deleted. "
+                      f"To confirm within 5 minutes, reply: del {found[0]['name']} YES")
+            return True
+        confirmation = await pool.fetchrow(
+            "DELETE FROM platform_delete_confirmations WHERE sender=$1 AND salon_id=$2::uuid "
+            "AND requested_at > now() - interval '5 minutes' RETURNING salon_id", sender, found[0]["id"])
+        if not confirmation:
+            await pool.execute("DELETE FROM platform_delete_confirmations WHERE sender=$1", sender)
+            await say("No matching deletion is awaiting confirmation. First send del with the full business name or slug, "
+                      "review the business shown, then confirm with the same exact name within 5 minutes.")
             return True
         counts = await lifecycle.delete_salon_and_notify(ctx, found[0]["id"])
         await say(f"Deleted {found[0]['name']}: {counts['bookings']} bookings, {counts['payments']} payments. "
@@ -274,8 +309,15 @@ async def handle(ctx, sender: str, text: str) -> bool:
         return True
     m = WARN.match(text or "")
     if m:
-        found = await _find(pool, m.group(1))
-        if len(found) != 1 or not found[0]["active"]:
+        found = await _find_exact(pool, m.group(1))
+        if not found:
+            await say("No exact business match. Send the full business name or its slug.")
+            return True
+        if len(found) != 1:
+            choices = ", ".join(f"{r['name']} ({r['slug']})" for r in found)
+            await say("Several businesses have that exact name: " + choices + ". Use a business slug from shops.")
+            return True
+        if not found[0]["active"]:
             await say("Not sure which active business you mean.")
             return True
         row = await pool.fetchrow("SELECT id::text, name, wa_phone_number_id, wa_access_token, owner_wa_id FROM salons WHERE id=$1::uuid", found[0]["id"])
