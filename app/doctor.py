@@ -168,7 +168,7 @@ async def run_checks(s, http: httpx.AsyncClient, pool) -> list[Check]:
         except Exception as e:  # noqa: BLE001
             add(f"photo matching {model}", False, f"{e.__class__.__name__}: {str(e)[:120]}", warn=True)
     if matcher.enabled:
-        expected = ("mpesa", 10, "RMB2AI7K9Q", "2026-11-03", "10:47", "REMBOAI DEMO SALON")
+        expected = ("mpesa", 10, "RMB2AI7K9Q", "2026-11-03", "10:47", "REMBOAI DEMO BARBERSHOP")
         try:
             guess = await matcher.extract_payment(make_mock_payment_png(), "image/png", "mpesa")
             actual = ((guess.provider, guess.amount, guess.reference, guess.date, guess.time, guess.recipient)
