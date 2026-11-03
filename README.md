@@ -2,8 +2,8 @@
 
 # RemboAI
 
-**The receptionist that never misses a booking.**
-An AI receptionist for Kenyan salons and barbershops, run by Meta's Muse Spark. It holds the slot, guides customers through the salon's M-PESA or Airtel Money deposit method, and confirms in English, Swahili or Sheng, typed or by voice note.
+**A barber shouldn't have to stop a haircut to answer a booking message.**
+RemboAI is a chat-based receptionist for Kenyan barbershops and salons, powered by Meta's Muse Spark. Customers book in English, Swahili or Sheng, by text or voice note. The model understands the request; guarded code checks the diary and payment state before anything is confirmed.
 
 ![Python 3.13](https://img.shields.io/badge/python-3.13-blue)
 ![Tests](https://img.shields.io/badge/tests-436_passing-brightgreen)
@@ -23,7 +23,7 @@ An AI receptionist for Kenyan salons and barbershops, run by Meta's Muse Spark. 
 </div>
 
 > [!NOTE]
-> **Where things stand, honestly.** Telegram is live and is the channel to try. The WhatsApp channel is built and tested end to end in this repository, and switches on when Meta's business verification for my account completes. Daraja STK runs against the **sandbox**; automatic STK in production needs Safaricom's Go Live approval for each salon. During setup, an owner chooses a manual M-PESA till, Pochi la Biashara number, direct Send Money number, or Airtel Money number. Manual payments go directly to that salon destination and the owner checks each claim. Nothing in the demo is faked: the booking engine, the model calls and the payment flow are the same code that will run in production.
+> **Where things stand, honestly.** Telegram is live and is the channel to try. The WhatsApp channel is built and tested end to end in this repository; this account is waiting for Meta business verification before WhatsApp can go live. Messenger is a possible next channel, not part of this demo. Daraja STK runs against the **sandbox**; automatic STK in production needs Safaricom's Go Live approval for each shop. During setup, an owner chooses a manual M-PESA till, Pochi la Biashara number, direct Send Money number, or Airtel Money number. Manual payments go directly to that shop destination and the owner checks each claim. Nothing in the demo is faked: the booking engine, model calls and payment flow are the same code intended for production.
 
 > [!NOTE]
 ---
@@ -58,9 +58,9 @@ Both sides of the chair lose today. Customers walk away from a crowded shop, and
 
 - **No new habit.** [M-Pesa reports 40 million monthly active customers in Kenya](https://khusoko.com/2026/03/06/m-pesa-turns-19-with-40-million-customers-as-mobile-money-reshapes-kenya/). Customers already chat and already pay on their phones. RemboAI asks them to install nothing and learn nothing.
 - **The owner's phone is the whole back office.** Registration, the diary, cancellations, away-days, deposits and a daily summary all run over chat. No dashboard, no laptop, no training.
-- **Money goes where it should.** Owners choose an M-PESA till, Pochi la Biashara, direct Send Money, or Airtel Money destination. Daraja STK can also send an M-PESA prompt where configured. Manual transfers go to the salon, and the owner confirms each claim. RemboAI never holds the money.
+- **Money goes where it should.** Owners choose an M-PESA till, Pochi la Biashara, direct Send Money, or Airtel Money destination. Daraja STK can also send an M-PESA prompt where configured. Manual transfers go to the shop, and the owner confirms each claim. RemboAI never holds the money.
 - **Their language.** English, Swahili and Sheng, typed or spoken, mixed in one sentence if that's how the customer talks.
-- **One bot, any number of salons.** Invite links and QR stickers carry each salon's slug, and a salon registers itself in a few minutes of chat.
+- **One bot, any number of shops.** Invite links and QR stickers carry each shop's slug, and an owner can register in a few minutes of chat.
 
 | Without RemboAI | With RemboAI |
 |---|---|
@@ -70,9 +70,9 @@ Both sides of the chair lose today. Customers walk away from a crowded shop, and
 | No-shows discovered at the appointment time | 24h and 2h reminders, a 3h check, and a 30m ETA to the customer and owner |
 | Owner is receptionist after closing | The model answers; the owner only gets what needs a human |
 
-| Customers | Salon owners |
+| Customers | Shop owners |
 |---|---|
-| Book in their own language, by text or voice note | Register the salon over chat in minutes |
+| Book in their own language, by text or voice note | Register the shop over chat in minutes |
 | Send a hairstyle photo and get matched to a real service | Bookings, cancellations, moves, away-days, deposits, all by chat |
 | Pay through an M-PESA STK prompt, a till, Pochi la Biashara, direct Send Money, or Airtel Money | Ask "who's booked Saturday?" in plain words and get the answer |
 | Get a receipt, then reminders | A daily summary, plus an instant note for every deposit |

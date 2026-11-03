@@ -1,4 +1,4 @@
-"""Model-assisted salon registration with evidence-backed field capture.
+"""Model-assisted business registration with evidence-backed field capture.
 
 The model handles natural conversation and identifies values in the owner's
 message. This module validates every extracted value against that message and
@@ -20,6 +20,7 @@ from app.agent.client import AgentUnavailable
 from app.agent.grounding import Facts, _times, check
 from app.channels import outbound
 from app.channels.whatsapp import mask
+from app.messages import ensure_help_hint
 
 from . import onboarding_chat as ob, smalltalk
 
@@ -192,10 +193,19 @@ def _prompt(state: dict, lang: str, policy: dict) -> str:
     registration = policy["registration"]
     instructions = {key: value for key, value in registration.items() if key != "reply_checks"}
     step = state.get("step", "ask_name")
+    history = state.get("agent_history")
+    first_reply = not state.get("help_hint_sent") and not (
+        isinstance(history, list) and any(item.get("role") == "assistant" for item in history if isinstance(item, dict))
+    )
+    first_reply_rule = (
+        f'This is the first reply in this registration chat. End with this short sentence: "{ob.t(lang, "help_hint")}"'
+        if first_reply else "The owner has already received the help invitation; do not repeat it unless relevant."
+    )
     return f"""{registration['identity']}
 {registration['purpose']}
 {"\n".join(policy["prompt_wrapper"])}
 Current language hint: {lang}.
+First-reply guidance: {first_reply_rule}
 Current validated registration details (JSON):
 {summary}
 Current step: {step}
@@ -573,6 +583,54 @@ async def _trace(ctx, *, mid, sender, text, steps, final_text, state_after, outc
         log.exception("could not write the registration agent trace")
 
 
+async def _answer_help(ctx, sender: str, pid: str, words: str, state: dict, mid) -> bool:
+    """Let the model explain the current setup step without giving it capture tools."""
+    lang = smalltalk.language(words, state.get("lang", "en"))
+    try:
+        policy = agent_policy.load_policy(getattr(ctx.settings, "agent_policy_path", None))
+        system = _prompt(state, lang, policy)
+        facts = Facts()
+        facts.add(system, _state_summary(state))
+        history = state.get("agent_history")
+        if isinstance(history, list):
+            facts.add(*(row.get("text", "") for row in history if isinstance(row, dict) and row.get("role") == "assistant"))
+            facts.add_user(*(row.get("text", "") for row in history if isinstance(row, dict) and row.get("role") == "user"))
+        facts.add_user(words)
+        await ctx.wa.typing(sender)
+        step = await ctx.agent.step(system, _history(state, words), [])
+    except Exception:
+        log.exception("registration help explanation failed; using the step guide")
+        return False
+
+    body = (step.text or "").strip()
+    problems = _registration_reply_problems(body, facts, policy) if body else ["empty help explanation"]
+    if not body or len(body) > 500 or problems:
+        log.warning("registration help explanation rejected: %s", "; ".join(problems))
+        return False
+
+    first_reply = not state.get("help_hint_sent") and not any(
+        row.get("role") == "assistant" for row in (state.get("agent_history") or []) if isinstance(row, dict)
+    )
+    if first_reply:
+        body = ensure_help_hint(body, lang)
+    state["lang"] = lang
+    state["help_hint_sent"] = True
+    stamp = datetime.now(ZoneInfo("UTC")).isoformat()
+    saved_history = list(state.get("agent_history") or [])
+    saved_history.extend([
+        {"role": "user", "text": words[:500], "ts": stamp},
+        {"role": "assistant", "text": body[:500], "ts": stamp},
+    ])
+    state["agent_history"] = saved_history[-guard.MAX_HISTORY * 2:]
+    await ob._save_session(ctx.pool, sender, state)
+    await _trace(ctx, mid=mid, sender=sender, text=words, steps=[{
+        "kind": "help_explanation", "accepted": True, "backend": step.backend, "model": step.model, "ms": step.ms,
+    }], final_text=body, state_after=state, outcome="registration_help", grounded=True,
+       problems=[], model=(step.backend, step.model), calls=1, ms=step.ms)
+    await ob._say(ctx, pid, sender, body)
+    return True
+
+
 async def advance(ctx, sender: str, pid: str, text: str, state: dict) -> bool:
     """Handle one registration turn; False asks the established deterministic flow to handle it."""
     if not enabled(ctx):
@@ -595,6 +653,9 @@ async def advance(ctx, sender: str, pid: str, text: str, state: dict) -> bool:
         await guard.strike(ctx.pool, sender, "registration_injection")
         await ob._resend(ctx, pid, sender, state, ob.t(state.get("lang", "en"), "ob_steer"))
         return True
+
+    if smalltalk.asks_help(words):
+        return await _answer_help(ctx, sender, pid, words, state, mid)
 
     if state.get("step") == "confirm_all" and ob.registration_complete(state) and ob.is_affirmative(words):
         return False  # onboarding_chat performs the only final create, after this guard check.
@@ -695,6 +756,12 @@ async def advance(ctx, sender: str, pid: str, text: str, state: dict) -> bool:
     else:
         state.pop("final_confirmation_pending", None)
 
+    first_reply = not state.get("help_hint_sent") and not any(
+        item.get("role") == "assistant" for item in (state.get("agent_history") or []) if isinstance(item, dict)
+    )
+    if first_reply:
+        body = ensure_help_hint(body, lang)
+    state["help_hint_sent"] = True
     history = state.get("agent_history")
     history = list(history) if isinstance(history, list) else []
     stamp = datetime.now(ZoneInfo("UTC")).isoformat()

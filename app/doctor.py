@@ -46,7 +46,7 @@ async def run_checks(s, http: httpx.AsyncClient, pool) -> list[Check]:
             "(SELECT count(*) FROM services v WHERE v.salon_id=s.id AND v.active) AS services, "
             "(SELECT count(*) FROM staff t WHERE t.salon_id=s.id AND t.active) AS staff "
             "FROM salons s LEFT JOIN salon_payment sp ON sp.salon_id=s.id WHERE s.active")]
-        add("database", True, f"connected, {len(salons)} active salon(s)")
+        add("database", True, f"connected, {len(salons)} active business(es)")
     except Exception as e:  # noqa: BLE001
         add("database", False, f"{e.__class__.__name__}: {e}")
     try:
@@ -58,18 +58,18 @@ async def run_checks(s, http: httpx.AsyncClient, pool) -> list[Check]:
         collisions = owner_customer_overlap + platform_salon_overlap + platform_client_overlap
         if collisions:
             add("identity separation", False,
-                f"{owner_customer_overlap} salon owner/customer overlap(s); platform owner matches {platform_salon_overlap} salon owner(s) and {platform_client_overlap} customer record(s). "
-                "Platform messages fail closed; use /owner <command> for an explicitly owned salon and a separate account for customer testing.", warn=True)
+                f"{owner_customer_overlap} business owner/customer overlap(s); platform owner matches {platform_salon_overlap} business owner(s) and {platform_client_overlap} customer record(s). "
+                "Platform messages fail closed; use /owner <command> for an explicitly owned business and a separate account for customer testing.", warn=True)
         elif platform_ids:
-            add("identity separation", True, "platform administrators, salon owners, and customers use separate IDs")
+            add("identity separation", True, "platform administrators, business owners, and customers use separate IDs")
     except Exception as e:  # noqa: BLE001
         add("identity separation", False, f"could not check role overlap: {e.__class__.__name__}", warn=True)
     if not salons:
-        add("salon", True, "no salon yet: message the bot REGISTER to set up the first business (or run scripts/seed_salon.py)")
+        add("business", True, "no business yet: message the bot REGISTER to set up the first one (or run scripts/seed_salon.py)")
 
     for sl in salons:
-        label = f"salon '{sl['name']}'"
-        add(label, sl["services"] > 0 and sl["staff"] > 0, f"{sl['staff']} stylist(s), {sl['services']} service(s)")
+        label = f"business '{sl['name']}'"
+        add(label, sl["services"] > 0 and sl["staff"] > 0, f"{sl['staff']} team member(s), {sl['services']} service(s)")
         if sl["deposit_kes"] > 0 and not sl["kind"]:
             add(label + " deposits", False,
                 "deposit is set but no payment destination: deposit bookings are paused. Set one with the owner commands: payment till 1234567, payment pochi 0712 345 678, payment send 0712 345 678, or payment airtel 0712 345 678.",
@@ -82,7 +82,7 @@ async def run_checks(s, http: httpx.AsyncClient, pool) -> list[Check]:
             approved_names = {r["name"] for r in await pool.fetch(
                 "SELECT name FROM reminder_templates WHERE salon_id=$1::uuid AND approved=true", sl["id"])}
             if not approved_names:
-                add(label + " reminders", False, "no approved reminder templates; WhatsApp reminders need per-salon approvals (see docs/TEMPLATES.md)", warn=True)
+                add(label + " reminders", False, "no approved reminder templates; WhatsApp reminders need per-business approvals (see docs/TEMPLATES.md)", warn=True)
             if sl["wa_phone_number_id"]:
                 required = {"reminder_soon"}
                 owner = sl.get("owner_wa_id")
@@ -120,7 +120,7 @@ async def run_checks(s, http: httpx.AsyncClient, pool) -> list[Check]:
             add("telegram", bool(me), f"bot @{me.get('username')} (id {me.get('id')})" if me else "Telegram refused the token (check TELEGRAM_BOT_TOKEN)")
             linked = any(sl.get("tg_bot_id") == f"tg:{me.get('id')}" for sl in salons) if me else False
             if me:
-                add("telegram salon", True, "a salon is linked to this bot" if linked else "no salon uses this bot yet: chat registration will link the first one",
+                add("telegram business", True, "a business is linked to this bot" if linked else "no business uses this bot yet: chat registration will link the first one",
                     warn=not linked)
         except (httpx.HTTPError, ValueError) as e:
             add("telegram", False, f"could not reach Telegram: {e.__class__.__name__}")

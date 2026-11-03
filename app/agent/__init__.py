@@ -1,7 +1,7 @@
 """The Meta model runs the receptionist; code keeps it honest.
 
 One customer message becomes one agent turn:
-  1. The model is briefed with the salon's real facts and the conversation, and given tools (find_slots, reserve_slot, ...).
+  1. The model is briefed with the business's verified facts and the conversation, and given tools (find_slots, reserve_slot, ...).
   2. It decides what to do, step by step. Each tool call is validated and executed by code against the real diary and money path.
   3. Verified action results go back to the model, whose customer-facing draft is checked against those facts before it is sent.
   4. If the model is down, out of budget, or still ungroundable after repair, code uses the verified outcome text or deterministic
@@ -18,7 +18,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from app import booking_flow as bf
-from app import guard, payments
+from app import guard, payments, smalltalk
 from app.channels import outbound
 from app.channels.whatsapp import mask
 from app.ratelimit import RateLimiter
@@ -26,6 +26,7 @@ from app.ratelimit import RateLimiter
 from .client import AgentModel, AgentUnavailable
 from .grounding import MAX_REPLY, check
 from .policy import PolicyError, load_policy, with_tool_descriptions
+from app.messages import ensure_help_hint
 from .prompt import system_prompt
 from .tools import TOOLS, Outcome, Toolbox
 
@@ -203,7 +204,7 @@ async def turn(ctx, salon: dict, client: dict, st: dict, services: list[dict], t
     if deposit <= 0:
         deposit_line = "Deposit: none is required."
     elif acct is None:
-        deposit_line = f"Deposit: KES {deposit} is configured, but the salon has no payment destination. Do not offer or confirm a deposit booking."
+        deposit_line = f"Deposit: KES {deposit} is configured, but the business has no payment destination. Do not offer or confirm a deposit booking."
     elif acct.get("manual"):
         deposit_line = (f"Deposit: KES {deposit} (never more than the service price). Customers pay manually to "
                         f"{payments.destination_label(acct)}. The owner verifies each payment claim; RemboAI does not initiate or verify these transfers.")
@@ -218,10 +219,12 @@ async def turn(ctx, salon: dict, client: dict, st: dict, services: list[dict], t
     except PolicyError:
         log.exception("booking receptionist policy is unavailable; using the established conversation flow")
         return False
+    first_reply = not any(h.get("role") == "assistant" for h in st.get("history", []) if isinstance(h, dict))
+    help_example = sorted(services, key=lambda service: service["name"])[0]["name"] if services else "service"
     system = system_prompt(salon=salon, services=services, staff_by_service=staff_by_service, now=now, st=view, deposit_line=deposit_line,
                            channel="Telegram" if chat.to.startswith("tg:") else "WhatsApp", lang_hint="Swahili or Sheng" if lang == "sw" else "English",
-                           policy=policy)
-    tools = with_tool_descriptions(TOOLS, policy, "booking_receptionist")
+                           policy=policy, first_reply=first_reply, help_example=help_example)
+    tools = [] if smalltalk.asks_help(text) else with_tool_descriptions(TOOLS, policy, "booking_receptionist")
     facts = toolbox.facts
     facts.add(system, *[(h.get("text") or "") for h in st.get("history", [])[-10:] if h.get("role") == "assistant"])
     facts.add_user(*[(h.get("text") or "") for h in st.get("history", [])[-10:] if h.get("role") != "assistant"], text)
@@ -243,6 +246,8 @@ async def turn(ctx, salon: dict, client: dict, st: dict, services: list[dict], t
     body, buttons = _compose(outcomes, run.lead)
     if not body:
         return False
+    if first_reply:
+        body = ensure_help_hint(body, lang)
     stamp = datetime.now(ZoneInfo("UTC")).isoformat()
     after = {**toolbox.st, "history": (toolbox.base_history + [{"role": "assistant", "text": body, "ts": stamp}])[-guard.MAX_HISTORY * 2:]}
     await _trace(ctx, mid=mid, salon=salon, sender=mask(chat.to), user_text=text, steps=run.steps, final_text=body, buttons=buttons, state_after=after,
@@ -279,7 +284,7 @@ async def owner_turn(ctx, salon: dict, to: str, text: str, tz: ZoneInfo, now: da
     try:
         policy = load_policy(getattr(ctx.settings, "agent_policy_path", None))
     except PolicyError:
-        log.exception("salon owner assistant policy is unavailable; using the established conversation flow")
+        log.exception("business owner assistant policy is unavailable; using the established conversation flow")
         return False
     mid = outbound.current_message_id()
     if mid:
@@ -293,10 +298,22 @@ async def owner_turn(ctx, salon: dict, to: str, text: str, tz: ZoneInfo, now: da
         pass
     toolbox = AdminToolbox(ctx, salon, to, tz, now, text)
     services = await bf._catalog(ctx, salon["id"])
-    system = admin_prompt(salon, now, policy, services)
+    lang = smalltalk.language(text, "en")
+    hint_at = saved.get("owner_help_hint_at") if isinstance(saved, dict) else None
+    recent_hint = False
+    if hint_at:
+        try:
+            stamp = datetime.fromisoformat(hint_at) if isinstance(hint_at, str) else hint_at
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=ZoneInfo("UTC"))
+            recent_hint = 0 <= (datetime.now(ZoneInfo("UTC")) - stamp.astimezone(ZoneInfo("UTC"))).total_seconds() <= 600
+        except (TypeError, ValueError):
+            recent_hint = False
+    first_reply = not history and not recent_hint
+    system = admin_prompt(salon, now, policy, services, lang=lang, first_reply=first_reply)
     toolbox.facts.prices.update(int(service["price_kes"]) for service in services)
     toolbox.facts.prices.add(int(salon.get("deposit_kes") or 0))
-    tools = with_tool_descriptions(ADMIN_TOOLS, policy, "salon_owner_assistant")
+    tools = [] if smalltalk.asks_help(text) else with_tool_descriptions(ADMIN_TOOLS, policy, "salon_owner_assistant")
     history = history if isinstance(history, list) else []
     messages = [*history[-6:], {"role": "user", "content": text[:500]}]
     toolbox.facts.add(system)
@@ -309,6 +326,8 @@ async def owner_turn(ctx, salon: dict, to: str, text: str, tz: ZoneInfo, now: da
                      outcome="unavailable" if run.unavailable else "keyword_flow", grounded=False if run.problems else None, problems=run.problems,
                      model=run.first_model, calls=run.calls, ms=run.ms)
         return False
+    if first_reply:
+        body = ensure_help_hint(body, lang)
     await _trace(ctx, mid=mid, salon=salon, sender="owner", user_text=text, steps=run.steps, final_text=body, buttons=None, state_after=None,
                  outcome="agent" if run.lead else "templates", grounded=not run.problems, problems=run.problems, model=run.first_model, calls=run.calls, ms=run.ms)
     new_hist = [*history[-4:], {"role": "user", "content": text[:300]}, {"role": "assistant", "content": body[:500]}]
@@ -316,6 +335,7 @@ async def owner_turn(ctx, salon: dict, to: str, text: str, tz: ZoneInfo, now: da
     await ctx.pool.execute(
         "INSERT INTO conversations (salon_id, wa_id, state) VALUES ($1::uuid,$2,$3::jsonb) ON CONFLICT (salon_id, wa_id) DO UPDATE SET state="
         "COALESCE(conversations.state,'{}'::jsonb) || EXCLUDED.state, updated_at=now()", salon["id"], to,
-        json.dumps({"owner_history": new_hist, "owner_history_at": history_at}))
+        json.dumps({"owner_history": new_hist, "owner_history_at": history_at,
+                    "owner_help_hint_sent": True, "owner_help_hint_at": history_at}))
     await chat.text(body)
     return True

@@ -1,7 +1,7 @@
-"""Chat onboarding for salon owners.
+"""Chat onboarding for barbershop and salon owners.
 
 A model may make the conversation natural and extract values, while code
-validates the data, enforces limits, and controls salon creation and invites.
+    validates the data, enforces limits, and controls business creation and invites.
 The deterministic flow remains available whenever the agent is disabled or
 unavailable.
 """
@@ -377,7 +377,7 @@ def wants_customer_booking(text: str) -> bool:
 
 
 async def similar_salon(pool, name: str) -> str | None:
-    """An existing salon name close enough that this may be a duplicate registration."""
+    """An existing business name close enough that this may be a duplicate registration."""
     names = [r["name"] for r in await pool.fetch("SELECT name FROM salons WHERE active")]
     best, score = None, 0.0
     for other in names:
@@ -768,7 +768,7 @@ async def _go_live(ctx, pid: str, sender: str, state: dict) -> bool:
         await _present_final_confirmation(ctx, pid, sender, state)
         return False
     if not registration_complete(state):
-        log.error("refusing to create an incomplete salon registration for %s", sender[-4:])
+        log.error("refusing to create an incomplete business registration for %s", sender[-4:])
         state["step"] = registration_next_step(state)
         await _save_session(ctx.pool, sender, state)
         await _resend(ctx, pid, sender, state, t(state.get("lang", "en"), "ob_steer"))
@@ -851,6 +851,47 @@ def _question_for(state: dict) -> str:
                  lines=_service_lines(data.get("services", [])), fix=ex["fix"],
                  hours=f"{data.get('open', '')}-{data.get('close', '')}", deposit=data.get("deposit", 0), payment=payment)
     return t(lang, "ob_ask_name")
+
+
+def _registration_help(state: dict) -> str:
+    lang = state.get("lang", "en")
+    step = state.get("step", "ask_name")
+    english = {
+        "confirm_platform_owner": "This checks which account will own the business.",
+        "ask_name": "Enter the name customers use for your business, for example, Brian's Kinyozi.",
+        "confirm_name": "Check the similar business name. Choose whether it is the same business or a different one.",
+        "ask_type": "Choose one type: 1 for a barbershop or kinyozi, 2 for a beauty salon.",
+        "ask_owner": "Enter your name and the names of anyone who serves customers, for example, Amina, Brian.",
+        "ask_prices": "List each service with its price in KES and how long it takes, for example: Fade, [your price], [minutes].",
+        "confirm_services": "Check the service names and prices. Say YES if they are right, or tell me what to change.",
+        "ask_durations": "Enter how long each service takes, for example, 30 minutes or 1 hour.",
+        "ask_hours": "Tell me when you open and close, for example, 8am to 8pm.",
+        "ask_deposit": "Choose the amount customers pay to hold a booking, in KES. Enter 0 if you do not want a deposit.",
+        "ask_payment_method": "Choose a seven-digit M-PESA till or a phone number. For a phone, choose Pochi la Biashara, M-PESA Send Money, or Airtel Money.",
+        "ask_till_number": "Send only the seven-digit M-PESA till number.",
+        "ask_phone_type": "Tell me whether the number is for M-PESA Pochi la Biashara, M-PESA Send Money, or Airtel Money.",
+        "ask_payment_phone": "Send the business phone number customers should pay.",
+        "confirm_all": "Review the setup summary. Say YES only if all details are correct, or name what you want changed.",
+    }
+    swahili = {
+        "confirm_platform_owner": "Hii inathibitisha akaunti itakayomiliki biashara.",
+        "ask_name": "Tuma jina ambalo wateja wanaijua biashara yako, kwa mfano, Kinyozi cha Brian.",
+        "confirm_name": "Kagua jina linalofanana na biashara nyingine. Chagua kama ni biashara hiyo hiyo au tofauti.",
+        "ask_type": "Chagua aina moja: 1 kwa kinyozi, 2 kwa saluni ya urembo.",
+        "ask_owner": "Tuma jina lako na majina ya wahudumu wengine, kwa mfano, Amina, Brian.",
+        "ask_prices": "Orodhesha kila huduma, bei yake kwa KES, na muda wake, kwa mfano: Fade, [bei yako], [dakika].",
+        "confirm_services": "Kagua majina ya huduma na bei. Jibu NDIYO kama ni sahihi, au taja unachotaka kubadilisha.",
+        "ask_durations": "Tuma muda wa kila huduma, kwa mfano, dakika 30 au saa 1.",
+        "ask_hours": "Tuma saa za kufungua na kufunga, kwa mfano, saa 2 asubuhi hadi saa 2 usiku.",
+        "ask_deposit": "Chagua amana ya KES ya kushikilia miadi. Tuma 0 kama hutaki amana.",
+        "ask_payment_method": "Chagua till ya M-PESA yenye tarakimu saba au namba ya simu. Kwa simu, chagua Pochi la Biashara, Tuma Pesa ya M-PESA, au Airtel Money.",
+        "ask_till_number": "Tuma namba ya till ya M-PESA yenye tarakimu saba pekee.",
+        "ask_phone_type": "Taja huduma ya namba hiyo: Pochi la Biashara ya M-PESA, Tuma Pesa ya M-PESA, au Airtel Money.",
+        "ask_payment_phone": "Tuma namba ya biashara ambayo wateja watatumia kulipa.",
+        "confirm_all": "Kagua muhtasari wa usajili. Jibu NDIYO ikiwa kila kitu ni sahihi, au taja unachotaka kubadilisha.",
+    }
+    explanation = (swahili if lang == "sw" else english).get(step, english["ask_name"])
+    return f"{explanation}\n\n{t(lang, 'ob_help_continue')}"
 
 
 async def _present_final_confirmation(ctx, pid: str, sender: str, state: dict) -> None:
@@ -951,6 +992,13 @@ async def advance(ctx, sender: str, pid: str, text: str, media: dict | None = No
         await _say(ctx, pid, sender, t(smalltalk.language(words, lang), "ob_cancelled"))
         return True
     step = state.get("step", "ask_name")
+    if smalltalk.asks_help(words):
+        if getattr(ctx, "agent", None) is not None and getattr(ctx.settings, "agent_mode", "off") == "on":
+            from .onboarding_agent import advance as agent_advance
+            if await agent_advance(ctx, sender, pid, words, state):
+                return True
+        await _say(ctx, pid, sender, _registration_help(state))
+        return True
     if step == "confirm_platform_owner":
         # This only acknowledges the ownership notice; salon creation still
         # requires the separate, explicit final confirmation below.
@@ -1293,7 +1341,8 @@ async def begin(ctx, sender: str, pid: str, text: str) -> bool:
     from . import platform
     is_platform_owner = platform.is_platform(ctx.settings, sender)
     step = "confirm_platform_owner" if is_platform_owner else "ask_name"
-    state = {"step": step, "data": {}, "lang": smalltalk.language(text, detect_lang(text)), "stack": []}
+    state = {"step": step, "data": {}, "lang": smalltalk.language(text, detect_lang(text)), "stack": [],
+             "help_hint_sent": is_platform_owner or registration_start_only(text)}
     await _save_session(ctx.pool, sender, state)
     if is_platform_owner:
         await _say(ctx, pid, sender, t(state["lang"], "ob_platform_owner_confirm"))
@@ -1303,5 +1352,7 @@ async def begin(ctx, sender: str, pid: str, text: str) -> bool:
         from .onboarding_agent import advance as agent_advance
         if await agent_advance(ctx, sender, pid, text, state):
             return True
+    state["help_hint_sent"] = True
+    await _save_session(ctx.pool, sender, state)
     await _say(ctx, pid, sender, t(state["lang"], "ob_ask_name"))
     return True

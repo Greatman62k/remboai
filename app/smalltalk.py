@@ -57,7 +57,13 @@ _USER_IDENTITY = re.compile(
     r"am i (?:(?:a|the) )?(?:(?:business|salon|platform|customer|account) )?owner|"
     r"am i (?:(?:a|the) )?(?:customer|platform admin)|mimi ni nani|nafasi yangu ni nini|jukumu langu ni nini)\b", re.I)
 _HELP = re.compile(r"^\W*(help|msaada|nisaidie|/help)\W*$", re.I)
-_HELP_Q = re.compile(r"\b(what can you do|how do i use|how does this work|jinsi ya kutumia|how to use)\b", re.I)
+_HELP_Q = re.compile(
+    r"\b(?:what can you do|what can you help me with|how do i use|how does this work|how to use|"
+    r"can you explain(?: this| that| the options| the commands)?|could you explain(?: this| that| the options| the commands)?|"
+    r"explain (?:the )?(?:help|options|commands)|what does (?:the )?[\w -]{1,40}(?:command )?(?:do|mean)|"
+    r"what do (?:these )?commands do|what do i do here|"
+    r"jinsi ya kutumia|naweza kufanya nini|ninaweza kufanya nini|nawezaje kutumia|hii inafanyaje kazi|"
+    r"amri hizi zina maana gani|amri ya [\w ]{1,35} ina maana gani|nieleze)\b", re.I)
 
 
 def asks_identity(text: str) -> bool:

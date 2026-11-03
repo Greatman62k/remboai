@@ -1,7 +1,7 @@
 """The checker between the model's words and the customer.
 
 The model writes the reply; code decides whether it may be sent. A reply is grounded when every number, time, price and
-link in it can be found in what the model was actually given: the salon facts, the conversation, and tool results.
+link in it can be found in what the model was actually given: the business facts, the conversation, and tool results.
 Anything else (an invented price, a slot that was never offered, a made-up phone number, a claim that money arrived)
 is rejected, and the turn falls back to the code-written templates built from the same tool results."""
 from __future__ import annotations
@@ -22,7 +22,7 @@ _BOOKED = re.compile(r"\b(confirmed|you'?re booked|you are booked|booking is (?:
 _HELD = re.compile(r"\b(?:held|reserved)\s+(?:your\s+)?(?:slot|appointment|place|nafasi)\b|\b(?:your\s+)?(?:slot|appointment)\s+(?:is|has been)\s+(?:held|reserved)\b|\b(?:i|we)(?:'ve| have)?\s+(?:just\s+)?(?:held|reserved)\b|\bon hold for you\b", re.I)
 _CANCELLED = re.compile(r"\b(cancell?ed|nimeghairi|imeghairiwa|nimefuta|umeghairi)\b", re.I)
 _WAITLISTED = re.compile(r"\b(?:on|joined|added to|put on)\s+(?:the\s+)?(?:waitlist|waiting list)\b|\b(?:nimekuweka|umewekwa)\s+(?:kwenye\s+)?waitlist\b", re.I)
-_HANDOFF = re.compile(r"\b(?:i|we)(?:'ve| have)?\s+(?:notified|informed|contacted|told|passed this to)\s+(?:the\s+)?(?:salon )?(?:owner|manager)\b|\b(?:salon )?(?:owner|manager)\s+(?:has been|was)\s+(?:notified|informed|contacted)\b|\b(?:salon )?(?:owner|manager)\s+will\s+(?:contact|reply|respond|get back to|call)\s+(?:you)?\b|\b(?:salon )?(?:owner|manager)\s+will be in touch\b", re.I)
+_HANDOFF = re.compile(r"\b(?:i|we)(?:'ve| have)?\s+(?:notified|informed|contacted|told|passed this to)\s+(?:the\s+)?(?:(?:salon|business|barbershop) )?(?:owner|manager)\b|\b(?:(?:salon|business|barbershop) )?(?:owner|manager)\s+(?:has been|was)\s+(?:notified|informed|contacted)\b|\b(?:(?:salon|business|barbershop) )?(?:owner|manager)\s+will\s+(?:contact|reply|respond|get back to|call)\s+(?:you)?\b|\b(?:(?:salon|business|barbershop) )?(?:owner|manager)\s+will be in touch\b", re.I)
 _POLICY = re.compile(r"\b(waiv\w*|discount\w*|free of charge|no deposit|punguzo|msamaha|bila amana|hakuna amana|bure)\b", re.I)
 _LEAK = re.compile(r"\b(tool call|function call|system prompt|developer message|find_slots|reserve_slot|cancel_booking|my_bookings|join_waitlist|hand_to_owner|list_businesses|platform_totals|business_status|json)\b|<think>|```", re.I)
 _DENIED_PAID = re.compile(r"\b(?:not|never|no|isn't|hasn't|has not|is not|wasn't|was not)\s+(?:yet\s+|been\s+)?(?:paid|received)\b", re.I)
@@ -37,9 +37,9 @@ MAX_REPLY = 700
 @dataclass
 class Facts:
     """Everything the model was allowed to know this turn."""
-    text: list[str] = field(default_factory=list)       # salon facts, earlier replies, tool results
+    text: list[str] = field(default_factory=list)       # business facts, earlier replies, tool results
     user: list[str] = field(default_factory=list)       # what the customer wrote: may be echoed as a time, never as a number or a link
-    deposit_none: bool = False                            # the salon really asks for no deposit
+    deposit_none: bool = False                            # the business really asks for no deposit
     reporting: bool = False                               # owner-facing: tool results may be reported as paid/confirmed
     prices: set[int] = field(default_factory=set)        # every KES amount the model may mention
     required_literals: set[str] = field(default_factory=set)  # transaction details that must reach the customer verbatim

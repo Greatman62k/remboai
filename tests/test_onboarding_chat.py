@@ -220,11 +220,11 @@ def test_chat_onboarding_registers_a_salon_with_no_model_calls():
         sender = f"tg:{OWNER_CHAT}"
         async with client() as c:
             await post_tg(c, tg_update(1, OWNER_CHAT, "/start register"))
-            assert "salon name" in out.tg_bodies(str(OWNER_CHAT))[-1].lower()
+            assert "shop name" in out.tg_bodies(str(OWNER_CHAT))[-1].lower()
             await post_tg(c, tg_update(2, OWNER_CHAT, "Zuri Cuts"))
             assert "different" in out.tg_bodies(str(OWNER_CHAT))[-1].lower()
             await post_tg(c, tg_update(3, OWNER_CHAT, "NO"))
-            assert "salon name" in out.tg_bodies(str(OWNER_CHAT))[-1].lower()
+            assert "shop name" in out.tg_bodies(str(OWNER_CHAT))[-1].lower()
             await post_tg(c, tg_update(4, OWNER_CHAT, "Amina Braids"))
             assert "barbershop" in out.tg_bodies(str(OWNER_CHAT))[-1].lower()
             await post_tg(c, tg_update(5, OWNER_CHAT, "2"))
@@ -287,7 +287,7 @@ def test_onboarding_saves_an_airtel_money_destination_only_after_explicit_type_c
         await onboarding_chat.advance(ctx, sender, BOT, "AIRTEL")
         phone_prompt = out.tg_bodies(chat)[-1]
         assert "mobile number" in phone_prompt
-        assert "where this salon receives payments" in phone_prompt
+        assert "where your shop receives payments" in phone_prompt
         assert "no separate contact number is needed" in phone_prompt
         await onboarding_chat.advance(ctx, sender, BOT, "0712 345 678")
         summary = out.tg_bodies(chat)[-1]
@@ -473,7 +473,7 @@ def test_affirmations_are_never_stored_as_names():
         sender, chat = "tg:8002", "8002"
         await onboarding_chat.begin(ctx, sender, BOT, "/start register")
         await onboarding_chat.advance(ctx, sender, BOT, "yes")
-        assert "salon name" in out.tg_bodies(chat)[-1].lower()
+        assert "shop name" in out.tg_bodies(chat)[-1].lower()
         await onboarding_chat.advance(ctx, sender, BOT, "Real Salon")
         await onboarding_chat.advance(ctx, sender, BOT, "1")
         await onboarding_chat.advance(ctx, sender, BOT, "ok")
@@ -569,11 +569,11 @@ def test_interruptions_back_and_corrections_stay_in_setup():
         await onboarding_chat.begin(ctx, sender, BOT, "/start register")
         await onboarding_chat.advance(ctx, sender, BOT, "Ok")
         assert "continue with the setup" in out.tg_bodies(chat)[-1].lower()
-        assert "salon name" in out.tg_bodies(chat)[-1].lower()
+        assert "shop name" in out.tg_bodies(chat)[-1].lower()
         await onboarding_chat.advance(ctx, sender, BOT, "Amina Cuts")
         assert "barbershop" in out.tg_bodies(chat)[-1].lower()
         await onboarding_chat.advance(ctx, sender, BOT, "BACK")
-        assert "salon name" in out.tg_bodies(chat)[-1].lower()
+        assert "shop name" in out.tg_bodies(chat)[-1].lower()
         await onboarding_chat.advance(ctx, sender, BOT, "Amina Cuts")
         await onboarding_chat.advance(ctx, sender, BOT, "2")
         await onboarding_chat.advance(ctx, sender, BOT, "nataka fade")
@@ -691,7 +691,7 @@ def test_plain_register_sentences_begin_onboarding_in_either_language():
             bodies = out.tg_bodies("7001")
             assert len(bodies) == 1
             assert "welcome!" in bodies[0].lower()
-            assert "salon name" in bodies[0].lower()
+            assert "shop name" in bodies[0].lower()
             assert await pool.fetchval("SELECT state->>'step' FROM onboarding_sessions WHERE sender='tg:7001'") == "ask_name"
             await post_tg(c, tg_update(2, 7002, "nataka kusajili saluni yangu"))
             bodies = out.tg_bodies("7002")

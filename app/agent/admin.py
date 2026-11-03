@@ -1,4 +1,4 @@
-"""The owner's assistant reads bookings and payment totals through tools, prepares a verified daily summary, and generates a requested salon invite.
+"""The owner's assistant reads bookings and payment totals through tools, prepares a verified daily summary, and generates a requested business invite.
 It can cancel a booking only when the owner clearly asks, through the same code path as `cancel` (the customer is told and refunds are queued).
 Everything it says about bookings and money must come from live context or a tool result."""
 from __future__ import annotations
@@ -45,21 +45,27 @@ ADMIN_TOOLS = [
 ADMIN_NAMES = {x["function"]["name"] for x in ADMIN_TOOLS}
 
 
-def admin_prompt(salon: dict, now: datetime, policy: dict, services: list[dict] | None = None) -> str:
+def admin_prompt(salon: dict, now: datetime, policy: dict, services: list[dict] | None = None,
+                 *, lang: str = "en", first_reply: bool = False) -> str:
     cal = "\n".join(f"{(now + timedelta(days=i - 7)).strftime('%a')} = {(now + timedelta(days=i - 7)).date().isoformat()}" for i in range(22))
     persona = policy["salon_owner_assistant"]
     menu = "\n".join(
         f"- {service['name']}: KES {int(service['price_kes'])}, {int(service['duration_min'])} minutes"
         for service in services or []
     ) or "No active services are listed."
+    first_reply_rule = (
+        f'This is your first reply in this chat. End with: "{t(lang, "help_hint")}"'
+        if first_reply else "The owner already received the help invitation in this chat."
+    )
     return f"""{persona['identity']}
 {persona['purpose']}
 {"\n".join(policy["prompt_wrapper"])}
 {json.dumps(persona, ensure_ascii=False, indent=2)}
 
-LIVE SALON CONTEXT
-Salon: {salon['name']}
-Authenticated sender: verified owner or manager for this salon.
+LIVE BUSINESS CONTEXT
+Business: {salon['name']}
+Authenticated sender: verified owner or manager for this business.
+First-reply guidance: {first_reply_rule}
 Today is {now.strftime('%A')} {now.date().isoformat()}, time {now.strftime('%H:%M')} (Africa/Nairobi). Calendar:
 {cal}
 Opening hours:
@@ -67,6 +73,10 @@ Opening hours:
 Booking deposit: KES {int(salon.get('deposit_kes') or 0)} per booking; zero means no deposit is required.
 Services and prices:
 {menu}
+
+OWNER HELP GUIDE
+{t(lang, "owner_help")}
+Explain any item in simpler words if asked. A question about what a command does is not a request to run it.
 """
 
 
