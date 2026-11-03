@@ -643,7 +643,7 @@ def test_doctor_reports_what_works_and_says_what_to_fix():
         payment_answer = {
             "is_payment_confirmation": True, "provider": "mpesa", "currency": "KES", "amount": 10,
             "reference": "RMB2AI7K9Q", "date": "2026-11-03", "time": "10:47",
-            "recipient": "REMBOAI DEMO SALON", "confidence": 0.99,
+            "recipient": "REMBOAI DEMO BARBERSHOP", "confidence": 0.99,
         }
 
         def handler(req):
