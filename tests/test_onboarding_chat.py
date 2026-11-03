@@ -482,7 +482,8 @@ def test_affirmations_are_never_stored_as_names():
         await onboarding_chat.advance(ctx, sender, BOT, "Real Salon")
         await onboarding_chat.advance(ctx, sender, BOT, "1")
         await onboarding_chat.advance(ctx, sender, BOT, "ok")
-        assert "stylist" in out.tg_bodies(chat)[-1].lower()
+        assert "what is your name" in out.tg_bodies(chat)[-1].lower()
+        assert "if others work with you" in out.tg_bodies(chat)[-1].lower()
         await pool.close()
     asyncio.run(run())
 
@@ -499,7 +500,8 @@ def test_greetings_are_not_stored_as_stylist_names():
         await onboarding_chat.advance(ctx, sender, BOT, "Greet Salon")
         await onboarding_chat.advance(ctx, sender, BOT, "1")
         await onboarding_chat.advance(ctx, sender, BOT, "hello")
-        assert "stylist" in out.tg_bodies(chat)[-1].lower()
+        assert "what is your name" in out.tg_bodies(chat)[-1].lower()
+        assert "if others work with you" in out.tg_bodies(chat)[-1].lower()
         await pool.close()
     asyncio.run(run())
 
@@ -702,7 +704,7 @@ def test_plain_register_sentences_begin_onboarding_in_either_language():
             bodies = out.tg_bodies("7002")
             assert len(bodies) == 1
             assert "karibu" in bodies[0].lower() and "nitakuandalia" in bodies[0].lower()
-            assert "inaitwaje" in bodies[0].lower()
+            assert "jina gani" in bodies[0].lower()
         assert out.calls == []
         await pool.close()
     asyncio.run(run())
