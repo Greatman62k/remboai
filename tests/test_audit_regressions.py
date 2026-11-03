@@ -1063,7 +1063,7 @@ async def test_off_and_on_clear_the_cached_salon_row():
     assert await _db.salon_by_phone_id(pool, PID, app.state.ctx.settings) is not None
     assert _db._salon_cache
     async with client() as c:
-        await post_tg(c, tg_update(1, 9001, "off zuri-cuts"))
+        await post_tg(c, tg_update(1, 9001, "off Zuri Cuts"))
     assert not _db._salon_cache
     await pool.close()
 
