@@ -30,15 +30,17 @@ def test_platform_admin_help_and_role_are_scannable_plain_text_lists():
 
     for text in (platform.HELP_TEXT, platform.ROLE_TEXT):
         assert "1. " in text
-        assert "del <business> YES" in text
+        assert "del Brian's Kinyozi YES" in text
         assert "\n- " not in text
-    assert platform.HELP_TEXT.startswith("Platform administrator commands\n")
+    assert platform.HELP_TEXT.startswith("Platform administrator help\n")
     assert platform.ROLE_TEXT.startswith("You are authenticated as a RemboAI platform administrator.")
     for lang in ("en", "sw"):
         owner_help = t(lang, "owner_help")
-        assert owner_help.count("\n") == 10
-        assert "\n1. " in owner_help and "\n10. " in owner_help
+        assert owner_help.count("\n") == 7
+        assert "\n1. " in owner_help and "\n7. " in owner_help
         assert "\n- " not in owner_help
+    assert "payment pochi 0712 345 678" in t("en", "owner_help")
+    assert "payment send 0712 345 678" in t("sw", "owner_help")
 
 
 def test_platform_model_reply_is_cleaned_for_plain_text_chat():
@@ -57,6 +59,8 @@ def test_platform_model_failure_is_explained_before_command_fallback():
     body = _fallback_reply(SimpleNamespace(unavailable=True, problems=[]))
     assert body.startswith("I couldn't get an assistant response just now.")
     assert platform.HELP_TEXT in body
+    sw_body = _fallback_reply(SimpleNamespace(unavailable=True, problems=[]), "sw")
+    assert platform.help_text("sw") in sw_body
 
 
 def test_primary_and_backup_platform_admin_ids_are_recognized():
@@ -118,7 +122,7 @@ def test_platform_owner_defaults_to_hub_and_can_route_only_to_owned_salon():
 
             await pool.execute("UPDATE salons SET owner_wa_id='tg:other'")
             await post_tg(c, tg_update(3, 9001, "/owner today"))
-            assert "No salon owned by this account" in out.tg_bodies("9001")[-1]
+            assert "No business owned by this account" in out.tg_bodies("9001")[-1]
             assert await pool.fetchval("SELECT count(*) FROM bookings") == 0
         await pool.close()
     asyncio.run(run())
@@ -138,7 +142,7 @@ def test_platform_owner_can_register_own_salon_after_confirming_ownership():
             assert "Businesses:" in out.tg_bodies("9001")[-1]
 
             await post_tg(c, tg_update(3, 9001, "I want to register a business"))
-            assert "salon owned by the same account" in out.tg_bodies("9001")[-1]
+            assert "business owned by the same account" in out.tg_bodies("9001")[-1]
             assert await pool.fetchval("SELECT state->>'step' FROM onboarding_sessions WHERE sender=$1", P) == "confirm_platform_owner"
             assert await pool.fetchval("SELECT count(*) FROM salons") == initial_salons
 
@@ -168,12 +172,12 @@ def test_platform_assistant_uses_read_only_tools_for_natural_questions():
         pool, out, salon = await build(DSN, platform_owner_id=P, agent_mode="on", till=False)
         moves = iter([
             ("tool", "platform_totals", {}),
-            ("say", "The platform currently has 1 salon, which is active, and 0 bookings."),
+            ("say", "The platform currently has 1 business, which is active, and 0 bookings."),
         ])
         out.agent = lambda _body: next(moves)
         async with client() as c:
             await post_tg(c, tg_update(1, 9001, "Can you summarize how the platform is doing?"))
-            assert "platform currently has 1 salon" in out.tg_bodies("9001")[-1]
+            assert "platform currently has 1 business" in out.tg_bodies("9001")[-1]
             assert len(out.agent_requests) == 2
             tool_names = {tool["function"]["name"] for tool in out.agent_requests[0]["tools"]}
             assert tool_names == {"list_businesses", "platform_totals", "business_status"}
@@ -248,7 +252,7 @@ def test_shops_and_stats_list_everything():
             body = out.tg_bodies("9001")[-1]
             assert "Zuri Cuts" in body and "Malaika" in body
             await post_tg(c, tg_update(2, 9001, "stats"))
-            assert "Salons: 2" in out.tg_bodies("9001")[-1]
+            assert "Businesses: 2" in out.tg_bodies("9001")[-1]
         await pool.close()
     asyncio.run(run())
 

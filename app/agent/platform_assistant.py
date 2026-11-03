@@ -6,9 +6,10 @@ import logging
 import re
 from datetime import datetime, timezone
 
-from app import platform
+from app import platform, smalltalk
 from app.channels import outbound
 from app.agent.grounding import Facts
+from app.messages import ensure_help_hint, t
 from app.agent.policy import PolicyError, load_policy, render_assistant_prompt, with_tool_descriptions
 from app.agent.tools import _fn
 
@@ -35,14 +36,26 @@ def _clean_reply(text: str) -> str:
     return body.strip()
 
 
-def _fallback_reply(run) -> str:
+def _fallback_reply(run, lang: str = "en") -> str:
     if run.unavailable:
-        status = "I couldn't get an assistant response just now."
+        status = "Sina jibu la msaidizi kwa sasa." if lang == "sw" else "I couldn't get an assistant response just now."
     elif run.problems:
-        status = "I couldn't verify a safe answer just now."
+        status = "Singeweza kuthibitisha jibu salama kwa sasa." if lang == "sw" else "I couldn't verify a safe answer just now."
     else:
-        status = "I couldn't complete that answer just now."
-    return f"{status} Here are the platform commands you can use:\n\n{platform.HELP_TEXT}"
+        status = "Singeweza kukamilisha jibu hilo kwa sasa." if lang == "sw" else "I couldn't complete that answer just now."
+    return f"{status}\n\n{platform.help_text(lang)}"
+
+
+def _system_prompt(policy: dict, lang: str, first_reply: bool) -> str:
+    base = render_assistant_prompt(policy, "platform_admin")
+    first = (f'\nFirst reply: end with "{t(lang, "help_hint")}" and keep the invitation brief.'
+             if first_reply else "")
+    return (
+        f"{base}\n\nPLATFORM HELP REFERENCE, ENGLISH\n{platform.help_text('en')}"
+        f"\n\nPLATFORM HELP REFERENCE, KISWAHILI\n{platform.help_text('sw')}"
+        f"\nExplain commands in everyday language, with a short example, when asked what they do. "
+        f"A question about a command does not authorize running it.{first}"
+    )
 
 
 class PlatformToolbox:
@@ -78,8 +91,8 @@ class PlatformToolbox:
 
     async def t_platform_totals(self, _args: dict) -> dict:
         row = await self.ctx.pool.fetchrow(
-            "SELECT (SELECT count(*) FROM salons)::int AS salons, "
-            "(SELECT count(*) FROM salons WHERE active)::int AS active_salons, "
+            "SELECT (SELECT count(*) FROM salons)::int AS businesses, "
+            "(SELECT count(*) FROM salons WHERE active)::int AS active_businesses, "
             "(SELECT count(*) FROM bookings)::int AS bookings, "
             "(SELECT count(*) FROM clients)::int AS clients, "
             "(SELECT count(*) FROM payments WHERE status='paid')::int AS paid_deposits")
@@ -128,6 +141,8 @@ async def turn(ctx, msg) -> bool:
     if not isinstance(history, list):
         history = []
     messages = [item for item in history[-8:] if isinstance(item, dict) and item.get("role") in ("user", "assistant")]
+    first_reply = not any(item.get("role") == "assistant" for item in messages)
+    lang = smalltalk.language(msg.text or "", "en")
     messages.append({"role": "user", "content": (msg.text or "")[:1000]})
 
     toolbox = PlatformToolbox(ctx)
@@ -136,7 +151,7 @@ async def turn(ctx, msg) -> bool:
     except PolicyError:
         log.exception("platform assistant policy is unavailable")
         return False
-    system = render_assistant_prompt(policy, "platform_admin")
+    system = _system_prompt(policy, lang, first_reply)
     tools = with_tool_descriptions(PLATFORM_TOOLS, policy, "platform_admin")
     toolbox.facts.add(system)
     toolbox.facts.add_user(*[item.get("content", "") for item in messages if item.get("role") == "user"])
@@ -149,7 +164,7 @@ async def turn(ctx, msg) -> bool:
                          outcome="unavailable", grounded=None, problems=run.problems, model=run.first_model,
                          calls=run.calls, ms=run.ms)
             return False
-        body = _fallback_reply(run)
+        body = _fallback_reply(run, lang)
         await _trace(ctx, mid=mid, salon={"id": None}, sender="platform_admin", user_text=msg.text or "",
                      steps=run.steps, final_text=body, buttons=None, state_after=None,
                      outcome="unavailable" if run.unavailable else "grounding_fallback",
@@ -159,6 +174,8 @@ async def turn(ctx, msg) -> bool:
         return True
 
     body = _clean_reply(run.lead[:700])
+    if first_reply:
+        body = ensure_help_hint(body, lang)
     saved = [*messages, {"role": "assistant", "content": body}][-10:]
     await ctx.pool.execute(
         "INSERT INTO platform_agent_sessions (sender, history, updated_at) VALUES ($1,$2::jsonb,now()) "

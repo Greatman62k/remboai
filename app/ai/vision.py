@@ -1,5 +1,5 @@
 """Photo matching. A customer sends a picture of the hairstyle they want; Muse Spark (Meta's multimodal model) says which of THIS
-salon's services it needs. The model only suggests: the name is checked against the salon's own menu in code, and price and
+business's services it needs. The model only suggests: the name is checked against the business's own menu in code, and price and
 duration always come from the menu, never from the model. The photo is held in memory for one request and never stored."""
 from __future__ import annotations
 
@@ -136,7 +136,7 @@ def build_prompt(services: list[str], policy: dict | None = None) -> str:
     return f"""{configured['identity']}
 {"\n".join((policy or load_policy())["prompt_wrapper"])}
 {json.dumps(style_policy, ensure_ascii=False, indent=2)}
-Available salon services:
+Available business services:
 {json.dumps(services, ensure_ascii=False)}"""
 
 
@@ -148,7 +148,7 @@ def build_payment_prompt(expected_provider: str, policy: dict | None = None) -> 
     wrapper = "\n".join(configured_policy["prompt_wrapper"])
     return (f"{configured['identity']}\n{wrapper}\n"
             f"{json.dumps(configured, ensure_ascii=False, indent=2)}\n"
-            f"The salon's configured manual payment provider is {expected_provider}. "
+            f"The business's configured manual payment provider is {expected_provider}. "
             "Identify the provider shown by the image. If it differs, report the provider actually shown.")
 
 
@@ -177,7 +177,7 @@ def make_mock_payment_png() -> bytes:
     draw.text((80, 65), "M-PESA", font=title, fill="white")
     draw.text((80, 190), "SAMPLE RECEIPT", font=heading, fill="#52645a")
     draw.text((80, 245), "KES 10.00 sent", font=title, fill="#15251d")
-    draw.text((80, 330), "To: REMBOAI DEMO SALON", font=body, fill="#15251d")
+    draw.text((80, 330), "To: REMBOAI DEMO BARBERSHOP", font=body, fill="#15251d")
     draw.text((80, 395), "Date: 03/11/2026   Time: 10:47 AM", font=body, fill="#15251d")
     draw.text((80, 460), "Receipt: RMB2AI7K9Q", font=body, fill="#15251d")
     draw.text((80, 530), "SYNTHETIC TEST IMAGE", font=small, fill="#64766c")

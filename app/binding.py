@@ -45,7 +45,7 @@ async def bound_salon(pool, sender: str) -> str | None:
 
 
 async def registration_allowed(pool, sender: str, limit: int = 3) -> bool:
-    """At most a few salon registrations per sender per day: a mistyped afternoon cannot spawn a directory."""
+    """At most a few business registrations per sender per day: a mistyped afternoon cannot spawn a directory."""
     n = await pool.fetchval(
         "INSERT INTO onboarding_attempts (sender, day, count) VALUES ($1, CURRENT_DATE, 1) "
         "ON CONFLICT (sender, day) DO UPDATE SET count = onboarding_attempts.count + 1 RETURNING count", sender)

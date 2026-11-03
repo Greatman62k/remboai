@@ -40,9 +40,9 @@ def test_owner_sees_the_day_with_payment_status_in_english_and_swahili():
             await post(c, payload(OWNER, "ratiba " + day, mid="o2"))
             assert out.bodies(OWNER)[-1].startswith("Miadi ") and "amana KES 200 imelipwa" in out.bodies(OWNER)[-1]
             await post(c, payload(OWNER, "msaada", mid="o3"))
-            assert "Amri za mmiliki wa saluni" in out.bodies(OWNER)[-1]
+            assert "Amri za mmiliki wa biashara" in out.bodies(OWNER)[-1]
             await post(c, payload(OWNER, "help", mid="o4"))
-            assert "Salon owner commands" in out.bodies(OWNER)[-1]
+            assert "Business owner commands" in out.bodies(OWNER)[-1]
             assert out.calls == [out.calls[0]]
         await pool.close()
     asyncio.run(run())

@@ -25,10 +25,10 @@ def _menu_hit(text: str, services: list[dict]) -> bool:
 
 def route(text: str, services: list[dict], state: str, today: date) -> str:
     """Classify a message when the model path is disabled or unavailable:
-      'model' a service, style or booking word, or an item on this salon's menu: worth a model call;
+      'model' a service, style or booking word, or an item on this business's menu: worth a model call;
       'rules' prices, hours, cancel, a greeting, a day or time that the free keyword rules can read: no model;
       'model' also when the rules cannot read it but it has a specific price, payment, hours or cancel word ("when are you open");
-      'off'   nothing to do with a salon: a pointer back to what the bot can do. Generic request words alone ("nifanyie", "i want") do not qualify.
+      'off'   nothing to do with a barbershop or salon booking: a pointer back to what the bot can do. Generic request words alone ("nifanyie", "i want") do not qualify.
     Messages inside a running conversation are follow-ups and always go to the model."""
     if state != "idle":
         return "model"

@@ -15,12 +15,12 @@ from zoneinfo import ZoneInfo
 
 import asyncpg
 
-from . import guard, mpesa, payments, waitlist
+from . import guard, mpesa, payments, smalltalk, waitlist
 from .availability import Slot, choose, day_slots
 from .bookings import busy_times, hold_slot, release
 from .channels import outbound
 from .contact import display_contact
-from .messages import t
+from .messages import ensure_help_hint, t
 from .reminders import cancel_reminders, schedule_owner_cancellation, schedule_reminders
 
 if TYPE_CHECKING:
@@ -81,7 +81,13 @@ async def _catalog(ctx, salon_id: str) -> list[dict]:
 
 
 async def _reply(ctx, salon_id: str, wa_id: str, st: dict, chat: Chat, text: str) -> None:
-    st.setdefault("history", []).append({"role": "assistant", "text": text, "ts": datetime.now(ZoneInfo("UTC")).isoformat()})
+    history = st.setdefault("history", [])
+    first_reply = not any(item.get("role") == "assistant" for item in history if isinstance(item, dict))
+    if first_reply:
+        last_user = next((item.get("text", "") for item in reversed(history)
+                          if isinstance(item, dict) and item.get("role") != "assistant"), "")
+        text = ensure_help_hint(text, smalltalk.language(last_user or "", "en"))
+    history.append({"role": "assistant", "text": text, "ts": datetime.now(ZoneInfo("UTC")).isoformat()})
     if len(st["history"]) > guard.MAX_HISTORY * 2:
         st["history"] = st["history"][-guard.MAX_HISTORY * 2 :]
     await _save(ctx, salon_id, wa_id, st)
@@ -89,7 +95,13 @@ async def _reply(ctx, salon_id: str, wa_id: str, st: dict, chat: Chat, text: str
 
 
 async def _reply_buttons(ctx, salon_id: str, wa_id: str, st: dict, chat: Chat, body: str, buttons) -> None:
-    st.setdefault("history", []).append({"role": "assistant", "text": body, "ts": datetime.now(ZoneInfo("UTC")).isoformat()})
+    history = st.setdefault("history", [])
+    first_reply = not any(item.get("role") == "assistant" for item in history if isinstance(item, dict))
+    if first_reply:
+        last_user = next((item.get("text", "") for item in reversed(history)
+                          if isinstance(item, dict) and item.get("role") != "assistant"), "")
+        body = ensure_help_hint(body, smalltalk.language(last_user or "", "en"))
+    history.append({"role": "assistant", "text": body, "ts": datetime.now(ZoneInfo("UTC")).isoformat()})
     if len(st["history"]) > guard.MAX_HISTORY * 2:
         st["history"] = st["history"][-guard.MAX_HISTORY * 2 :]
     await _save(ctx, salon_id, wa_id, st)

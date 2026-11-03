@@ -166,7 +166,7 @@ def test_language_follows_each_message_and_start_register_needs_no_slash():
             assert "booking assistant" in out.bodies(A)[-1]
             assert await pool.fetchval("SELECT lang FROM clients WHERE wa_id=$1", A) == "en"
             await post(c, payload(B, "Start register", mid="l3"))
-            assert "salon name" in out.bodies(B)[-1].lower()
+            assert "shop name" in out.bodies(B)[-1].lower()
         await pool.close()
     asyncio.run(run())
 

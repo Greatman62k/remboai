@@ -1,4 +1,4 @@
-"""Photo matching: a hairstyle picture becomes one of this salon's services, chosen by code from the model's suggestion."""
+"""Photo matching: a hairstyle picture becomes one of this business's services, chosen by code from the model's suggestion."""
 import asyncio
 import base64
 import os

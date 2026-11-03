@@ -170,7 +170,7 @@ async def send_plain(ctx, to: str, body: str) -> bool:
 
 
 async def send_unbound_text(ctx, phone_number_id, to: str, body: str) -> bool:
-    """Send before a salon is bound, while retaining the normal per-inbound retry guard."""
+    """Send before a business is bound, while retaining the normal per-inbound retry guard."""
     return await _once(ctx, "plain", to, body, lambda: ctx.wa.send_text(phone_number_id, "", to, body))
 
 

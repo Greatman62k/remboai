@@ -16,7 +16,7 @@ from app.agent.grounding import Facts
 from app.booking_flow import save_stranger
 from app.channels import outbound
 from app.channels.whatsapp import mask
-from app.messages import t
+from app.messages import ensure_help_hint, t
 from app.ratelimit import RateLimiter
 
 from . import _trace, drive, enabled
@@ -117,6 +117,16 @@ class _BareToolbox:
         return {"error": "this assistant has no tools"}
 
 
+def _system_prompt(policy: dict, lang: str, first_reply: bool) -> str:
+    system = render_assistant_prompt(policy, "bare_assistant")
+    system += f"\n\nHELP GUIDE, ENGLISH\n{t('en', 'main_help')}\n"
+    system += f"\nHELP GUIDE, KISWAHILI\n{t('sw', 'main_help')}\n"
+    system += "Explain any item in everyday language and give one short example. Do not claim to register or book for the user."
+    if first_reply:
+        system += f'\n\nFIRST REPLY: End with this invitation in the user’s language: "{t(lang, "help_hint")}"'
+    return system
+
+
 async def turn(ctx, msg, prior_state: dict, history: list[dict]) -> bool:
     """Send one model answer, or one contextual fallback, for an unlinked chat turn."""
     if not enabled(ctx) or msg.kind != "text" or not (msg.text or "").strip():
@@ -162,7 +172,8 @@ async def turn(ctx, msg, prior_state: dict, history: list[dict]) -> bool:
     if allowed:
         messages.append({"role": "user", "content": text[:500]})
 
-    system = render_assistant_prompt(policy, "bare_assistant")
+    first_reply = not any(item.get("role") == "assistant" for item in messages)
+    system = _system_prompt(policy, lang, first_reply)
     facts = Facts()
     facts.add(system)
     toolbox = _BareToolbox(facts)
@@ -203,6 +214,8 @@ async def turn(ctx, msg, prior_state: dict, history: list[dict]) -> bool:
         body = replies.get("sw" if lang == "sw" else "en") or t(lang, "main_assistant_fallback")
     else:
         body = proposed
+    if first_reply:
+        body = ensure_help_hint(body, lang)
     stamp = datetime.now(timezone.utc).isoformat()
     after = {**prior_state, "history": [*history, {"role": "assistant", "text": body[:500], "ts": stamp}]}
     await save_stranger(ctx, msg.sender, after)

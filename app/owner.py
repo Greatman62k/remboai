@@ -1,4 +1,4 @@
-"""Salon owner actions use a small fixed vocabulary matched by code. Owner messages stay in the
+"""Business owner actions use a small fixed vocabulary matched by code. Owner messages stay in the
 owner role; customer booking tests require a separate sender account."""
 from __future__ import annotations
 
@@ -10,12 +10,12 @@ from zoneinfo import ZoneInfo
 
 import asyncpg
 
-from . import mpesa, payments, waitlist
+from . import mpesa, payments, smalltalk, waitlist
 from .channels import outbound
 from .contact import display_contact
 from .availability import day_slots
 from .bookings import busy_times
-from .messages import t
+from .messages import ensure_help_hint, t
 from .reminders import cancel_reminders, schedule_reminders
 from .timeparse import parse_day, parse_time
 from .channels.whatsapp import mask
@@ -174,6 +174,33 @@ def _label(day: date, today: date, lang: str) -> str:
 
 
 async def _say(ctx, salon: dict, to: str, body: str) -> None:
+    mid = outbound.current_message_id()
+    if mid:
+        raw = await ctx.pool.fetchval(
+            "SELECT state FROM conversations WHERE salon_id=$1::uuid AND wa_id=$2", salon["id"], to)
+        try:
+            state = raw if isinstance(raw, dict) else json.loads(raw or "{}")
+        except (TypeError, ValueError):
+            state = {}
+        if not isinstance(state, dict):
+            state = {}
+        previous = state.get("owner_help_hint_at") or state.get("owner_history_at")
+        recent = False
+        if previous:
+            try:
+                stamp = datetime.fromisoformat(previous) if isinstance(previous, str) else previous
+                if stamp.tzinfo is None:
+                    stamp = stamp.replace(tzinfo=ZoneInfo("UTC"))
+                recent = 0 <= (datetime.now(ZoneInfo("UTC")) - stamp.astimezone(ZoneInfo("UTC"))).total_seconds() <= 600
+            except (TypeError, ValueError):
+                recent = False
+        if not recent:
+            body = ensure_help_hint(body, smalltalk.language(body, "en"))
+        now = datetime.now(ZoneInfo("UTC")).isoformat()
+        await ctx.pool.execute(
+            "INSERT INTO conversations (salon_id, wa_id, state) VALUES ($1::uuid,$2,$3::jsonb) "
+            "ON CONFLICT (salon_id, wa_id) DO UPDATE SET state=COALESCE(conversations.state,'{}'::jsonb) || EXCLUDED.state, updated_at=now()",
+            salon["id"], to, json.dumps({"owner_help_hint_sent": True, "owner_help_hint_at": now}))
     await outbound.send_text(ctx, salon, to, body)
 
 

@@ -195,7 +195,7 @@ async def _platform_registration(ctx, msg: Message, session: dict | None) -> Non
         if _registration_start(msg):
             await onboarding_chat.begin(ctx, msg.sender, msg.phone_number_id, text)
             return
-        await outbound.send_plain(ctx, msg.sender, platform.HELP_TEXT)
+        await outbound.send_plain(ctx, msg.sender, platform.help_text(smalltalk.language(text, "en")))
         return
 
     lang = session.get("lang") or onboarding_chat.detect_lang(text)
@@ -529,7 +529,7 @@ async def _handle(ctx, msg: Message) -> None:
                 return
         if msg.kind == "text" and guard.injection(msg.text or ""):
             await guard.strike(ctx.pool, msg.sender, "platform_agent_injection")
-            await outbound.send_plain(ctx, msg.sender, platform.HELP_TEXT)
+            await outbound.send_plain(ctx, msg.sender, platform.help_text(smalltalk.language(msg.text or "", "en")))
             return
         if (msg.kind == "text" and not platform_audio and platform.is_mutation_command(msg.text or "")
                 and await platform.handle(ctx, msg.sender, msg.text or "")):
@@ -547,7 +547,7 @@ async def _handle(ctx, msg: Message) -> None:
             if (msg.kind == "text" and not (platform_audio and platform.is_mutation_command(msg.text or ""))
                     and await platform.handle(ctx, msg.sender, msg.text or "")):
                 return
-            await outbound.send_plain(ctx, msg.sender, platform.HELP_TEXT)
+            await outbound.send_plain(ctx, msg.sender, platform.help_text(smalltalk.language(msg.text or "", "en")))
             return
         selector, owner_text = owner_request
         if not owner_text:
@@ -555,13 +555,16 @@ async def _handle(ctx, msg: Message) -> None:
                 from .agent import platform_assistant
                 if await platform_assistant.turn(ctx, msg):
                     return
-            await outbound.send_plain(ctx, msg.sender, platform.HELP_TEXT)
+            await outbound.send_plain(ctx, msg.sender, platform.help_text(smalltalk.language(msg.text or "", "en")))
             return
         owned = await _owned_channel_salons(ctx, msg.sender, msg.phone_number_id, selector)
         if len(owned) != 1:
-            message = ("No salon owned by this account matches that route." if not owned else
-                       "Several salons match. Use /owner <salon-slug> | <command>.")
-            await outbound.send_plain(ctx, msg.sender, message + "\n" + platform.HELP_TEXT)
+            message = ("No business owned by this account matches that route." if not owned else
+                       "Several businesses match. Use /owner <business-slug> | <command>.")
+            lang = smalltalk.language(msg.text or "", "en")
+            message = ("Hakuna biashara inayolingana na njia hiyo." if lang == "sw" and not owned else
+                       "Biashara kadhaa zinafanana. Tumia /owner <slug-ya-biashara> | <amri>." if lang == "sw" else message)
+            await outbound.send_plain(ctx, msg.sender, message + "\n\n" + platform.help_text(lang))
             return
         salon, linked = owned[0], False
         msg = dataclasses.replace(msg, text=owner_text)
@@ -683,7 +686,7 @@ async def _handle(ctx, msg: Message) -> None:
             return
 
     if platform_owner_route and registration_start:
-        await outbound.send_plain(ctx, msg.sender, platform.HELP_TEXT)
+        await outbound.send_plain(ctx, msg.sender, platform.help_text(smalltalk.language(msg.text or "", "en")))
         return
     salon_context_selected = owner_mode or await _customer_has_selected_salon(ctx, msg, salon, linked)
     if salon_context_selected and await _handoff_before_onboarding(ctx, salon, msg.sender, chat):
@@ -938,6 +941,11 @@ async def _handle(ctx, msg: Message) -> None:
             lang = await _speak(ctx, client, lang, msg.text or "")
             if await agent.turn(ctx, salon, client, st, services, tz, now, chat, lang, msg):
                 return
+        if smalltalk.asks_help(msg.text or ""):
+            lang = await _speak(ctx, client, lang, msg.text or "")
+            await _reply(ctx, salon["id"], msg.sender, st, chat,
+                         t(lang, "assistant_help", salon=salon["name"], example=example_for(services, lang)))
+            return
         if WAITLIST_WORDS.match(msg.text or "") and st.get("state") == "no_slots" and st.get("service_id") and st.get("date"):
             service = next((s for s in services if s["id"] == st["service_id"]), None)
             if service is not None:

@@ -84,7 +84,7 @@ def _hour_in_window(n: int, window: str | None) -> int | None:
 
 
 def _business_hour(n: int) -> int:
-    """No am/pm and no part of the day: 7-11 are mornings, 12 is noon, 1-6 are afternoons (a salon is not open at 3am)."""
+    """No am/pm and no part of the day: 7-11 are mornings, 12 is noon, 1-6 are afternoons (a shop is not open at 3am)."""
     return n if 7 <= n <= 11 else n % 12 + 12
 
 

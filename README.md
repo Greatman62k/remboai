@@ -2,8 +2,8 @@
 
 # RemboAI
 
-**The receptionist that never misses a booking.**
-An AI receptionist for Kenyan salons and barbershops, run by Meta's Muse Spark. It holds the slot, guides customers through the salon's M-PESA or Airtel Money deposit method, and confirms in English, Swahili or Sheng, typed or by voice note.
+**A barber shouldn't have to stop a haircut to answer a booking message.**
+RemboAI is a chat-based receptionist for Kenyan barbershops and salons, powered by Meta's Muse Spark. Customers book in English, Swahili or Sheng, by text or voice note. The model understands the request; guarded code checks the diary and payment state before anything is confirmed.
 
 ![Python 3.13](https://img.shields.io/badge/python-3.13-blue)
 ![Tests](https://img.shields.io/badge/tests-436_passing-brightgreen)
@@ -15,6 +15,7 @@ An AI receptionist for Kenyan salons and barbershops, run by Meta's Muse Spark. 
 **[Live website](https://remboai.duckdns.org)** ·
 [Try it on Telegram](https://t.me/Remboai1_bot) ·
 [The story](#why-i-built-this) ·
+[A Meta messaging use case](#a-small-business-use-case-for-metas-messaging-ecosystem) ·
 [Meta AI at the core](#meta-ai-at-the-core) ·
 [Hosted models and verification](#hosted-model-disclosure-and-verification) ·
 [Why you can trust it](#why-you-can-trust-it) ·
@@ -26,7 +27,7 @@ Built for the **Meta Global AI Developer Hackathon**, Indie track · **Build for
 </div>
 
 > [!NOTE]
-> **Where things stand, honestly.** Telegram is live and is the channel to try. The WhatsApp channel is built and tested end to end in this repository, and switches on when Meta's business verification for my account completes. Daraja STK runs against the **sandbox**; automatic STK in production needs Safaricom's Go Live approval for each salon. During setup, an owner chooses a manual M-PESA till, Pochi la Biashara number, direct Send Money number, or Airtel Money number. Manual payments go directly to that salon destination and the owner checks each claim. Nothing in the demo is faked: the booking engine, the model calls and the payment flow are the same code that will run in production.
+> **Where things stand, honestly.** Telegram is live and is the channel to try. The WhatsApp channel is built and tested end to end in this repository; this account is waiting for Meta business verification before WhatsApp can go live. Messenger is a possible next channel, not part of this demo. Daraja STK runs against the **sandbox**; automatic STK in production needs Safaricom's Go Live approval for each shop. During setup, an owner chooses a manual M-PESA till, Pochi la Biashara number, direct Send Money number, or Airtel Money number. Manual payments go directly to that shop destination and the owner checks each claim. Nothing in the demo is faked: the booking engine, model calls and payment flow are the same code intended for production.
 
 > [!NOTE]
 > **Prior work and what's new.** Before the event I privately prototyped an earlier version of this idea (not submitted, not public, and none of its code is in this repository), and I set up my WhatsApp Business Cloud API and Daraja (M-Pesa) sandbox accounts. This repository is a fresh implementation, written Oct 27 - Nov 4, 2026. What carried over is the idea and the design. Every file here was written during the event; see [CHANGELOG.md](CHANGELOG.md).
@@ -63,9 +64,9 @@ Both sides of the chair lose today. Customers walk away from a crowded shop, and
 
 - **No new habit.** [M-Pesa reports 40 million monthly active customers in Kenya](https://khusoko.com/2026/03/06/m-pesa-turns-19-with-40-million-customers-as-mobile-money-reshapes-kenya/). Customers already chat and already pay on their phones. RemboAI asks them to install nothing and learn nothing.
 - **The owner's phone is the whole back office.** Registration, the diary, cancellations, away-days, deposits and a daily summary all run over chat. No dashboard, no laptop, no training.
-- **Money goes where it should.** Owners choose an M-PESA till, Pochi la Biashara, direct Send Money, or Airtel Money destination. Daraja STK can also send an M-PESA prompt where configured. Manual transfers go to the salon, and the owner confirms each claim. RemboAI never holds the money.
+- **Money goes where it should.** Owners choose an M-PESA till, Pochi la Biashara, direct Send Money, or Airtel Money destination. Daraja STK can also send an M-PESA prompt where configured. Manual transfers go to the shop, and the owner confirms each claim. RemboAI never holds the money.
 - **Their language.** English, Swahili and Sheng, typed or spoken, mixed in one sentence if that's how the customer talks.
-- **One bot, any number of salons.** Invite links and QR stickers carry each salon's slug, and a salon registers itself in a few minutes of chat.
+- **One bot, any number of shops.** Invite links and QR stickers carry each shop's slug, and an owner can register in a few minutes of chat.
 
 | Without RemboAI | With RemboAI |
 |---|---|
@@ -75,13 +76,27 @@ Both sides of the chair lose today. Customers walk away from a crowded shop, and
 | No-shows discovered at the appointment time | 24h and 2h reminders, a 3h check, and a 30m ETA to the customer and owner |
 | Owner is receptionist after closing | The model answers; the owner only gets what needs a human |
 
-| Customers | Salon owners |
+| Customers | Shop owners |
 |---|---|
-| Book in their own language, by text or voice note | Register the salon over chat in minutes |
+| Book in their own language, by text or voice note | Register the shop over chat in minutes |
 | Send a hairstyle photo and get matched to a real service | Bookings, cancellations, moves, away-days, deposits, all by chat |
 | Pay through an M-PESA STK prompt, a till, Pochi la Biashara, direct Send Money, or Airtel Money | Ask "who's booked Saturday?" in plain words and get the answer |
 | Get a receipt, then reminders | A daily summary, plus an instant note for every deposit |
 | Join a waitlist and tap Yes when a slot frees up | Cancelled and unconfirmed slots go to the waitlist automatically |
+
+## A small-business use case for Meta's messaging ecosystem
+
+Meta says more than one million businesses already use a Meta Business Agent on WhatsApp and Messenger, with more than one billion active business threads across WhatsApp, Messenger and Instagram each day. Meta's description includes answering business questions, booking appointments and handing a conversation to a person. [Meta's Business Agent announcement](https://about.fb.com/news/2026/06/meta-business-agent/)
+
+RemboAI takes that direction into one concrete market: neighborhood barbershops and salons in Kenya. It shows how a frontier model can help a busy owner serve customers through familiar chat, including people who prefer voice notes or Swahili and Sheng, while code protects the parts that need exact answers:
+
+- **The model understands the request.** A customer can ask naturally for a fade tomorrow afternoon instead of learning a command syntax.
+- **The diary stays authoritative.** Code checks real availability, prevents double bookings, and controls holds and cancellations.
+- **Local payments fit the real shop.** Customers can use the shop's configured M-PESA or Airtel Money route. For manual transfers, the owner checks the account and confirms receipt.
+- **The owner can use it without a dashboard.** Setup, appointments, payment claims and daily summaries are handled in chat.
+- **The channel can grow without rebuilding the booking engine.** Telegram is live and WhatsApp integration is built. Messenger would need its own approved channel integration before it can be offered.
+
+The opportunity is not to ask every small business to install another app. It is to make Meta's models useful inside the conversations businesses and customers already have, then prove the value in a workflow where a missed reply can mean a lost customer or an empty chair. We are starting with one market and one measurable job, then can expand to other appointment-based businesses if the same needs show up there.
 
 ## Meta AI at the core
 

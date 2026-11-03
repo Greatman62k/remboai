@@ -665,9 +665,9 @@ def test_doctor_reports_what_works_and_says_what_to_fix():
         async with _httpx.AsyncClient(transport=_httpx.MockTransport(handler)) as http:
             checks = {c.name: c for c in await run_checks(s, http, pool)}
         assert checks["configuration"].ok and checks["database"].ok
-        assert checks["salon 'Zuri Cuts' WhatsApp"].ok and "Zuri Cuts" in checks["salon 'Zuri Cuts' WhatsApp"].detail
+        assert checks["business 'Zuri Cuts' WhatsApp"].ok and "Zuri Cuts" in checks["business 'Zuri Cuts' WhatsApp"].detail
         assert checks["model muse-spark-1.3"].ok and "intent=book service=Fade" in checks["model muse-spark-1.3"].detail
-        assert not checks["salon 'Zuri Cuts' deposits"].ok and checks["salon 'Zuri Cuts' deposits"].warn
+        assert not checks["business 'Zuri Cuts' deposits"].ok and checks["business 'Zuri Cuts' deposits"].warn
         assert checks["photo matching muse-spark-1.3"].ok and "red" in checks["photo matching muse-spark-1.3"].detail
         assert checks["payment screenshot vision muse-spark-1.3"].ok
         payment_answer["amount"] = 11

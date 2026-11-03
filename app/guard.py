@@ -28,37 +28,37 @@ _INJECTION = re.compile(
 
 _REPLIES = {
     "en": {
-        "default": "Thank you for telling us. I've passed your message to the salon owner who will reply shortly. Your booking assistant will pause until they respond. We appreciate your patience.",
-        "payment_dispute": "I'm sorry about the payment concern. For your security, refunds and payment disputes are handled directly by the salon owner. I've forwarded your request and they'll contact you shortly. Please keep your payment receipt or transaction reference handy.",
-        "deposit": "Deposits are set by the salon to secure your slot. I've forwarded your request to the owner who can advise you personally.",
-        "complaint": "Thank you for your patience and for letting us know. I've shared your feedback with the salon owner who will follow up with you directly and help resolve this.",
-        "medical": "I'm sorry to hear about that. For health matters, please seek medical advice promptly if needed. I've alerted the salon owner who will contact you shortly to assist.",
-        "emergency": "If this is an emergency, please contact emergency services (999 or 112) immediately. I've also alerted the salon owner.",
-        "legal": "Thank you for sharing this. I've passed your message to the salon owner who will respond directly.",
-        "harassment": "We keep conversations respectful and focused on bookings. I've passed your message to the salon owner for review.",
+        "default": "Thank you for telling us. I've passed your message to the business owner who will reply shortly. Your booking assistant will pause until they respond. We appreciate your patience.",
+        "payment_dispute": "I'm sorry about the payment concern. For your security, refunds and payment disputes are handled directly by the business owner. I've forwarded your request and they'll contact you shortly. Please keep your payment receipt or transaction reference handy.",
+        "deposit": "Deposits are set by the business to secure your slot. I've forwarded your request to the owner who can advise you personally.",
+        "complaint": "Thank you for your patience and for letting us know. I've shared your feedback with the business owner who will follow up with you directly and help resolve this.",
+        "medical": "I'm sorry to hear about that. For health matters, please seek medical advice promptly if needed. I've alerted the business owner who will contact you shortly to assist.",
+        "emergency": "If this is an emergency, please contact emergency services (999 or 112) immediately. I've also alerted the business owner.",
+        "legal": "Thank you for sharing this. I've passed your message to the business owner who will respond directly.",
+        "harassment": "We keep conversations respectful and focused on bookings. I've passed your message to the business owner for review.",
         "privacy": "For privacy, I can't share other clients' or staff details. I've forwarded your request to the owner to assist you directly.",
-        "human_request": "Of course, I have notified the salon owner and they'll reply to you shortly. Thank you for your patience.",
-        "waiting": "The salon owner has your message and will respond as soon as possible. Thank you for your patience. We will pause here until they're back.",
+        "human_request": "Of course, I have notified the business owner and they'll reply to you shortly. Thank you for your patience.",
+        "waiting": "The business owner has your message and will respond as soon as possible. Thank you for your patience. We will pause here until they're back.",
     },
     "sw": {
-        "default": "Asante kwa kutujulisha. Nimepeleka ujumbe wako kwa mmiliki wa saluni ambaye atajibu hivi karibuni. Msaidizi atapumzika hadi ajibu. Tunashukuru kwa uvumilivu wako.",
-        "payment_dispute": "Pole kwa usumbufu wa malipo. Kwa usalama wako, marejesho hushughulikiwa na mmiliki wa saluni. Nimepeleka ombi lako na watakuwasiliana hivi karibuni. Tafadhali weka risiti au kumbukumbu ya muamala tayari.",
-        "deposit": "Amana huwekwa na saluni kuhakikisha nafasi yako. Nimepeleka ombi lako kwa mmiliki atakayekushauri.",
-        "complaint": "Asante kwa kutujulisha na kwa uvumilivu wako. Nimepeleka maoni yako kwa mmiliki wa saluni ambaye atafuatilia moja kwa moja.",
-        "medical": "Pole sana. Kwa masuala ya afya, tafadhali tafuta ushauri wa kitaalam haraka ikiwa ni lazima. Nimemjulisha mmiliki wa saluni.",
-        "emergency": "Kama ni dharura, tafadhali piga 999 au 112 mara moja. Nimemjulisha mmiliki wa saluni pia.",
-        "legal": "Asante kwa kutujulisha. Nimepeleka ujumbe wako kwa mmiliki wa saluni ambaye atajibu moja kwa moja.",
+        "default": "Asante kwa kutujulisha. Nimepeleka ujumbe wako kwa mmiliki wa biashara ambaye atajibu hivi karibuni. Msaidizi atapumzika hadi ajibu. Tunashukuru kwa uvumilivu wako.",
+        "payment_dispute": "Pole kwa usumbufu wa malipo. Kwa usalama wako, marejesho hushughulikiwa na mmiliki wa biashara. Nimepeleka ombi lako na watakuwasiliana hivi karibuni. Tafadhali weka risiti au kumbukumbu ya muamala tayari.",
+        "deposit": "Amana huwekwa na biashara kuhakikisha nafasi yako. Nimepeleka ombi lako kwa mmiliki atakayekushauri.",
+        "complaint": "Asante kwa kutujulisha na kwa uvumilivu wako. Nimepeleka maoni yako kwa mmiliki wa biashara ambaye atafuatilia moja kwa moja.",
+        "medical": "Pole sana. Kwa masuala ya afya, tafadhali tafuta ushauri wa kitaalam haraka ikiwa ni lazima. Nimemjulisha mmiliki wa biashara.",
+        "emergency": "Kama ni dharura, tafadhali piga 999 au 112 mara moja. Nimemjulisha mmiliki wa biashara pia.",
+        "legal": "Asante kwa kutujulisha. Nimepeleka ujumbe wako kwa mmiliki wa biashara ambaye atajibu moja kwa moja.",
         "harassment": "Tunaheshimu mazungumzo ya heshima na tunajikita kwenye miadi. Nimepeleka ujumbe wako kwa mmiliki.",
         "privacy": "Kwa usiri, siwezi kushiriki maelezo ya wateja wengine. Nimepeleka ombi lako kwa mmiliki.",
-        "human_request": "Sawa, nimemjulisha mmiliki wa saluni na atajibu hivi karibuni. Asante kwa uvumilivu wako.",
-        "waiting": "Mmiliki wa saluni amepokea ujumbe wako na atajibu haraka iwezekanavyo. Asante kwa uvumilivu. Tutapumzika hapa hadi arudi.",
+        "human_request": "Sawa, nimemjulisha mmiliki wa biashara na atajibu hivi karibuni. Asante kwa uvumilivu wako.",
+        "waiting": "Mmiliki wa biashara amepokea ujumbe wako na atajibu haraka iwezekanavyo. Asante kwa uvumilivu. Tutapumzika hapa hadi arudi.",
     },
 }
 
 _SENSITIVE = [
     ("emergency", "en", r"\b(emergency|ambulance|suicide|suicidal|kill myself|want to die|hurt myself|self[- ]harm)\b"),
     ("emergency", "sw", r"\b(dharura|nataka kufa|najiua|kujiua)\b"),
-    ("legal", "en", r"\b(lawyer|lawsuit|sue you|consumer protection)\b|\breport (you|the salon)\b|\bpolice\b(?!\W+(?:station|post|barracks|lines?)\b)|"
+    ("legal", "en", r"\b(lawyer|lawsuit|sue you|consumer protection)\b|\breport (you|the (?:salon|shop|business))\b|\bpolice\b(?!\W+(?:station|post|barracks|lines?)\b)|"
                     r"\b(?:report(?:ing)?|call(?:ing)?|tak(?:e|ing))\b(?:\W+\w+){0,3}?\W+(?:to\W+)?(?:the\W+)?police\b"),
     ("legal", "sw", r"\b(wakili|mahakama|nitakushtaki)\b|(?<!kituo cha )\bpolisi\b"),
     ("medical", "en", r"\b(allergic|infection|bleeding|blister|chemical burn|fainted|can'?t breathe)\b|\brash(?![- ]free)\b|"
