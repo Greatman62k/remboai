@@ -112,6 +112,7 @@ def test_hostile_names_and_invisible_characters_are_cleaned_before_anything_is_s
 def test_one_customer_cannot_hoard_the_diary():
     async def run():
         pool, out, salon = await build(DSN, till=False, max_active_bookings=2)
+        await pool.execute("UPDATE salons SET deposit_kes=0")
         async with client() as c:
             for i in range(3):
                 out.script[f"fade {i}"] = {"intent": "book", "service": "Fade", "date": open_day(i + 1).isoformat(), "window": "afternoon"}

@@ -1,6 +1,6 @@
-"""The owner's side: ask the diary in plain words. The model reads bookings and money through tools and explains them; the only change it can
-make is a cancellation the owner asked for, and that goes through the same code path as the `cancel` command (the customer is told, refunds are
-queued). Everything the model says about bookings and money must come from a tool result."""
+"""The owner's assistant reads bookings and payment totals through tools, prepares a verified daily summary, and generates a requested salon invite.
+It can cancel a booking only when the owner clearly asks, through the same code path as `cancel` (the customer is told and refunds are queued).
+Everything it says about bookings and money must come from live context or a tool result."""
 from __future__ import annotations
 
 import json
@@ -9,7 +9,8 @@ import re
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-from app import owner
+from app import binding, owner
+from app.channels import invites
 from app.contact import display_contact
 from app.messages import t
 
@@ -37,14 +38,20 @@ def looks_like_admin_followup(text: str) -> bool:
 ADMIN_TOOLS = [
     _fn("bookings_on", {"date": {"type": "string"}}, ["date"]),
     _fn("deposits", {"from_date": {"type": "string"}, "to_date": {"type": "string"}}, ["from_date", "to_date"]),
+    _fn("daily_summary", {}, []),
+    _fn("invite_link", {}, []),
     _fn("cancel_booking", {"booking_ref": {"type": "string"}}, ["booking_ref"]),
 ]
 ADMIN_NAMES = {x["function"]["name"] for x in ADMIN_TOOLS}
 
 
-def admin_prompt(salon: dict, now: datetime, policy: dict) -> str:
+def admin_prompt(salon: dict, now: datetime, policy: dict, services: list[dict] | None = None) -> str:
     cal = "\n".join(f"{(now + timedelta(days=i - 7)).strftime('%a')} = {(now + timedelta(days=i - 7)).date().isoformat()}" for i in range(22))
     persona = policy["salon_owner_assistant"]
+    menu = "\n".join(
+        f"- {service['name']}: KES {int(service['price_kes'])}, {int(service['duration_min'])} minutes"
+        for service in services or []
+    ) or "No active services are listed."
     return f"""{persona['identity']}
 {persona['purpose']}
 {"\n".join(policy["prompt_wrapper"])}
@@ -52,16 +59,21 @@ def admin_prompt(salon: dict, now: datetime, policy: dict) -> str:
 
 LIVE SALON CONTEXT
 Salon: {salon['name']}
+Authenticated sender: verified owner or manager for this salon.
 Today is {now.strftime('%A')} {now.date().isoformat()}, time {now.strftime('%H:%M')} (Africa/Nairobi). Calendar:
 {cal}
 Opening hours:
 {hours_lines(salon.get('open_hours') or {})}
+Booking deposit: KES {int(salon.get('deposit_kes') or 0)} per booking; zero means no deposit is required.
+Services and prices:
+{menu}
 """
 
 
 class AdminToolbox:
-    def __init__(self, ctx, salon: dict, to: str, tz: ZoneInfo, now: datetime):
+    def __init__(self, ctx, salon: dict, to: str, tz: ZoneInfo, now: datetime, user_text: str = ""):
         self.ctx, self.salon, self.to, self.tz, self.now = ctx, salon, to, tz, now
+        self.user_text = user_text
         self.outcomes: list[Outcome] = []
         self.facts = Facts()
         self.facts.reporting = True         # the owner is told what the diary says, including paid and confirmed; customers are not
@@ -71,13 +83,17 @@ class AdminToolbox:
     async def run(self, name: str, args: dict) -> dict:
         if name not in ADMIN_NAMES:
             return {"error": "unknown_tool", "tools": sorted(ADMIN_NAMES)}
+        outcome_start = len(self.outcomes)
         try:
             result = await getattr(self, "t_" + name)(args if isinstance(args, dict) else {})
         except Exception:
             log.exception("admin tool %s failed", name)
             result = {"error": "tool_failed"}
+        verified = [outcome.text for outcome in self.outcomes[outcome_start:] if outcome.text]
+        if verified and isinstance(result, dict):
+            result = {**result, "verified_owner_outcome": verified}
         packed = json.dumps(result, ensure_ascii=False, default=str)
-        self.facts.add(packed)
+        self.facts.add(packed, *verified)
         self.facts.prices.update(int(n) for n in re.findall(r"\d+", packed) if n.isdigit() and len(n) < 8)
         return result
 
@@ -109,6 +125,26 @@ class AdminToolbox:
             "SELECT COALESCE(sum(amount_kes),0) AS total, count(*) AS n FROM payments WHERE salon_id=$1::uuid AND status='paid' AND settled_at >= $2 AND settled_at < $3",
             self.salon["id"], start, end)
         return {"from": d1.isoformat(), "to": d2.isoformat(), "total_kes": int(row["total"]), "payments": int(row["n"])}
+
+    async def t_daily_summary(self, _a: dict) -> dict:
+        summary = await owner.summary_text(
+            self.ctx, self.salon, self.tz, self.now,
+            "sw" if owner.SWAHILI.search(self.user_text) else "en",
+        )
+        return {"summary": summary}
+
+    async def t_invite_link(self, _a: dict) -> dict:
+        if not re.search(r"\b(?:invite|invitation|mwaliko|share)\b", self.user_text, re.I):
+            return {"error": "the owner did not ask for an invite link"}
+        slug = await binding.ensure_slug(self.ctx.pool, self.salon["id"], self.salon["name"])
+        channel = invites.channel_of(self.to)
+        from app.channels.telegram import bot_username
+
+        username = await bot_username(getattr(self.ctx, "wa", None)) if channel == "tg" else None
+        number = getattr(self.ctx.settings, "central_whatsapp_number", "") if channel == "wa" else ""
+        link = invites.invite_for(channel, slug, username=username, number=number)
+        self.facts.required_literals.add(link)
+        return {"invite_link": link}
 
     async def t_cancel_booking(self, a: dict) -> dict:
         if self._cancelled:

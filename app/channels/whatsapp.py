@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import httpx
 
@@ -58,6 +59,7 @@ class Message:
     text: str
     reply_id: str | None = None
     media_id: str | None = None
+    sent_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +73,13 @@ def _values(payload: dict):
     for entry in payload.get("entry") or []:
         for change in entry.get("changes") or []:
             yield change.get("value") or {}
+
+
+def _unix_time(value) -> datetime | None:
+    try:
+        return datetime.fromtimestamp(float(value), timezone.utc)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
 
 
 def parse_messages(payload: dict) -> list[Message]:
@@ -92,7 +101,8 @@ def parse_messages(payload: dict) -> list[Message]:
             elif kind == "interactive":
                 reply = (m.get("interactive") or {}).get("button_reply") or (m.get("interactive") or {}).get("list_reply") or {}
                 reply_id, text = reply.get("id"), reply.get("title", "")
-            out.append(Message(mid, sender, names.get(sender), pid, kind, text.strip(), reply_id, media_id))
+            out.append(Message(mid, sender, names.get(sender), pid, kind, text.strip(), reply_id, media_id,
+                              _unix_time(m.get("timestamp"))))
     return out
 
 

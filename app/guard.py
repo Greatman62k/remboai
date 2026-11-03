@@ -29,7 +29,7 @@ _INJECTION = re.compile(
 _REPLIES = {
     "en": {
         "default": "Thank you for telling us. I've passed your message to the salon owner who will reply shortly. Your booking assistant will pause until they respond. We appreciate your patience.",
-        "payment_dispute": "I'm sorry about the payment concern. For your security, refunds and payment disputes are handled directly by the salon owner. I've forwarded your request and they'll contact you shortly. Please keep your M-Pesa message handy.",
+        "payment_dispute": "I'm sorry about the payment concern. For your security, refunds and payment disputes are handled directly by the salon owner. I've forwarded your request and they'll contact you shortly. Please keep your payment receipt or transaction reference handy.",
         "deposit": "Deposits are set by the salon to secure your slot. I've forwarded your request to the owner who can advise you personally.",
         "complaint": "Thank you for your patience and for letting us know. I've shared your feedback with the salon owner who will follow up with you directly and help resolve this.",
         "medical": "I'm sorry to hear about that. For health matters, please seek medical advice promptly if needed. I've alerted the salon owner who will contact you shortly to assist.",
@@ -42,7 +42,7 @@ _REPLIES = {
     },
     "sw": {
         "default": "Asante kwa kutujulisha. Nimepeleka ujumbe wako kwa mmiliki wa saluni ambaye atajibu hivi karibuni. Msaidizi atapumzika hadi ajibu. Tunashukuru kwa uvumilivu wako.",
-        "payment_dispute": "Pole kwa usumbufu wa malipo. Kwa usalama wako, marejesho hushughulikiwa na mmiliki wa saluni. Nimepeleka ombi lako na watakuwasiliana hivi karibuni. Tafadhali weka ujumbe wako wa M-Pesa tayari.",
+        "payment_dispute": "Pole kwa usumbufu wa malipo. Kwa usalama wako, marejesho hushughulikiwa na mmiliki wa saluni. Nimepeleka ombi lako na watakuwasiliana hivi karibuni. Tafadhali weka risiti au kumbukumbu ya muamala tayari.",
         "deposit": "Amana huwekwa na saluni kuhakikisha nafasi yako. Nimepeleka ombi lako kwa mmiliki atakayekushauri.",
         "complaint": "Asante kwa kutujulisha na kwa uvumilivu wako. Nimepeleka maoni yako kwa mmiliki wa saluni ambaye atafuatilia moja kwa moja.",
         "medical": "Pole sana. Kwa masuala ya afya, tafadhali tafuta ushauri wa kitaalam haraka ikiwa ni lazima. Nimemjulisha mmiliki wa saluni.",

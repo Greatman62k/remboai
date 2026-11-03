@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 import asyncpg
 
-from . import payments, waitlist
+from . import mpesa, payments, waitlist
 from .channels import outbound
 from .contact import display_contact
 from .availability import day_slots
@@ -40,8 +40,11 @@ DELETE_REQUEST = re.compile(
     r"(?:my|the|this|our)?\s*(?:business|salon|barbershop|kinyozi|biashara|saluni)\s+"
     r"(?:delete|remove|terminate|close|shut down|deactivate|cancel|futa|ondoa|sitisha))\b", re.I)
 DEPOSIT = re.compile(r"^\s*(deposit|amana)\b\s*(.*?)\s*$", re.I | re.S)
+PAYMENT = re.compile(r"^\s*(payment|malipo)\b\s*(.*?)\s*$", re.I | re.S)
 SUMMARY = re.compile(r"^\s*(summary|muhtasari)\W*$", re.I)
+PENDING_PAYMENTS = re.compile(r"^\s*(pending payments?|pending deposits?|unconfirmed payments?|malipo yanayosubiri)\W*$", re.I)
 TILL_TAP = re.compile(r"^till:(yes|no):([0-9a-fA-F-]{36})$")
+AVAILABILITY_TAP = re.compile(r"^availability:(yes|no):([0-9a-fA-F-]{36})$")
 SWAHILI = re.compile(r"\b(leo|kesho|ratiba|miadi|funga|fungua|ghairi|muhtasari|msaada|kiungo|chelewa|hamisha|sogeza|amana|jumatatu|jumanne|jumatano|alhamisi|ijumaa|jumamosi|jumapili)\b", re.I)
 RANGE = re.compile(r"(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s*(?:-|–|to|hadi|mpaka)\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)", re.I)
 _DATE_ONLY = re.compile(r"^\s*(?:today|tomorrow|leo|kesho(?:\s+kutwa)?)\s*[?.!]*$", re.I)
@@ -56,6 +59,16 @@ _CUSTOMER_QUESTION = re.compile(
 
 def is_owner(salon: dict, sender: str) -> bool:
     return bool(salon.get("owner_wa_id")) and salon["owner_wa_id"] == sender
+
+
+def is_command(text: str) -> bool:
+    """Return whether an explicit owner command must stay in its guarded code flow."""
+    if (text or "").strip().lower().strip(" ?.! ") in ("/id", "my id", "myid", "id"):
+        return True
+    return any(pattern.match(text or "") for pattern in (
+        KEEP, DEPOSIT, PAYMENT, PENDING_PAYMENTS, NOSHOW, CANCEL, CANCEL_WHO,
+        MOVE, LATE, BLOCK, UNBLOCK,
+    ))
 
 
 async def owner_followup_is_pending(ctx, salon: dict, sender: str, text: str) -> bool:
@@ -220,9 +233,15 @@ async def handle(ctx, salon: dict, to: str, text: str, tz: ZoneInfo, now: dateti
     if HELP.match(text):
         await say(t(lang, "owner_help"))
         return True
+    if PENDING_PAYMENTS.match(text):
+        await _pending_manual_claims(ctx, salon, to, tz, lang)
+        return True
     if KEEP.match(text):
         await ctx.pool.execute("UPDATE salons SET inactivity_warned_at=NULL, inactivity_final_at=NULL WHERE id=$1::uuid", salon["id"])
         await say(t(lang, "owner_kept", salon=salon["name"]))
+        return True
+    if m := PAYMENT.match(text):
+        await _payment_destination(ctx, salon, to, m[2], lang)
         return True
     if m := DEPOSIT.match(text):
         await _deposit(ctx, salon, to, m[2], lang)
@@ -275,6 +294,15 @@ async def handle(ctx, salon: dict, to: str, text: str, tz: ZoneInfo, now: dateti
 async def handle_tap(ctx, salon: dict, sender: str, reply_id: str) -> bool:
     """An owner's tap on a manual-claim confirm request. Only the owner's tap counts;
     anything else falls through to the customer flow."""
+    availability = AVAILABILITY_TAP.match(reply_id or "")
+    if availability:
+        if not is_owner(salon, sender):
+            return False
+        from .booking_flow import owner_availability_response
+        result = await owner_availability_response(ctx, salon, availability[2], availability[1].lower())
+        key = "owner_manual_stale" if result in ("stale", "timeout") else "owner_manual_response_saved"
+        await _say(ctx, salon, sender, t("en", key))
+        return True
     m = TILL_TAP.match(reply_id or "")
     if not m or not is_owner(salon, sender):
         return False
@@ -283,6 +311,9 @@ async def handle_tap(ctx, salon: dict, sender: str, reply_id: str) -> bool:
         status, bid = await payments.confirm_manual_claim(ctx.pool, pay_id)
         if status == "confirmed":
             await _announce_manual(ctx, bid, pay_id)
+        elif status == "unavailable":
+            await _say(ctx, salon, sender, t("en", "till_owner_slot_unavailable"))
+            await _tell_verified_slot_unavailable(ctx, salon, bid, pay_id)
         elif status == "already":
             await _say(ctx, salon, sender, t("en", "till_owner_already"))
         else:
@@ -299,23 +330,70 @@ async def handle_tap(ctx, salon: dict, sender: str, reply_id: str) -> bool:
     return True
 
 
+async def _pending_manual_claims(ctx, salon: dict, to: str, tz: ZoneInfo, lang: str) -> None:
+    """Rebuild actionable owner prompts from the durable payment rows, including expired holds."""
+    rows = await ctx.pool.fetch(
+        "SELECT p.id::text AS payment_id, p.amount_kes, p.provider, p.mpesa_receipt, p.claim_ref, p.status AS payment_status, "
+        "r.expected_amount, r.received_amount, "
+        "b.status AS booking_status, b.starts_at, c.name AS client_name, c.wa_id AS client_id, sv.name AS service_name "
+        "FROM payments p JOIN bookings b ON b.id=p.booking_id JOIN clients c ON c.id=b.client_id "
+        "JOIN services sv ON sv.id=b.service_id LEFT JOIN payment_reviews r ON r.payment_id=p.id "
+        "WHERE p.salon_id=$1::uuid AND p.method='manual' AND p.status IN ('pending','review') "
+        "ORDER BY p.created_at, p.id", salon["id"])
+    if not rows:
+        await _say(ctx, salon, to, t(lang, "owner_pending_none"))
+        return
+    acct = await payments.account(ctx.pool, salon["id"])
+    destination = payments.destination_label(acct, lang)
+    for row in rows:
+        when = row["starts_at"].astimezone(tz).strftime("%a %d %b %H:%M")
+        status_key = {
+            "expired": "owner_pending_slot_expired",
+            "cancelled": "owner_pending_slot_cancelled",
+        }.get(row["booking_status"], "owner_pending_slot_held")
+        slot_status = t(lang, status_key)
+        body = t(lang, "owner_pending_payment", service=row["service_name"], when=when,
+                 client=row["client_name"] or row["client_id"],
+                 amount=(row["received_amount"] if row["payment_status"] == "review" and row["received_amount"] is not None
+                         else row["amount_kes"]), destination=destination,
+                 code=row["mpesa_receipt"] or "?", ref=(row["claim_ref"] or "")[:240], slot_status=slot_status)
+        if row["payment_status"] == "review":
+            body += "\n" + t(lang, "owner_pending_review", expected=row["expected_amount"] or row["amount_kes"],
+                               received=row["received_amount"] if row["received_amount"] is not None else "unclear")
+        buttons = [(f"till:yes:{row['payment_id']}", "Ndiyo" if lang == "sw" else "Yes"),
+                   (f"till:no:{row['payment_id']}", "Hapana" if lang == "sw" else "No")]
+        await outbound.send_buttons(ctx, salon, to, body, buttons)
+
+
+async def _tell_verified_slot_unavailable(ctx, salon: dict, booking_id: str | None, pay_id: str) -> None:
+    if not booking_id:
+        return
+    row = await ctx.pool.fetchrow(
+        "SELECT c.wa_id, c.lang, p.amount_kes FROM bookings b JOIN clients c ON c.id=b.client_id "
+        "JOIN payments p ON p.booking_id=b.id WHERE b.id=$1::uuid AND p.id=$2::uuid", booking_id, pay_id)
+    if row:
+        await outbound.send_text(ctx, salon, row["wa_id"],
+                                 t(row["lang"] or "en", "till_verified_slot_unavailable", amount=row["amount_kes"]))
+
+
 async def _announce_manual(ctx, booking_id: str, pay_id: str) -> None:
     """The owner confirmed the money arrived: reuse the paid announcement path (customer booked,
     owner notified, reminders scheduled, exactly once)."""
     p = await ctx.pool.fetchrow("SELECT * FROM payments WHERE id=$1::uuid", pay_id)
     d = await ctx.pool.fetchrow(payments._DETAIL, booking_id)
     s = payments.Settlement("paid", "", str(p["id"]), booking_id, p["amount_kes"], p["phone"], p["mpesa_receipt"],
-                            p["result_code"], settled_via="manual", **dict(d))
+                            p["result_code"], settled_via="manual", provider=p["provider"] or "mpesa", **dict(d))
     await payments.announce(ctx, s)
 
 
 async def _tell_declined(ctx, salon: dict, booking_id: str | None) -> None:
     if not booking_id:
         return
-    row = await ctx.pool.fetchrow("SELECT c.wa_id, c.lang FROM bookings b JOIN clients c ON c.id=b.client_id WHERE b.id=$1::uuid", booking_id)
+    row = await ctx.pool.fetchrow("SELECT b.status, c.wa_id, c.lang FROM bookings b JOIN clients c ON c.id=b.client_id WHERE b.id=$1::uuid", booking_id)
     if row is None:
         return
-    await outbound.send_text(ctx, salon, row["wa_id"], t(row["lang"], "till_declined", salon=salon["name"]))
+    key = "till_declined_closed" if row["status"] in ("cancelled", "expired") else "till_declined"
+    await outbound.send_text(ctx, salon, row["wa_id"], t(row["lang"] or "en", key, salon=salon["name"]))
 
 
 async def _block(ctx, salon, to, rest: str, tz, today: date, lang: str) -> None:
@@ -373,8 +451,37 @@ async def _deposit(ctx, salon, to, rest: str, lang: str) -> None:
         await _say(ctx, salon, to, t(lang, "owner_deposit_off"))
         return
     acct = await payments.account(ctx.pool, salon["id"])
-    note = t(lang, "owner_deposit_till", kind=acct["kind"], party=acct["party_b"]) if acct else t(lang, "owner_deposit_notill")
+    note = t(lang, "owner_deposit_till", destination=payments.destination_label(acct, lang)) if acct else t(lang, "owner_deposit_notill")
     await _say(ctx, salon, to, t(lang, "owner_deposit_set", amount=amount, note=note))
+
+
+async def _payment_destination(ctx, salon, to, rest: str, lang: str) -> None:
+    """Set an owner-controlled manual deposit destination."""
+    parts = (rest or "").strip().split(maxsplit=1)
+    if len(parts) != 2:
+        await _say(ctx, salon, to, t(lang, "owner_payment_bad"))
+        return
+    choice, value = parts[0].casefold(), parts[1].strip()
+    phone_type = None
+    if choice in ("till", "tillnumber"):
+        kind = "till"
+        destination = value if re.fullmatch(r"\d{7}", value) else None
+    else:
+        phone_type = {"pochi": "pochi", "send": "send_money", "direct": "send_money",
+                      "airtel": "airtel_money"}.get(choice)
+        kind = "phone"
+        destination = mpesa.normalize_msisdn(value) if phone_type else None
+    if not destination:
+        await _say(ctx, salon, to, t(lang, "owner_payment_bad"))
+        return
+    await ctx.pool.execute(
+        "INSERT INTO salon_payment (salon_id, kind, shortcode, party_b, account_ref, manual, phone_type) "
+        "VALUES ($1::uuid,$2,NULL,$3,'RemboAI',true,$4) "
+        "ON CONFLICT (salon_id) DO UPDATE SET kind=EXCLUDED.kind, shortcode=NULL, party_b=EXCLUDED.party_b, "
+        "account_ref=EXCLUDED.account_ref, manual=true, phone_type=EXCLUDED.phone_type",
+        salon["id"], kind, destination, phone_type)
+    acct = {"kind": kind, "party_b": destination, "manual": True, "phone_type": phone_type}
+    await _say(ctx, salon, to, t(lang, "owner_payment_set", destination=payments.destination_label(acct, lang)))
 
 
 async def cancel_booking(ctx, salon: dict, booking_id: str, tz: ZoneInfo) -> dict | None:

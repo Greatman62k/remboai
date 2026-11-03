@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 508" role="img" aria-labelledby="t d">
   <title id="t">Where Meta AI fires</title>
-  <desc id="d">A customer message goes to Muse Spark, which decides each step. Its tool calls are checked and run by code on the booking engine, and the results go back to the model. Its draft reply is checked against the salon's facts, then sent with code-written confirmations. If configured, Muse Spark Open is tried after a Meta Model API failure; otherwise the keyword flow answers, as it also does when no usable model is available or the budget is spent.</desc>
+  <desc id="d">Ordinary valid chat goes to Muse Spark, which decides each step. Its tool calls are checked and run by code on the booking engine, and verified results go back to the model. The model's reply is checked against salon facts and sent. If configured, an optional secondary model is tried after a primary model failure. Deterministic code fallback responds if no model provides a usable answer.</desc>
   <style>
     text { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Helvetica, Arial, sans-serif; text-anchor: middle; }
     .t { font-size: 17px; font-weight: 700; }
@@ -45,16 +45,16 @@
 
   <rect x="24" y="352" width="250" height="56" rx="10" fill="#00A651"/>
   <text class="t w" x="149" y="377">Send</text>
-  <text class="s w" x="149" y="397">Confirmations written by code</text>
+  <text class="s w" x="149" y="397">Grounded model reply sent</text>
 
   <path class="ln" d="M274 98H318" marker-end="url(#a)"/>
   <rect x="318" y="70" width="178" height="56" rx="10" fill="#E5101D"/>
   <text class="t w" x="407" y="95">Muse Spark Open</text>
-  <text class="s w" x="407" y="115">If configured</text>
+  <text class="s w" x="407" y="115">Optional secondary</text>
 
   <path class="ln" d="M407 126V164" marker-end="url(#a)"/>
   <rect x="318" y="164" width="178" height="56" rx="10" fill="#FF7A00"/>
-  <text class="t w" x="407" y="189">Keyword flow</text>
+  <text class="t w" x="407" y="189">Code fallback</text>
   <text class="s w" x="407" y="209">No usable model or budget</text>
 
   <rect x="318" y="258" width="178" height="150" rx="12" fill="#fff"/>
@@ -66,5 +66,5 @@
 
   <rect x="24" y="428" width="472" height="56" rx="12" fill="#000" stroke="#fff" stroke-width="2"/>
   <text class="s w" x="260" y="451">Per-salon daily allowances and a circuit breaker:</text>
-  <text class="s w" x="260" y="471">If configured, Muse Spark Open is tried before keywords.</text>
+  <text class="s w" x="260" y="471">Primary model → optional secondary → deterministic code fallback.</text>
 </svg>

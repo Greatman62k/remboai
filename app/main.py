@@ -105,6 +105,10 @@ async def lifespan(app: FastAPI):
     pool = await make_pool(s.database_url, max_size=s.db_pool_max)
     for name in await migrate(pool):
         log.info("applied migration %s", name)
+    from .channels.outbound import rekey_legacy_trace_threads
+    rekeyed_threads = await rekey_legacy_trace_threads(pool, s)
+    if rekeyed_threads:
+        log.info("rekeyed %d legacy conversation trace threads", rekeyed_threads)
     await verify_stored_tokens(pool, s)
     http = httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=10.0))
     wa = WhatsApp(http, s.graph_version)
@@ -174,11 +178,6 @@ async def _reminder_loop(ctx):
                     await sweep_expired(ctx)
                 except Exception:
                     log.exception('waitlist sweep failed')
-                try:
-                    from .reminders import release_silent
-                    await release_silent(ctx)
-                except Exception:
-                    log.exception('silent release failed')
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -297,7 +296,7 @@ async def receive(request: Request, bg: BackgroundTasks):
         log.error("DELIVERY FAILED to %s code=%s %s | %s", mask(f.to), f.code, f.title, explain(f.code))
     events = []
     for msg in parse_messages(payload):
-        events.append((msg.id, {"id": msg.id, "sender": msg.sender, "phone_number_id": msg.phone_number_id, "kind": msg.kind, "text": msg.text, "media_id": msg.media_id, "name": msg.name, "reply_id": msg.reply_id, "wa_id": msg.sender}))
+        events.append((msg.id, {"id": msg.id, "sender": msg.sender, "phone_number_id": msg.phone_number_id, "kind": msg.kind, "text": msg.text, "media_id": msg.media_id, "name": msg.name, "reply_id": msg.reply_id, "wa_id": msg.sender, "sent_at": msg.sent_at.isoformat() if msg.sent_at else None}))
     if events:
         try:
             await enqueue_jobs(request.app.state.pool, "whatsapp", events, max_pending=request.app.state.settings.webhook_max_pending, max_pending_per_sender=request.app.state.settings.webhook_max_pending_per_sender)
@@ -359,7 +358,7 @@ async def telegram_webhook(request: Request, bg: BackgroundTasks):
     if cb:
         bg.add_task(tg.answer_callback, cb)
     if msg:
-        events = [(msg.id, {"id": msg.id, "sender": msg.sender, "phone_number_id": msg.phone_number_id, "kind": msg.kind, "text": msg.text, "media_id": msg.media_id, "name": msg.name, "reply_id": msg.reply_id})]
+        events = [(msg.id, {"id": msg.id, "sender": msg.sender, "phone_number_id": msg.phone_number_id, "kind": msg.kind, "text": msg.text, "media_id": msg.media_id, "name": msg.name, "reply_id": msg.reply_id, "sent_at": msg.sent_at.isoformat() if msg.sent_at else None})]
         try:
             await enqueue_jobs(request.app.state.pool, "telegram", events, max_pending=request.app.state.settings.webhook_max_pending, max_pending_per_sender=request.app.state.settings.webhook_max_pending_per_sender)
         except QueueCapacityError:
@@ -491,8 +490,12 @@ async def resolve_review(review_id: str, body: ResolveBody, request: Request, x_
                 str(rid), body.action, body.resolution_reference, body.resolution_note)
             if not changed.endswith("1"):
                 raise HTTPException(409, "Payment review has already been resolved")
-            if body.action == "refunded":
-                await conn.execute("UPDATE payments SET status='refunded', updated_at=now() WHERE id=$1::uuid", row["payment_id"])
+            payment_status = "refunded" if body.action == "refunded" else "closed_no_refund"
+            await conn.execute(
+                "UPDATE payments SET status=$2, "
+                "result_desc=CASE WHEN $2='closed_no_refund' THEN 'closed by ops without refund' ELSE result_desc END, "
+                "updated_at=now() WHERE id=$1::uuid",
+                row["payment_id"], payment_status)
     return {"id": str(rid), "status": body.action}
 
 @app.get("/ops/webhook-jobs/dead")

@@ -1,5 +1,7 @@
 import dataclasses
+import hashlib
 import logging
+from datetime import datetime, timedelta, timezone
 
 from . import guard
 from .channels import outbound
@@ -7,6 +9,32 @@ from .conversation import handle as converse
 from .channels.whatsapp import Message, mask
 
 log = logging.getLogger("rembo")
+TELEGRAM_STALE_AFTER = timedelta(minutes=30)
+
+
+async def _reject_stale_telegram(ctx, msg: Message) -> bool:
+    """Do not act on a Telegram update delivered after its useful reply window."""
+    if not msg.sender.startswith("tg:") or msg.sent_at is None:
+        return False
+    sent_at = msg.sent_at
+    if sent_at.tzinfo is None:
+        sent_at = sent_at.replace(tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) - sent_at <= TELEGRAM_STALE_AFTER:
+        return False
+    from .messages import t
+    from .smalltalk import language
+    body = t(language(msg.text or "", "en"), "stale_message")
+    digest = hashlib.sha256(f"plain\x00{msg.sender}\x00{body}".encode()).hexdigest()[:32]
+    already_notified = await ctx.pool.fetchval(
+        "SELECT 1 FROM outbound_log o JOIN inbound_messages i ON i.wa_message_id=o.message_id "
+        "WHERE i.wa_id=$1 AND o.digest=$2 AND o.sent_at > now()-interval '30 minutes' LIMIT 1",
+        msg.sender, digest)
+    if already_notified:
+        return True
+    if not await outbound.send_plain(ctx, msg.sender, body):
+        raise RuntimeError("could not send stale-message notice")
+    log.info("declined stale Telegram update %s from %s", msg.id, mask(msg.sender))
+    return True
 
 
 async def _process(ctx, msg: Message) -> None:
@@ -14,6 +42,8 @@ async def _process(ctx, msg: Message) -> None:
     dropped for abuse or rate limits); raising means "not dealt with, try again"."""
     msg = dataclasses.replace(msg, text=guard.clean(msg.text), name=guard.clean_name(msg.name))
     await outbound.record_inbound(ctx, msg)
+    if await _reject_stale_telegram(ctx, msg):
+        return
     if await guard.blocked(ctx.pool, msg.sender, ctx.settings.strike_limit):
         log.warning("ignoring %s: too many abuse signals today", mask(msg.sender))
         return

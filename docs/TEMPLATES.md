@@ -1,31 +1,47 @@
 # WhatsApp Templates for Reminders
 
-Reminders go outside the 24h customer-service window, so they must be approved Utility templates.
+WhatsApp requires approved Utility templates for reminders sent outside its 24-hour customer-service window. Telegram reminders are sent as direct messages and need no template.
 
-## Setup in Meta Business Manager
-1. Business Settings → WhatsApp Manager → Message Templates → Create.
-2. Category: **Utility**, Name: `reminder_24h`, Language: `en` (and `sw` if needed).
-3. Body: `Hello {1}, reminder: {2} on {3} at {4}. Reply STOP to opt out.`
-   Variables: 1=customer name, 2=service, 3=date, 4=time.
-4. Submit for approval (usually 24h). Do the same for `reminder_2h`.
-5. Set `REMINDER_TEMPLATE_24H`/`REMINDER_TEMPLATE_2H` in `.env` to the approved names, restart.
-6. Add a row per salon to `reminder_templates` with `approved=true` and `variables` listing the variables in order, so the parameters sent match the template Meta approved:
-   `INSERT INTO reminder_templates (salon_id, name, language, body, approved, variables) VALUES (..., 'reminder_24h', 'en', 'Hello {name}, reminder: {service} on {date} at {time}.', true, '["name","service","date","time"]');`
-   Available variables: `name`, `service`, `date`, `time`, `when`, `salon`. A row with no `variables` sends the whole rendered `body` as a single parameter (only right for a template whose body is one variable).
-   Meta rejects a send whose parameter count differs from the approved template (error 132000), so the list must match.
+## Set up the templates
 
-## How Rembo uses them
+In Meta Business Manager, create and get approval for the Utility templates your salon needs:
 
-- On `paid` booking, `schedule_reminders` creates jobs at `starts_at-24h` and `-2h` if >2h away and not opt-out.
-- A salon that adds an approved `thanks_visit` template gets a post-visit thank-you: one job at `ends_at+2h`, sent only if the booking is still `confirmed` once the visit is over (cancelled, expired and no-show bookings get no thanks). Opt-outs apply as usual.
-- `run_reminders` every 60s sends via `POST /<phone_id>/messages` `type: template` with `body` parameters; fallback to `text` inside 24h window if template fails. A send that fails is retried (5 and 15 minutes later, 3 attempts in all, never past the appointment) before the job is marked `failed`. The salon's own token is decrypted before use.
-- Cancel on `cancelled/expired/no_show` → `update reminder_jobs status=cancelled`.
-- Customer `STOP`/`opt out` → `clients.reminder_opt_out=true`, future jobs cancelled, no new jobs.
-- Owner `noshow #2` → `bookings.status=no_show`, reminders cancelled, owner told.
+| Template name | Recipient | Purpose | Variables used by RemboAI |
+|---|---|---|---|
+| `reminder_24h` | Customer | Day-before appointment reminder | `name`, `service`, `date`, `time` |
+| `reminder_2h` | Customer | Two-hour appointment reminder | `name`, `service`, `date`, `time` |
+| `reminder_3h` | Customer | Keep/Cancel check about three hours before the visit | `name`, `service`, `date`, `time` |
+| `reminder_soon` | Customer | ETA 30 minutes before the visit | `name`, `service`, `salon`, `minutes`, `when` |
+| `owner_reminder_soon` | Owner | Customer ETA 30 minutes before the visit | `name`, `service`, `salon`, `minutes`, `when` |
+| `owner_booking_cancelled` | Owner | Notice that a customer cancelled | `name`, `service`, `salon`, `when` |
 
-## Testing
+For each approved template, add one `reminder_templates` row per salon. The stored `body` uses RemboAI placeholders such as `{name}`; `variables` lists those names in the same order as the approved template's numbered placeholders. Example:
 
-Use sandbox templates (auto-approved) or approved test templates. Verify with `TEST_DATABASE_URL`:
+```sql
+INSERT INTO reminder_templates (salon_id, name, language, body, approved, variables)
+VALUES (
+  '<salon-uuid>', 'owner_reminder_soon', 'en',
+  'Heads up: {name} is expected for {service} at {salon} in about {minutes} minutes ({when}).',
+  true, '["name","service","salon","minutes","when"]'
+);
 ```
-pytest tests/test_reminders.py -q
+
+The available values are `name`, `service`, `date`, `time`, `when`, `minutes`, and `salon`. The parameter order must match the Meta-approved template exactly, or Meta rejects the send with error 132000. Use the language code that matches the approved template.
+
+## Scheduling and delivery
+
+- For a confirmed booking more than 30 minutes away, RemboAI schedules one customer ETA and one owner ETA for 30 minutes before the appointment. WhatsApp needs the corresponding approved template for each recipient; Telegram sends the localized customer message and owner notice directly.
+- If a booking is confirmed within 30 minutes of its start, the immediate booking confirmation and owner booking notice serve as the ETA. A second ETA is not queued.
+- For bookings more than two hours away, the configured 24-hour and 2-hour customer reminders and the approved 3-hour Keep/Cancel check are also scheduled when their run times are still ahead. An explicit Cancel releases the slot to the waitlist. If the customer does not answer the 3-hour check, the booking remains confirmed.
+- A customer cancellation queues one owner notice. WhatsApp needs an approved `owner_booking_cancelled` template; Telegram receives a direct message. Customer reminder opt-outs do not suppress owner notices.
+- An approved `thanks_visit` template adds a thank-you at `ends_at+2h`, sent only if the booking is still confirmed after the visit. Customer opt-outs apply to customer reminders.
+- The reminder worker runs every 60 seconds. Template sends use `POST /<phone_id>/messages`; a failed template can fall back to free text while WhatsApp's 24-hour window is open. Failed sends retry after 5 and 15 minutes, up to three attempts, and do not retry past the appointment start.
+- Cancelling, expiring, or marking a booking as a no-show cancels its pending customer reminders. The owner ETA and cancellation notices use the salon's WhatsApp token when configured.
+
+## Test
+
+With `TEST_DATABASE_URL` configured:
+
+```bash
+pytest tests/test_reminders.py tests/test_still_coming.py -q
 ```

@@ -31,28 +31,99 @@ STALE_AFTER_MIN = 6
 
 
 async def account(pool, salon_id: str) -> dict | None:
-    row = await pool.fetchrow("SELECT kind, shortcode, party_b, account_ref, manual FROM salon_payment WHERE salon_id=$1::uuid", salon_id)
+    row = await pool.fetchrow("SELECT kind, shortcode, party_b, account_ref, manual, phone_type FROM salon_payment WHERE salon_id=$1::uuid", salon_id)
     return dict(row) if row else None
 
 
-# A claimed M-Pesa code: the 10-letter reference on the customer's M-Pesa message. Letters required,
-# so a phone-number fragment never reads as a code.
-_CODE = re.compile(r"\b(?=[A-Z0-9]*[A-Z])[A-Z0-9]{10}\b")
+# Manual claims are owner-verified, so accept references from M-PESA and Airtel Money. References
+# may be alphanumeric or numeric; the owner must still verify every claim in the destination account.
+_CODE = re.compile(r"\b(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*\d)[A-Z0-9]{6,20}\b")
+_NUMERIC_REFERENCE = re.compile(r"\b\d{8,20}\b")
+_STRICT_ALPHA_REFERENCE = re.compile(r"(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*\d)[A-Z0-9]{6,20}")
 # A KES amount: 3 to 6 digits, never part of a longer digit run (phone and till numbers do not match).
 _AMOUNT = re.compile(r"(?<!\d)(\d{3,6})(?!\d)")
 
 MANUAL_HOLD = "30 minutes"
 
 
+def normalize_reference(value: object) -> str | None:
+    """Normalize one exact M-PESA or Airtel transaction reference, never a phone number."""
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip().upper().rstrip(".,:;")
+    valid = bool(_STRICT_ALPHA_REFERENCE.fullmatch(candidate) or _NUMERIC_REFERENCE.fullmatch(candidate))
+    if not valid or mpesa.normalize_msisdn(candidate):
+        return None
+    return candidate
+
+
+def manual_provider(acct: dict | None) -> str:
+    """Provider for a configured manual destination."""
+    if acct and acct.get("kind") == "phone" and acct.get("phone_type") == "airtel_money":
+        return "airtel_money"
+    return "mpesa"
+
+
 def parse_claim(text: str) -> tuple[int | None, str | None, bool]:
-    """Read a manual-till claim: (amount, code, ambiguous). Ambiguous means several different
-    amounts were named; missing parts return None without flagging. Never trusted for money."""
+    """Read an owner-verified manual claim: (amount, transaction reference, ambiguous)."""
     upper = (text or "").upper()
-    code = (_CODE.search(upper).group(0) if _CODE.search(upper) else None)
+    reference = next((m for m in _CODE.finditer(upper)
+                      if not re.fullmatch(r"(?:KES|KSH)\d{3,6}", m.group(0))), None)
+    numeric_reference = _NUMERIC_REFERENCE.search(upper) if reference is None else None
+    code = reference.group(0) if reference else numeric_reference.group(0) if numeric_reference else None
+    if code and mpesa.normalize_msisdn(code):
+        code = None
     found = sorted({int(m.group(1)) for m in _AMOUNT.finditer(upper)})
     if len(found) > 1:
         return None, code, True
     return (found[0] if found else None), code, False
+
+
+def display_msisdn(number: str) -> str:
+    """Format a normalized Kenyan mobile number for payment instructions."""
+    digits = re.sub(r"\D", "", number or "")
+    if len(digits) == 12 and digits.startswith("254"):
+        local = "0" + digits[3:]
+        return f"{local[:4]} {local[4:7]} {local[7:]}"
+    return number
+
+
+def destination_label(acct: dict | None, lang: str = "en") -> str:
+    """Return the precise payment route and destination, without Daraja shortcode details."""
+    if not acct:
+        return "no payment destination configured" if lang != "sw" else "hakuna sehemu ya malipo iliyowekwa"
+    kind, party = acct.get("kind"), str(acct.get("party_b") or "")
+    if kind == "phone":
+        party = display_msisdn(party)
+        phone_type = acct.get("phone_type")
+        if phone_type == "pochi":
+            return f"M-PESA Pochi la Biashara {party}" if lang != "sw" else f"Pochi la Biashara ya M-PESA {party}"
+        if phone_type == "send_money":
+            return f"M-PESA Send Money {party}" if lang != "sw" else f"Tuma Pesa ya M-PESA {party}"
+        if phone_type == "airtel_money":
+            return f"Airtel Money {party}"
+        return f"mobile money {party}"
+    if acct.get("manual") and kind == "till":
+        return f"M-PESA manual till {party}" if lang != "sw" else f"till ya M-PESA {party}"
+    if kind in ("till", "paybill"):
+        return f"M-PESA {kind} {party}" if lang != "sw" else f"{kind} ya M-PESA {party}"
+    return party
+
+
+def manual_instructions(lang: str, amount: int, acct: dict, salon: str) -> str:
+    """Build code-written instructions for the salon's selected manual payment route."""
+    if acct.get("kind") == "till":
+        key = "manual_pay_till"
+        destination = str(acct.get("party_b") or "")
+    else:
+        key = {"pochi": "manual_pay_pochi", "send_money": "manual_pay_send_money",
+               "airtel_money": "manual_pay_airtel"}.get(acct.get("phone_type"), "manual_pay_send_money")
+        destination = display_msisdn(str(acct.get("party_b") or ""))
+    return t(lang, key, amount=amount, destination=destination, salon=salon)
+
+
+def deposit_note(lang: str, amount: int, acct: dict) -> str:
+    return t(lang, "deposit_note", amount=amount, destination=destination_label(acct, lang))
 
 
 def deposit_amount(salon: dict, service: dict) -> int:
@@ -79,7 +150,7 @@ async def request_deposit(ctx, salon: dict, booking_id: str, phone: str, amount:
     if recent:
         return "wait"
     pay_id = await ctx.pool.fetchval(
-        "INSERT INTO payments (booking_id, salon_id, phone, amount_kes, source_message_id) VALUES ($1::uuid,$2::uuid,$3,$4,$5) RETURNING id::text",
+        "INSERT INTO payments (booking_id, salon_id, phone, amount_kes, provider, source_message_id) VALUES ($1::uuid,$2::uuid,$3,$4,'mpesa',$5) RETURNING id::text",
         booking_id, salon["id"], phone, amount, message_id)
     try:
         acc = await ctx.daraja.stk_push(acct, amount=amount, phone=phone, reference=acct["account_ref"], description="Deposit")
@@ -118,6 +189,7 @@ class Settlement:
     starts_at: datetime
     wa_token: str | None = None
     settled_via: str = "callback"
+    provider: str = "mpesa"
 
 
 _DETAIL = (
@@ -207,7 +279,7 @@ async def settle(pool, o: Outcome, via: str) -> tuple[str, Settlement | None]:
                 log.error("settled payment %s but its booking details are gone; parked without announcement", p["id"])
                 return "settled", None
     return "settled", Settlement(outcome, why, str(p["id"]), str(p["booking_id"]), p["amount_kes"], p["phone"], o.receipt or p["mpesa_receipt"],
-                                 o.code, **dict(d))
+                                 o.code, provider=p["provider"] or "mpesa", **dict(d))
 
 
 def _when(s: Settlement) -> str:
@@ -233,7 +305,8 @@ async def announce_missed(ctx, checkout_request_id: str) -> bool:
         return False
     d = await ctx.pool.fetchrow(_DETAIL, str(p["booking_id"]))
     outcome = "paid" if p["status"] == "paid" else p["status"]
-    s = Settlement(outcome, p["refund_reason"] or "", str(p["id"]), str(p["booking_id"]), p["amount_kes"], p["phone"], p["mpesa_receipt"], p["result_code"], **dict(d))
+    s = Settlement(outcome, p["refund_reason"] or "", str(p["id"]), str(p["booking_id"]), p["amount_kes"], p["phone"], p["mpesa_receipt"], p["result_code"],
+                   provider=p["provider"] or "mpesa", **dict(d))
     log.warning("payment %s was settled but never announced: announcing it now", s.payment_id)
     await announce(ctx, s)
     return True
@@ -241,7 +314,8 @@ async def announce_missed(ctx, checkout_request_id: str) -> bool:
 
 async def _announce(ctx, s: Settlement) -> None:
     lang, when = s.lang, _when(s)
-    ref = f" (M-Pesa {s.receipt})" if s.receipt else ""
+    provider_label = "Airtel Money" if s.provider == "airtel_money" else "M-Pesa"
+    ref = f" ({provider_label} reference {s.receipt})" if s.receipt and s.provider == "airtel_money" else (f" (M-Pesa {s.receipt})" if s.receipt else "")
     if s.outcome == "paid":
         try:
             from .reminders import schedule_reminders
@@ -253,10 +327,10 @@ async def _announce(ctx, s: Settlement) -> None:
             payments_total.labels("paid", getattr(s, "settled_via", "callback") or "callback").inc()
         except Exception:
             pass
-        await _send(ctx, s, s.client_wa_id, t(lang, "paid", amount=s.amount, ref=ref, service=s.service, when=when, stylist=s.stylist, salon=s.salon_name))
+        await _send(ctx, s, s.client_wa_id, t(lang, "paid", provider=provider_label, amount=s.amount, ref=ref, service=s.service, when=when, stylist=s.stylist, salon=s.salon_name))
         if s.owner_wa_id:
             await _send(ctx, s, s.owner_wa_id, t("en", "owner_booked", client=s.client_name or mask(s.client_wa_id), service=s.service,
-                                                    when=when, stylist=s.stylist, amount=s.amount, ref=ref))
+                                                    when=when, stylist=s.stylist, amount=s.amount, provider=provider_label, ref=ref))
     elif s.outcome == "needs_refund":
         log.error("REFUND NEEDED KES %s from %s receipt=%s why=%s", s.amount, mask(s.phone), s.receipt, s.why)
         await _send(ctx, s, s.client_wa_id, t(lang, "refund_notice", amount=s.amount, ref=ref, why=t(lang, f"refund_{s.why}"), salon=s.salon_name))
@@ -346,13 +420,13 @@ async def reconcile(ctx) -> int:
     return settled
 
 
-async def record_manual_claim(pool, booking_id: str, salon_id: str, phone: str, amount: int, code: str, ref: str) -> str:
-    """File a manual-till claim as a pending payment. The hold-expiry spares bookings with a fresh
-    pending payment, and confirming is the owner's tap only: this never touches the booking."""
+async def record_manual_claim(pool, booking_id: str, salon_id: str, phone: str, amount: int, code: str, ref: str,
+                              provider: str = "mpesa") -> str:
+    """File a manual transfer claim. Only the owner's tap confirms it; customer text is never proof."""
     return await pool.fetchval(
-        "INSERT INTO payments (booking_id, salon_id, phone, amount_kes, method, mpesa_receipt, claim_ref) "
-        "VALUES ($1::uuid,$2::uuid,$3,$4,'manual',$5,$6) RETURNING id::text",
-        booking_id, salon_id, phone, amount, code, ref[:500])
+        "INSERT INTO payments (booking_id, salon_id, phone, amount_kes, method, provider, mpesa_receipt, claim_ref) "
+        "VALUES ($1::uuid,$2::uuid,$3,$4,'manual',$5,$6,$7) RETURNING id::text",
+        booking_id, salon_id, phone, amount, provider, code, ref[:500])
 
 
 async def confirm_manual_claim(pool, pay_id: str) -> tuple[str, str | None]:
@@ -360,27 +434,69 @@ async def confirm_manual_claim(pool, pay_id: str) -> tuple[str, str | None]:
     ('stale', None) when the claim or the hold is no longer open."""
     async with pool.acquire() as con:
         async with con.transaction():
-            p = await con.fetchrow("SELECT booking_id, status, method FROM payments WHERE id=$1::uuid FOR UPDATE", pay_id)
+            p = await con.fetchrow(
+                "SELECT p.booking_id, p.status, p.method, p.amount_kes, p.mpesa_receipt, "
+                "r.status AS review_status, r.expected_amount, r.received_amount "
+                "FROM payments p LEFT JOIN payment_reviews r ON r.payment_id=p.id "
+                "WHERE p.id=$1::uuid FOR UPDATE OF p", pay_id)
             if p is None:
                 return "stale", None
             bid = str(p["booking_id"])
             if p["status"] == "paid":
                 return "already", bid
-            if p["status"] != "pending" or p["method"] != "manual":
+            if (p["status"] not in ("pending", "review") or p["method"] != "manual"
+                    or (p["status"] == "review" and p["review_status"] != "pending_review")):
                 return "stale", bid
-            b = await con.fetchrow("SELECT status FROM bookings WHERE id=$1::uuid FOR UPDATE", bid)
-            if b is None or b["status"] != "held":
+            received_amount = p["received_amount"] or p["amount_kes"]
+            b = await con.fetchrow(
+                "SELECT status, salon_id::text AS salon_id, staff_id::text AS staff_id, starts_at, ends_at "
+                "FROM bookings WHERE id=$1::uuid FOR UPDATE", bid)
+            if b is None:
                 await con.execute("UPDATE payments SET status='failed', result_desc='booking closed before confirm', settled_at=now() WHERE id=$1::uuid", pay_id)
                 return "stale", bid
-            await con.execute("UPDATE payments SET status='paid', settled_via='manual', settled_at=now(), announced_at=NULL WHERE id=$1::uuid", pay_id)
+            if b["status"] not in ("held", "expired"):
+                reason = "owner verified manual payment after the booking was closed"
+                await con.execute(
+                    "UPDATE payments SET status='needs_refund', amount_kes=$3, settled_via='manual', settled_at=now(), "
+                    "refund_reason=$2, result_desc='owner verified payment; booking is closed' WHERE id=$1::uuid",
+                    pay_id, reason, received_amount)
+                await con.execute(
+                    "INSERT INTO payment_reviews (payment_id, reason, status, expected_amount, received_amount, mpesa_receipt) "
+                    "VALUES ($1,'payment_unresolved','refund_due',$2,$3,$4) "
+                    "ON CONFLICT (payment_id) DO UPDATE SET status='refund_due', "
+                    "received_amount=EXCLUDED.received_amount, mpesa_receipt=EXCLUDED.mpesa_receipt, updated_at=now()",
+                    pay_id, p["expected_amount"] or p["amount_kes"], received_amount, p["mpesa_receipt"])
+                return "unavailable", bid
+            if b["status"] == "expired":
+                await con.execute("SELECT pg_advisory_xact_lock(hashtext($1))", f"hold:{b['staff_id']}")
+                blocked = await con.fetchval(
+                    "SELECT 1 FROM bookings WHERE staff_id=$1::uuid AND id<>$2::uuid "
+                    "AND status IN ('held','confirmed') AND (status='confirmed' OR hold_expires_at>now()) "
+                    "AND starts_at<$4 AND ends_at>$3 LIMIT 1",
+                    b["staff_id"], bid, b["starts_at"], b["ends_at"])
+                away = await con.fetchval(
+                    "SELECT 1 FROM time_off WHERE salon_id=$1::uuid AND (staff_id IS NULL OR staff_id=$2::uuid) "
+                    "AND starts_at<$4 AND ends_at>$3 LIMIT 1",
+                    b["salon_id"], b["staff_id"], b["starts_at"], b["ends_at"])
+                if b["starts_at"] <= datetime.now(b["starts_at"].tzinfo) or blocked or away:
+                    await con.execute(
+                        "UPDATE payments SET status='needs_refund', amount_kes=$2, settled_via='manual', settled_at=now(), "
+                        "refund_reason='owner verified payment after the slot became unavailable', "
+                        "result_desc='owner verified payment; slot unavailable' WHERE id=$1::uuid", pay_id, received_amount)
+                    await con.execute(
+                        "INSERT INTO payment_reviews (payment_id, reason, status, expected_amount, received_amount, mpesa_receipt) "
+                        "VALUES ($1,'slot_unavailable','refund_due',$2,$3,$4) "
+                        "ON CONFLICT (payment_id) DO UPDATE SET reason='slot_unavailable', status='refund_due', "
+                        "received_amount=EXCLUDED.received_amount, mpesa_receipt=EXCLUDED.mpesa_receipt, updated_at=now()",
+                        pay_id, p["expected_amount"] or p["amount_kes"], received_amount, p["mpesa_receipt"])
+                    return "unavailable", bid
+                await con.execute("UPDATE bookings SET status='held', hold_expires_at=now() + interval '1 minute' WHERE id=$1::uuid", bid)
+            await con.execute("UPDATE payments SET status='paid', amount_kes=$2, settled_via='manual', settled_at=now(), announced_at=NULL, "
+                              "result_desc=NULL, refund_reason=NULL WHERE id=$1::uuid", pay_id, received_amount)
             await con.execute("UPDATE bookings SET status='confirmed', hold_expires_at=NULL WHERE id=$1::uuid", bid)
+            await con.execute("UPDATE payment_reviews SET status='closed_no_refund', resolution_note='owner verified transfer', "
+                              "resolved_at=now(), updated_at=now() WHERE payment_id=$1::uuid AND status='pending_review'", pay_id)
             return "confirmed", bid
-
-
-async def fail_open_manual_claims(pool, booking_id: str, why: str = "booking cancelled") -> int:
-    """A cancelled or released booking drops its waiting manual claims so nothing stays pending forever."""
-    return int((await pool.execute("UPDATE payments SET status='failed', result_desc=$2, settled_at=now() "
-                                   "WHERE booking_id=$1::uuid AND status='pending' AND method='manual'", booking_id, why)).split()[-1])
 
 
 async def decline_manual_claim(pool, pay_id: str) -> tuple[str, str | None]:
@@ -393,17 +509,46 @@ async def decline_manual_claim(pool, pay_id: str) -> tuple[str, str | None]:
             bid = str(p["booking_id"])
             if p["status"] == "paid":
                 return "already", bid
-            if p["status"] != "pending" or p["method"] != "manual":
+            if p["status"] not in ("pending", "review") or p["method"] != "manual":
                 return "stale", bid
             await con.execute("UPDATE payments SET status='failed', result_desc='declined by salon', settled_at=now() WHERE id=$1::uuid", pay_id)
+            await con.execute("UPDATE payment_reviews SET status='closed_no_refund', resolution_note='owner could not verify transfer', "
+                              "resolved_at=now(), updated_at=now() WHERE payment_id=$1::uuid AND status='pending_review'", pay_id)
             return "declined", bid
 
 
 async def sweep(ctx) -> dict:
     from .owner import daily_summaries
     from .reminders import ask_about_visits
-    return {"expired": await expire_holds(ctx.pool), "reconciled": await reconcile(ctx), "summaries": await daily_summaries(ctx),
+    from .booking_flow import expire_owner_availability_checks
+    owner_checks_expired = await expire_owner_availability_checks(ctx)
+    expired = await expire_holds(ctx.pool)
+    await notify_expired_manual_claims(ctx)
+    return {"owner_checks_expired": owner_checks_expired, "expired": expired, "reconciled": await reconcile(ctx), "summaries": await daily_summaries(ctx),
             "visit_checks": await ask_about_visits(ctx.pool, ctx)}
+
+
+async def notify_expired_manual_claims(ctx) -> int:
+    """Tell customers their 30-minute hold elapsed while retaining the owner's open claim."""
+    rows = await ctx.pool.fetch(
+        "SELECT p.id::text AS payment_id, "
+        "c.wa_id, c.lang, s.id::text AS salon_id, s.name AS salon_name, s.wa_phone_number_id, s.wa_access_token "
+        "FROM payments p JOIN bookings b ON b.id=p.booking_id JOIN clients c ON c.id=b.client_id "
+        "JOIN salons s ON s.id=p.salon_id "
+        "WHERE p.method='manual' AND p.status IN ('pending','review') AND b.status='expired' "
+        "AND p.customer_expired_notice_at IS NULL ORDER BY p.created_at")
+    sent = 0
+    for row in rows:
+        salon = {"id": row["salon_id"], "name": row["salon_name"], "wa_phone_number_id": row["wa_phone_number_id"],
+                 "wa_access_token": row["wa_access_token"]}
+        ok = await outbound.send_text(
+            ctx, salon, row["wa_id"],
+            t(row["lang"] or "en", "till_hold_expired", salon=row["salon_name"]))
+        if ok:
+            await ctx.pool.execute("UPDATE payments SET customer_expired_notice_at=now() WHERE id=$1::uuid AND customer_expired_notice_at IS NULL",
+                                   row["payment_id"])
+            sent += 1
+    return sent
 
 
 async def run_sweeper(ctx, every: float = 30.0) -> None:

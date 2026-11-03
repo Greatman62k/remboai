@@ -133,6 +133,12 @@ def owner_request(text: str) -> tuple[str | None, str] | None:
     return None, payload
 
 
+def is_mutation_command(text: str) -> bool:
+    """Recognize explicit platform commands that change business state or notify an owner."""
+    return bool(OFF.fullmatch(text or "") or ON.fullmatch(text or "")
+                or DEL.fullmatch(text or "") or WARN.fullmatch(text or ""))
+
+
 def _like_escape(ref: str) -> str:
     """Escape LIKE wildcards so a typed name only ever matches itself literally."""
     return ref.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

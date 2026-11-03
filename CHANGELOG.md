@@ -2,6 +2,20 @@
 
 Everything in this repository was written during the Meta Global AI Developer Hackathon (building period Oct 27 - Nov 4, 2026).
 
+## Nov 3 (manual payment destinations)
+
+- Salon registration now requires a payment destination when the owner sets a nonzero deposit. Owners choose a seven-digit M-PESA till or a phone destination explicitly identified as Pochi la Biashara, direct M-PESA Send Money, or Airtel Money.
+- Customers receive instructions for the selected route. Manual claims require the owner to verify the transfer reference; Telegram customers are not asked for their phone number for manual payments.
+- Manual booking availability now waits up to five minutes for the owner before deposit instructions are sent. If the owner replies late, the customer gets five minutes to confirm the original details or send changes. Payment screenshots are parsed into unverified claims only; the image is discarded, and only an owner tap can confirm funds.
+- Manual payment claims remain pending after the 30-minute booking hold expires or the customer cancels. Amount-mismatch claims are also in the owner inbox with the expected and reported amounts. Owners can reopen every claim with `pending payments`; late confirmations recheck whether the booking is still active and enter refund review if it has closed or the original time was taken.
+- Manual payment instructions now include customer buttons to report payment or cancel. The report action asks for a screenshot or typed amount and reference; extracted screenshot fields are shown to the owner as unverified evidence. Cancelling after a claim tells the customer the owner still needs to review it.
+- Deposit bookings and waitlist offers are blocked if a salon has no destination. Airtel Money references are stored separately from M-PESA references.
+- Confirmed bookings more than 30 minutes ahead now schedule a customer ETA and an owner ETA 30 minutes before the appointment. Bookings made closer rely on their immediate booking messages. Telegram needs no template; WhatsApp needs approved `reminder_soon` and `owner_reminder_soon` Utility templates. Customer cancellations notify the owner using Telegram or an approved `owner_booking_cancelled` template.
+- The 3-hour Keep/Cancel check no longer releases a booking just because the customer did not answer. Explicit cancellation releases the slot to the waitlist, and the owner is notified.
+- Telegram updates retain their original sent time through webhook and polling. Messages older than 30 minutes receive a resend prompt and are not processed; repeated stale backlog notices are limited to one per sender every 30 minutes.
+- Site copy now says Telegram is live and WhatsApp follows Meta verification. Added the repository link and made the sample invite link explicit.
+- Owner help, the doctor, README, deployment and Telegram docs, marketing pages, and diagrams now describe both M-PESA and Airtel Money routes.
+
 ## Nov 2 (assistant policy, registration agent, conversation evidence)
 
 399 tests, all passing.
@@ -33,7 +47,7 @@ Everything in this repository was written during the Meta Global AI Developer Ha
 352 tests, all passing.
 
 - Waitlist fill (`app/waitlist.py`, migration 026): any cancel (customer, late tap, owner) offers the freed slot to the oldest waiter with Yes/No buttons; Yes books the exact slot within 10 minutes (held with deposit prompt, or confirmed when free); No, expiry, or a taken slot moves the offer on; a minute sweep expires stale offers.
-- Still-coming 3h reminders (migration 027): approved `reminder_3h` templates send with Keep/Cancel buttons; Keep marks the nudge answered, Cancel frees the slot at once, and a minute sweep releases never-answered bookings under 2h out toward the waitlist.
+- Still-coming 3h reminders (migration 027): approved `reminder_3h` templates send with Keep/Cancel buttons; Keep marks the nudge answered and Cancel frees the slot at once. The silent-release sweep described in the original implementation was removed Nov 3; no reply now leaves a confirmed booking in place.
 - Voice notes run behind Modal proxy auth: the endpoint requires a proxy token before any container starts, our own token moved to the `X-Asr-Token` header, and the app sends both (`ASR_PROXY_KEY`/`ASR_PROXY_SECRET` in `.env`). Image also lifts NumPy to 2 for pyarrow.
 - Marketing site started in `site/` (Home, Pricing, Setup guide) in the reference house style with Telegram blue and WhatsApp green accents; contact links are still placeholders.
 - README verification section and keyword evaluation baseline re-run (40 messages: 98 percent intent, 100 percent language).
@@ -147,7 +161,7 @@ Everything in this repository was written during the Meta Global AI Developer Ha
 - Signed, idempotent webhook that echoes the message back.
 - Booking core: salons, stylists, services, clients, bookings with a database exclusion constraint against double booking.
 - Availability on a 30 minute grid, per-stylist slot holds under an advisory lock, hold expiry.
-- Language-model client with a primary and a failover endpoint (Meta Model API, Muse Spark Open) and a keyword-rule fallback that fills the same form.
+- Language-model client with a primary endpoint and optional secondary-endpoint configuration (Muse Spark Open was an example), plus a deterministic keyword fallback for extraction.
 - English and Swahili messages; Swahili clock parsing (saa nane = 14:00); greetings and "how are you" answered, then the request carries on.
 - Conversation memory in Postgres; button taps and slot numbers skip the model.
 - `scripts/seed_salon.py` to set up a salon from the command line.

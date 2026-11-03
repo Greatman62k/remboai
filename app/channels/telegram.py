@@ -8,7 +8,7 @@ import logging
 
 import httpx
 
-from .whatsapp import Message, mask
+from .whatsapp import Message, _unix_time, mask
 
 log = logging.getLogger("rembo.telegram")
 API = "https://api.telegram.org"
@@ -120,13 +120,14 @@ def parse_update(update: dict, bot_key: str) -> tuple[Message | None, str | None
             rows = (m.get("reply_markup") or {}).get("inline_keyboard") or []
             title = next((b.get("text") for row in rows for b in row if b.get("callback_data") == data and b.get("text")), None)
             return Message(mid, sender, name, bot_key, "interactive", title or data, data, None), cq.get("id")
+        sent_at = _unix_time(m.get("date"))
         if m.get("voice") or m.get("audio"):
-            return Message(mid, sender, name, bot_key, "audio", "", None, "tg:" + (m.get("voice") or m.get("audio"))["file_id"]), None
+            return Message(mid, sender, name, bot_key, "audio", "", None, "tg:" + (m.get("voice") or m.get("audio"))["file_id"], sent_at), None
         if m.get("photo"):
             best = max(m["photo"], key=lambda p: p.get("file_size") or p.get("width", 0) * p.get("height", 0))
-            return Message(mid, sender, name, bot_key, "image", (m.get("caption") or "").strip(), None, "tg:" + best["file_id"]), None
+            return Message(mid, sender, name, bot_key, "image", (m.get("caption") or "").strip(), None, "tg:" + best["file_id"], sent_at), None
         if m.get("contact"):
-            return Message(mid, sender, name, bot_key, "text", str(m["contact"].get("phone_number", "")), None, None), None
+            return Message(mid, sender, name, bot_key, "text", str(m["contact"].get("phone_number", "")), None, None, sent_at), None
         if m.get("text"):
             text = m["text"].strip()
             if text.split("@")[0] == "/start":
@@ -135,8 +136,8 @@ def parse_update(update: dict, bot_key: str) -> tuple[Message | None, str | None
                     args = args.split(None, 1)[1] if len(args.split(None, 1)) > 1 else ""
                     args = args.strip()
                 text = f"/start {args}" if args else "hi"
-            return Message(mid, sender, name, bot_key, "text", text, None, None), None
-        return Message(mid, sender, name, bot_key, "other", "", None, None), None
+            return Message(mid, sender, name, bot_key, "text", text, None, None, sent_at), None
+        return Message(mid, sender, name, bot_key, "other", "", None, None, sent_at), None
     except (KeyError, TypeError, IndexError, AttributeError):
         log.warning("ignoring a malformed Telegram update")
         return None, None

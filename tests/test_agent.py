@@ -221,6 +221,7 @@ def test_agent_mode_off_leaves_the_existing_flow_untouched():
 def test_the_model_cancels_a_booking_and_code_states_the_cancellation():
     async def run():
         pool, out, salon = await build(DSN, till=False, agent_mode="on")
+        await pool.execute("UPDATE salons SET deposit_kes=0")
         out.agent = Script(find(), ("say", "Pick one:"), ("tool", "reserve_slot", {"slot_id": "s1"}), ("say", "All good."),
                            ("tool", "cancel_booking", {}), ("say", "Done, I have cancelled it."))
         async with client() as c:
@@ -383,6 +384,43 @@ def test_the_owner_asks_the_diary_in_plain_words_and_the_answer_comes_from_the_t
         async with client() as c:
             await say(c, 2, "who has paid tomorrow?", chat=OWNER)
         assert "9000" not in last(out, OWNER)["text"] and "8000" not in last(out, OWNER)["text"]
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
+def test_owner_summary_and_invite_use_model_tools_while_payment_review_stays_code_routed():
+    async def run():
+        pool, out, salon = await build(DSN, till=False, agent_mode="on")
+        await pool.execute("UPDATE salons SET owner_wa_id=$1", f"tg:{OWNER}")
+        out.agent = Script(
+            ("tool", "daily_summary", {}), ("say", "Here is the verified daily summary."),
+            ("tool", "invite_link", {}), ("say", "Share this: https://t.me/rembo_test_bot?start=zuri-cuts"),
+        )
+        async with client() as c:
+            await say(c, 1, "summary", chat=OWNER)
+            assert last(out, OWNER)["text"] == "Here is the verified daily summary."
+            summary_trace = await pool.fetchrow("SELECT outcome, steps FROM agent_turns ORDER BY id DESC LIMIT 1")
+            assert summary_trace["outcome"] == "agent"
+            assert [step["tool"] for step in _j(summary_trace["steps"])] == ["daily_summary"]
+
+            await say(c, 2, "invite", chat=OWNER)
+            assert last(out, OWNER)["text"] == "Share this: https://t.me/rembo_test_bot?start=zuri-cuts"
+            invite_trace = await pool.fetchrow("SELECT outcome, grounded, steps FROM agent_turns ORDER BY id DESC LIMIT 1")
+            assert invite_trace["outcome"] == "agent" and invite_trace["grounded"] is True
+            assert [step["tool"] for step in _j(invite_trace["steps"])] == ["invite_link"]
+
+            calls_before_payment_review = len(out.agent_requests)
+            await say(c, 3, "pending payments", chat=OWNER)
+            assert len(out.agent_requests) == calls_before_payment_review
+            assert "no manual payment claims" in last(out, OWNER)["text"].lower()
+
+            out.down.add("primary.test")
+            await say(c, 4, "summary", chat=OWNER)
+            assert "Summary" in last(out, OWNER)["text"]
+            assert (await pool.fetchval("SELECT outcome FROM agent_turns ORDER BY id DESC LIMIT 1")) == "unavailable"
+            await say(c, 5, "invite", chat=OWNER)
+            assert "https://t.me/rembo_test_bot?start=zuri-cuts" in last(out, OWNER)["text"]
         await pool.close()
     asyncio.run(run())
 

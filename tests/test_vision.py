@@ -5,7 +5,7 @@ import os
 
 import pytest
 
-from app.ai.vision import make_png
+from app.ai.vision import make_mock_payment_png, make_png, parse_payment_guess
 from app.channels.whatsapp import parse_messages
 from tests.harness import build, client, open_day, payload, post
 
@@ -31,6 +31,46 @@ def test_an_image_message_carries_its_media_id_and_caption():
 def test_the_check_image_is_a_valid_png():
     png = make_png()
     assert png[:8] == b"\x89PNG\r\n\x1a\n" and png[12:16] == b"IHDR" and png.endswith(b"IEND\xaeB`\x82")
+
+
+def test_doctor_receipt_image_is_synthetic_and_readable_png():
+    from io import BytesIO
+    from PIL import Image
+
+    png = make_mock_payment_png()
+    assert png.startswith(b"\x89PNG\r\n\x1a\n")
+    with Image.open(BytesIO(png)) as image:
+        assert image.format == "PNG" and image.size == (1000, 620)
+
+
+def test_payment_screenshot_fields_are_normalized_but_remain_unverified():
+    guess = parse_payment_guess({
+        "is_payment_confirmation": True, "provider": "mpesa", "currency": "KES", "amount": 10.0,
+        "reference": "UK3L70E32K", "date": "3/11/26", "time": "10:47 AM",
+        "recipient": "SAMUEL MUSYOKA 0702369032", "confidence": 0.99,
+    }, model="muse-spark", ms=12)
+    assert guess is not None
+    assert (guess.amount, guess.reference, guess.date, guess.time, guess.recipient) == (
+        10, "UK3L70E32K", "2026-11-03", "10:47", "SAMUEL MUSYOKA")
+    assert guess.provider == "mpesa" and guess.confidence == 0.99
+
+
+@pytest.mark.parametrize("change", [
+    {"is_payment_confirmation": False},
+    {"confidence": 0.79},
+    {"provider": "unknown"},
+    {"currency": "USD"},
+    {"amount": 10.5},
+    {"reference": "254712345678"},
+])
+def test_payment_screenshot_parser_rejects_unreliable_or_unsafe_fields(change):
+    data = {
+        "is_payment_confirmation": True, "provider": "mpesa", "currency": "KES", "amount": 200,
+        "reference": "UK3L70E32K", "date": "2026-11-03", "time": "10:47",
+        "recipient": "SAMUEL MUSYOKA", "confidence": 0.99,
+    }
+    data.update(change)
+    assert parse_payment_guess(data) is None
 
 
 @needs_db

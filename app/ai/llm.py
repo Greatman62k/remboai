@@ -1,7 +1,7 @@
 """The language model reads a message and fills a small checked form. It never decides availability, price or payment.
 
-Endpoints are tried in order (Meta's own API first, then an optional Muse Spark Open host). If every endpoint fails,
-plain keyword rules answer, so the receptionist never goes silent."""
+The primary endpoint is tried first, followed by an optional secondary model endpoint when configured. Extraction
+uses deterministic rules if all model endpoints fail; the agent also has a deterministic code-response fallback."""
 from __future__ import annotations
 
 import json

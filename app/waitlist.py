@@ -81,6 +81,10 @@ async def offer_freed_slot(ctx, salon: dict, staff_id: str, staff_name: str, ser
     """A cancellation freed this slot: hand it to the waitlist, if any."""
     if starts_at is None or starts_at.tzinfo is None or starts_at <= datetime.now(starts_at.tzinfo):
         return
+    if int(salon.get("deposit_kes") or 0) > 0:
+        from . import payments
+        if await payments.account(ctx.pool, salon["id"]) is None:
+            return
     try:
         await _offer_next(ctx, salon, staff_id, staff_name, service_id, service_name, starts_at, ends_at)
     except Exception:
@@ -136,6 +140,11 @@ async def handle_tap(ctx, salon: dict, client: dict, st: dict, chat, lang: str, 
         await _offer_next(ctx, salon, row["staff_id"], row["staff_name"], row["service_id"],
                           row["service"], row["starts_at"], row["ends_at"])
         return True
+    acct = await payments.account(ctx.pool, salon["id"])
+    if int(salon.get("deposit_kes") or 0) > 0 and acct is None:
+        await ctx.pool.execute("UPDATE waitlist SET status='expired' WHERE id=$1::uuid", wid)
+        await _reply(ctx, salon["id"], chat.to, st, chat, t(lang, "payment_unconfigured", salon=salon["name"]))
+        return True
     booking_id = await hold_slot(
         ctx.pool, salon_id=salon["id"], staff_id=row["staff_id"], service_id=row["service_id"],
         client_id=client["id"], starts_at=row["starts_at"], ends_at=row["ends_at"],
@@ -148,7 +157,6 @@ async def handle_tap(ctx, salon: dict, client: dict, st: dict, chat, lang: str, 
         return True
     await ctx.pool.execute("UPDATE waitlist SET status='booked' WHERE id=$1::uuid", wid)
     when = when_label(row["starts_at"], tz)
-    acct = await payments.account(ctx.pool, salon["id"])
     amount = payments.deposit_amount({**salon, "deposit_kes": salon.get("deposit_kes", 0)},
                                      {"price_kes": row["price"]}) if acct else 0
     if amount == 0:
@@ -171,6 +179,12 @@ async def handle_tap(ctx, salon: dict, client: dict, st: dict, chat, lang: str, 
                   "history": st.get("history", [])}
     import app.mpesa as mpesa
     phone = mpesa.normalize_msisdn(chat.to)
+    if acct and acct.get("manual"):
+        await _save(ctx, salon["id"], chat.to, held_state)
+        await _reply(ctx, salon["id"], chat.to, held_state, chat,
+                     t(lang, "held", service=row["service"], when=when, stylist=row["staff_name"], mins=ctx.settings.hold_minutes)
+                     + "\n" + await _prompt(ctx, salon, booking_id, "", amount, lang))
+        return True
     if phone is None:
         await _save(ctx, salon["id"], chat.to, held_state)
         await _reply(ctx, salon["id"], chat.to, held_state, chat,

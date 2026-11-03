@@ -73,6 +73,9 @@ TOOLS = [
             "durations_evidence": {"type": "array", "items": _EVIDENCE},
             "hours_evidence": _EVIDENCE,
             "deposit_evidence": _EVIDENCE,
+            "payment_method_evidence": _EVIDENCE,
+            "payment_type_evidence": _EVIDENCE,
+            "payment_destination_evidence": _EVIDENCE,
             "name_confirmation_evidence": _EVIDENCE,
             "services_confirmation_evidence": _EVIDENCE,
             "duration_defaults_accepted_evidence": _EVIDENCE,
@@ -139,6 +142,9 @@ def _state_summary(state: dict) -> str:
         "service_count": len(data.get("services", [])),
         "opening_hours": {"opens": data.get("open"), "closes": data.get("close")},
         "deposit_kes": data.get("deposit"),
+        "payment_method": data.get("payment_method"),
+        "payment_type": data.get("payment_type"),
+        "payment_destination": data.get("payment_destination"),
         "current_step": state.get("step", "ask_name"),
         "possible_duplicate": state.get("twin") if state.get("step") == "confirm_name" else None,
     }
@@ -210,10 +216,12 @@ class RegistrationToolbox:
         self._was_final = state.get("step") == "confirm_all"
         self._captured = False
         step = state.get("step", "ask_name")
-        if step in ("ask_durations", "ask_hours", "ask_deposit", "confirm_all") and "services_confirmed" not in state:
+        if step in ("ask_durations", "ask_hours", "ask_deposit", "ask_payment_method", "ask_till_number",
+                    "ask_phone_type", "ask_payment_phone", "confirm_all") and "services_confirmed" not in state:
             state["services_confirmed"] = True
             self.changed = True
-        if step in ("ask_hours", "ask_deposit", "confirm_all") and "duration_defaults_accepted" not in state:
+        if step in ("ask_hours", "ask_deposit", "ask_payment_method", "ask_till_number", "ask_phone_type",
+                    "ask_payment_phone", "confirm_all") and "duration_defaults_accepted" not in state:
             state["duration_defaults_accepted"] = True
             self.changed = True
 
@@ -429,6 +437,46 @@ class RegistrationToolbox:
             else:
                 self.rejected.append("deposit")
 
+        method_quote = self._evidence(args, "payment_method_evidence")
+        if method_quote:
+            method = ob.parse_payment_method(method_quote)
+            if method:
+                if method != data.get("payment_method"):
+                    data.pop("payment_destination", None)
+                    data.pop("payment_type", None)
+                data["payment_method"] = method
+                self.accepted.append("payment_method")
+                self.changed = True
+            else:
+                self.rejected.append("payment_method")
+
+        type_quote = self._evidence(args, "payment_type_evidence")
+        if type_quote:
+            payment_type = ob.parse_payment_phone_type(type_quote)
+            if payment_type:
+                if payment_type != data.get("payment_type"):
+                    data.pop("payment_destination", None)
+                data["payment_type"] = payment_type
+                self.accepted.append("payment_type")
+                self.changed = True
+            else:
+                self.rejected.append("payment_type")
+
+        destination_quote = self._evidence(args, "payment_destination_evidence")
+        if destination_quote:
+            if data.get("payment_method") == "till":
+                destination = ob.parse_manual_till(destination_quote)
+            elif data.get("payment_method") == "phone" and data.get("payment_type") in ("pochi", "send_money", "airtel_money"):
+                destination = ob.parse_payment_phone(destination_quote)
+            else:
+                destination = None
+            if destination:
+                data["payment_destination"] = destination
+                self.accepted.append("payment_destination")
+                self.changed = True
+            else:
+                self.rejected.append("payment_destination")
+
         services_confirmation = self._evidence(args, "services_confirmation_evidence")
         if prior_step == "confirm_services" and services_confirmation and ob.is_affirmative(services_confirmation):
             state["services_confirmed"] = True
@@ -487,6 +535,14 @@ class RegistrationToolbox:
             state["step"] = "ask_hours"
         elif "deposit" not in data:
             state["step"] = "ask_deposit"
+        elif int(data.get("deposit") or 0) > 0 and data.get("payment_method") not in ("till", "phone"):
+            state["step"] = "ask_payment_method"
+        elif int(data.get("deposit") or 0) > 0 and data.get("payment_method") == "till" and ob.parse_manual_till(data.get("payment_destination", "")) is None:
+            state["step"] = "ask_till_number"
+        elif int(data.get("deposit") or 0) > 0 and data.get("payment_method") == "phone" and data.get("payment_type") not in ("pochi", "send_money", "airtel_money"):
+            state["step"] = "ask_phone_type"
+        elif int(data.get("deposit") or 0) > 0 and data.get("payment_method") == "phone" and ob.parse_payment_phone(data.get("payment_destination", "")) is None:
+            state["step"] = "ask_payment_phone"
         else:
             state["step"] = "confirm_all"
 
@@ -584,18 +640,13 @@ async def advance(ctx, sender: str, pid: str, text: str, state: dict) -> bool:
         log.exception("registration agent failed; using the deterministic onboarding flow")
         return False
 
-    # Without a validated capture call, let the well-tested state machine handle this input.
-    if not run.steps or not toolbox._captured:
-        await _trace(ctx, mid=mid, sender=sender, text=words, steps=run.steps, final_text=None, state_after=None,
-                     outcome="registration_unavailable" if run.unavailable else "registration_no_capture",
-                     grounded=False if run.problems else None, problems=run.problems, model=run.first_model,
-                     calls=run.calls, ms=run.ms)
-        return False
-
-    if not (set(toolbox.accepted) - {"name_rejected"}):
+    if not run.lead:
+        outcome = ("registration_unavailable" if run.unavailable else
+                   "registration_no_capture" if not toolbox._captured else "registration_no_valid_capture")
         await _trace(ctx, mid=mid, sender=sender, text=words, steps=run.steps, final_text=None, state_after=state,
-                     outcome="registration_no_valid_capture", grounded=None, problems=toolbox.rejected,
-                     model=run.first_model, calls=run.calls, ms=run.ms)
+                     outcome=outcome, grounded=False if run.problems else None,
+                     problems=run.problems or toolbox.rejected, model=run.first_model,
+                     calls=run.calls, ms=run.ms)
         return False
 
     body = run.lead

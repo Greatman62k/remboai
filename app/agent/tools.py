@@ -1,11 +1,11 @@
 """The agent's hands. The model chooses a tool and its arguments; this file checks them against the real world and does the work.
 
 What the model can never do: set a price or a deposit amount, mark anything paid, pick a slot code never offered, touch another
-customer's bookings, or send a message of its own. Each tool wraps the booking engine that already existed (holds, the exclusion
+customer's bookings, or send messages directly to a channel. Each tool wraps the booking engine that already existed (holds, the exclusion
 constraint, idempotent cancellation, the payment prompt), so a model mistake can waste a turn but cannot damage a booking or money.
 
-Tools that change something return `Outcome.text`, written by code from the same templates the keyword flow uses. That text is always
-shown to the customer, whatever the model says around it."""
+Tools that change something return `Outcome.text`, written by code from the same templates the keyword flow uses. It is passed to the
+model as a verified fact and remains the fallback if the model cannot produce a grounded reply."""
 from __future__ import annotations
 
 import json
@@ -120,12 +120,26 @@ class Toolbox:
     async def run(self, name: str, args: dict) -> dict:
         if name not in TOOL_NAMES:
             return {"error": "unknown_tool", "tools": sorted(TOOL_NAMES)}
+        outcome_start = len(self.outcomes)
         try:
             result = await getattr(self, "t_" + name)(args if isinstance(args, dict) else {})
         except Exception:
             log.exception("tool %s failed", name)
             result = {"error": "tool_failed", "hint": "tell the customer you could not check that just now and ask them to try again"}
-        self.facts.add(json.dumps(result, ensure_ascii=False, default=str))
+        new_outcomes = self.outcomes[outcome_start:]
+        verified = [outcome.text for outcome in new_outcomes if outcome.text]
+        for outcome in new_outcomes:
+            if outcome.kind == "held":
+                acct = await payments.account(self.ctx.pool, self.salon["id"])
+                if acct and acct.get("manual"):
+                    destination = (payments.display_msisdn(acct.get("party_b") or "")
+                                   if acct.get("kind") == "phone" else str(acct.get("party_b") or ""))
+                    if destination:
+                        self.facts.required_literals.add(destination)
+                    self.facts.add(payments.destination_label(acct, self.lang))
+        if verified and isinstance(result, dict):
+            result = {**result, "verified_customer_outcome": verified}
+        self.facts.add(json.dumps(result, ensure_ascii=False, default=str), *verified)
         return result
 
     # -- read and offer ----------------------------------------------------------------------------------------------------------------------
@@ -184,7 +198,7 @@ class Toolbox:
         return {"bookings": [{"booking_ref": f"b{i + 1}", "service": r["service"], "when": bf.when_label(r["starts_at"], self.tz), "stylist": r["stylist"],
                               "status": r["status"], "deposit_paid": bool(r["deposit_paid"])} for i, r in enumerate(rows)]}
 
-    # -- changes (their words come from code) -------------------------------------------------------------------------------------------------
+    # -- changes (code executes them and verifies the result) ---------------------------------------------------------------------------------
     async def t_reserve_slot(self, a: dict) -> dict:
         if self._reserved:
             return {"error": "already_handled_this_turn"}
@@ -207,7 +221,8 @@ class Toolbox:
             self.facts.held = True
             self.outcomes.append(Outcome("held", cap.joined))
             return {"status": "held", "service": self.st.get("service_name"), "when": self.st.get("held_when"), "stylist": self.st.get("held_stylist"),
-                    "deposit_kes": amount, "not_yet_confirmed": True, "note": "the system now sends the payment steps; do not describe them"}
+                    "deposit_kes": amount, "not_yet_confirmed": True,
+                    "note": "repeat the exact payment route and instructions in verified_customer_outcome; never say payment was received or the booking confirmed"}
         if self.st.get("state") == "offered":
             self.outcomes.append(Outcome("offered", cap.joined, cap.buttons_))
             return {"status": "slot_taken", "slots": self.view_slots(), "note": "someone else took it; these are the nearest alternatives"}
@@ -261,6 +276,7 @@ class Toolbox:
         if not self.now.date() <= day <= self.now.date() + timedelta(days=60):
             return {"error": "date_out_of_range"}
         outcome = await waitlist.join(self.ctx.pool, self.salon["id"], self.client["id"], svc["id"], day)
+        self.facts.waitlisted = True
         key = "waitlist_joined" if outcome == "joined" else "waitlist_already"
         self.outcomes.append(Outcome("waitlist", t(self.lang, key, service=svc["name"], day=day.isoformat())))
         return {"status": outcome}
@@ -269,5 +285,6 @@ class Toolbox:
         cat = HANDOFF.get(str(a.get("reason")), "default")
         await guard.hand_off(self.ctx, self.salon, self.client, self.lang, cat, self.user_text)
         self.st = {"state": "handoff", "category": cat, "history": list(self.base_history)}
+        self.facts.handed_off = True
         self.outcomes.append(Outcome("handoff", guard.reply_for(cat, self.lang)))
         return {"status": "owner_notified", "note": "the system tells the customer the owner will reply"}

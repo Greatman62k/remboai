@@ -183,6 +183,10 @@ def _validate(policy: object) -> dict:
     if not isinstance(vision, dict) or not isinstance(vision.get("identity"), str) or not vision["identity"].strip():
         raise PolicyError("vision_matcher.identity must be a non-empty string")
     _strings(vision.get("output_rules"), "vision_matcher.output_rules")
+    payment_vision = vision.get("payment_screenshot")
+    if not isinstance(payment_vision, dict) or not isinstance(payment_vision.get("identity"), str) or not payment_vision["identity"].strip():
+        raise PolicyError("vision_matcher.payment_screenshot.identity must be a non-empty string")
+    _strings(payment_vision.get("output_rules"), "vision_matcher.payment_screenshot.output_rules")
 
     protocol = policy.get("tool_protocol")
     if not isinstance(protocol, dict) or not isinstance(protocol.get("reply_without_tools"), str):

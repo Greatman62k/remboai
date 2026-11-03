@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
 from collections import Counter
@@ -17,7 +18,6 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 
 from app.token_crypto import decrypt_token
-from app.channels.whatsapp import mask
 
 log = logging.getLogger("rembo.outbound")
 
@@ -47,12 +47,45 @@ def current_message_id() -> str | None:
     return s.message_id if s else None
 
 
+def trace_thread(ctx, sender: str) -> str:
+    """Return a stable opaque thread key without truncating sender IDs into collisions."""
+    settings = ctx.settings
+    secret = (getattr(settings, "wa_app_secret", "") or
+              getattr(settings, "token_encryption_key", "") or
+              getattr(settings, "ops_api_key", "") or
+              getattr(settings, "database_url", ""))
+    channel = "telegram" if sender.startswith("tg:") else "whatsapp"
+    value = f"remboai:conversation-trace:v1:{channel}:{sender}".encode()
+    digest = hmac.new(str(secret).encode(), value, hashlib.sha256).hexdigest()[:32]
+    return f"{channel}:{digest}"
+
+
+async def rekey_legacy_trace_threads(pool, settings) -> int:
+    """Replace recent suffix-only thread keys using the sender IDs retained with inbound events."""
+    from types import SimpleNamespace
+
+    ctx = SimpleNamespace(settings=settings)
+    async with pool.acquire() as con:
+        async with con.transaction():
+            rows = await con.fetch(
+                "SELECT c.message_id, c.thread, i.wa_id FROM conversation_trace c "
+                "JOIN inbound_messages i ON i.wa_message_id=c.message_id "
+                "WHERE c.thread NOT LIKE 'whatsapp:%' AND c.thread NOT LIKE 'telegram:%' "
+                "AND c.thread NOT LIKE 'owner:%' FOR UPDATE OF c")
+            if not rows:
+                return 0
+            await con.executemany(
+                "UPDATE conversation_trace SET thread=$2 WHERE message_id=$1 AND thread=$3",
+                [(row["message_id"], trace_thread(ctx, row["wa_id"]), row["thread"]) for row in rows])
+            return len(rows)
+
+
 async def record_inbound(ctx, msg) -> None:
     """Keep the sanitized inbound side of a chat turn for the protected conversation trace."""
     await ctx.pool.execute(
         "INSERT INTO conversation_trace (message_id, thread, channel, message_kind, user_text) "
         "VALUES ($1,$2,$3,$4,$5) ON CONFLICT (message_id) DO NOTHING",
-        msg.id, mask(msg.sender), "telegram" if msg.sender.startswith("tg:") else "whatsapp",
+        msg.id, trace_thread(ctx, msg.sender), "telegram" if msg.sender.startswith("tg:") else "whatsapp",
         (msg.kind or "other")[:32], (msg.text or "")[:5000],
     )
 

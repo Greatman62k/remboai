@@ -1,7 +1,9 @@
-"""A free, code-only screen in front of the language model. A first message that has nothing to do with a salon or barbershop
-(no service, day, time, price, hours, cancel, greeting or hair-and-booking vocabulary) never reaches the model: it gets a short
-pointer back to what the receptionist can do. Messages inside a running conversation (slots offered, a question asked, a deposit
-due) are follow-ups and always pass. This saves money, and keeps strangers from using the receptionist as a free general chatbot."""
+"""Classify messages for the deterministic customer fallback.
+
+When the agent is enabled, ordinary text reaches the model before this
+classifier can produce a canned response. These rules keep the no-model or
+model-unavailable path useful and bounded.
+"""
 from __future__ import annotations
 
 import re
@@ -22,7 +24,7 @@ def _menu_hit(text: str, services: list[dict]) -> bool:
 
 
 def route(text: str, services: list[dict], state: str, today: date) -> str:
-    """Where a message goes:
+    """Classify a message when the model path is disabled or unavailable:
       'model' a service, style or booking word, or an item on this salon's menu: worth a model call;
       'rules' prices, hours, cancel, a greeting, a day or time that the free keyword rules can read: no model;
       'model' also when the rules cannot read it but it has a specific price, payment, hours or cancel word ("when are you open");
