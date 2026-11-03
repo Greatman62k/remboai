@@ -4,6 +4,7 @@ Only identities configured in PLATFORM_OWNER_ID or PLATFORM_OWNER_IDS may use it
 everyone else never reaches here (the router checks first)."""
 from __future__ import annotations
 
+import json
 import logging
 import re
 from datetime import datetime
