@@ -1,7 +1,7 @@
-"""The model writes replies for unlinked chats; code retains scope and routing control.
+"""The model writes replies for unlinked chats; code screens abuse and validates scope.
 
 This assistant has no tools or business data. Registration and identity actions
-stay in the router, and explicit out-of-scope requests never reach the model.
+stay in the router, while ordinary text reaches the model before canned replies.
 """
 from __future__ import annotations
 
@@ -25,6 +25,9 @@ from .policy import PolicyError, bare_request_is_out_of_scope, load_policy, matc
 log = logging.getLogger("rembo.agent.bare")
 _LEXICON = lexicon.load()
 _PRODUCT_TERMS = _LEXICON.pattern(*(lexicon.STRONG + lexicon.SPECIFIC))
+_PRODUCT_REPLY = re.compile(
+    r"\b(?:remboai|salons?|barbers?hop|barber shop|kinyozi|saluni|bookings?|appointments?|miadi|"
+    r"registration|register|sajili|kusajili|invite link)\b", re.I)
 _BOOKING_FOLLOWUPS = _LEXICON.pattern("booking_followups")
 
 
@@ -145,19 +148,17 @@ async def turn(ctx, msg, prior_state: dict, history: list[dict]) -> bool:
     configured = policy["bare_assistant"]
     blocked = guard.injection(text)
     messages, has_context = _history(history, text, policy)
-    scope_redirect = not blocked and _request_is_out_of_scope(
-        policy, text, has_context=has_context
-    )
+    scope_redirect = not blocked and _request_is_out_of_scope(policy, text, has_context=has_context)
     limit = int(getattr(ctx.settings, "bare_llm_daily_per_sender", 30))
     scope = hashlib.sha256(msg.sender.encode("utf-8")).hexdigest()[:24]
     if blocked:
         await guard.strike(ctx.pool, msg.sender, "bare_agent_injection")
     rate_limited = False
-    if not blocked and not scope_redirect and ctx.redis is not None:
+    if not blocked and ctx.redis is not None:
         rate_limited = not await RateLimiter(ctx.redis, ctx.settings).llm_allowed(
             scope, kind="bare", limit=limit
         )
-    allowed = not blocked and not scope_redirect and not rate_limited
+    allowed = not blocked and not rate_limited
     if allowed:
         messages.append({"role": "user", "content": text[:500]})
 
@@ -181,11 +182,12 @@ async def turn(ctx, msg, prior_state: dict, history: list[dict]) -> bool:
             log.exception("bare assistant failed; using the configured model failure reply")
 
     proposed = _clean(run.lead) if run and run.lead else ""
+    social_reply = bool(smalltalk.opener(proposed) or smalltalk.thanks(proposed))
     unsafe_reply = bool(proposed and (
         matches_any(configured["unsafe_reply_patterns"], proposed)
-        or matches_any(configured["out_of_scope_patterns"], proposed)
+        or (scope_redirect and not _PRODUCT_REPLY.search(proposed) and not social_reply)
     ))
-    if blocked or scope_redirect or unsafe_reply:
+    if blocked or unsafe_reply:
         reply_key = "out_of_scope_reply"
     elif rate_limited:
         reply_key = "rate_limited_reply"
@@ -206,10 +208,10 @@ async def turn(ctx, msg, prior_state: dict, history: list[dict]) -> bool:
     await save_stranger(ctx, msg.sender, after)
     if blocked:
         outcome = "bare_guardrail"
-    elif scope_redirect:
-        outcome = "bare_scope_redirect"
     elif unsafe_reply:
         outcome = "bare_output_guardrail"
+    elif scope_redirect:
+        outcome = "bare_scope_redirect"
     elif rate_limited:
         outcome = "bare_rate_limited"
     elif model_error or (run and run.unavailable):

@@ -1,5 +1,5 @@
-"""Still-coming 3h reminders: Keep confirms, Cancel frees the slot, silence
-releases it toward the waitlist. Real app, real Postgres."""
+"""Still-coming checks: Keep acknowledges, Cancel frees the slot, silence leaves
+the confirmed booking intact. Real app, real Postgres."""
 import os
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from app import waitlist
-from app.reminders import handle_still_tap, release_silent, run_reminders, schedule_reminders
+from app.reminders import handle_still_tap, run_reminders, schedule_reminders
 from tests.harness import build
 
 DSN = os.environ.get("TEST_DATABASE_URL")
@@ -85,7 +85,7 @@ async def test_keep_confirms_and_blocks_release():
     assert await handle_still_tap(ctx, salon_d, {"id": aids}, {}, chat_for(box, A), "en", NBO, f"still-keep:{bid}")
     assert await pool.fetchval("SELECT replied FROM reminder_jobs WHERE booking_id=$1::uuid", bid) is True
     assert await pool.fetchval("SELECT status FROM bookings WHERE id=$1::uuid", bid) == "confirmed"
-    assert await release_silent(ctx) == 0, "an answered nudge never releases"
+    await run_reminders(ctx)
     await pool.close()
 
 
@@ -104,16 +104,15 @@ async def test_cancel_frees_slot_to_waitlist():
 
 @needs_db
 @pytest.mark.asyncio
-async def test_silence_releases_slot_to_waitlist():
-    pool, out, salon = await build(DSN)
+async def test_silence_leaves_booking_confirmed_and_does_not_offer_slot():
+    pool, _, salon = await build(DSN)
     ctx, aids, bids, _, svc, salon_d, starts, _, bid = await setup(pool, salon, 1)
     await waitlist.join(pool, salon, bids, svc, starts.date())
     await pool.execute(
         "INSERT INTO reminder_jobs (booking_id, salon_id, client_id, wa_id, run_at, template_name, status, sent_at) "
         "SELECT $1::uuid, salon_id, client_id, $2, now() - make_interval(hours => 2), 'reminder_3h', 'sent', now() - make_interval(hours => 2) "
         "FROM bookings WHERE id=$1::uuid", bid, A)
-    assert await release_silent(ctx) == 1
-    assert await pool.fetchval("SELECT status FROM bookings WHERE id=$1::uuid", bid) == "cancelled"
-    assert await pool.fetchval("SELECT status FROM waitlist WHERE client_id=$1::uuid", bids) == "offered"
-    assert any("released" in m.get("text", {}).get("body", "").lower() for m in out.to(A))
+    await run_reminders(ctx)
+    assert await pool.fetchval("SELECT status FROM bookings WHERE id=$1::uuid", bid) == "confirmed"
+    assert await pool.fetchval("SELECT status FROM waitlist WHERE client_id=$1::uuid", bids) == "waiting"
     await pool.close()

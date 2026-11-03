@@ -19,9 +19,17 @@ _DIGITS = re.compile(r"\d+")
 # Words that state a result. They are only allowed when a tool in this very turn produced that result.
 _PAID = re.compile(r"\b(paid|payment (?:received|confirmed|successful)|umelipa|malipo (?:yamepokelewa|yamethibitishwa)|nimepokea malipo|received your (?:deposit|payment))\b", re.I)
 _BOOKED = re.compile(r"\b(confirmed|you'?re booked|you are booked|booking is (?:done|complete)|imethibitishwa|umethibitishiwa|umepata nafasi|miadi yako imekamilika)\b", re.I)
+_HELD = re.compile(r"\b(?:held|reserved)\s+(?:your\s+)?(?:slot|appointment|place|nafasi)\b|\b(?:your\s+)?(?:slot|appointment)\s+(?:is|has been)\s+(?:held|reserved)\b|\b(?:i|we)(?:'ve| have)?\s+(?:just\s+)?(?:held|reserved)\b|\bon hold for you\b", re.I)
 _CANCELLED = re.compile(r"\b(cancell?ed|nimeghairi|imeghairiwa|nimefuta|umeghairi)\b", re.I)
+_WAITLISTED = re.compile(r"\b(?:on|joined|added to|put on)\s+(?:the\s+)?(?:waitlist|waiting list)\b|\b(?:nimekuweka|umewekwa)\s+(?:kwenye\s+)?waitlist\b", re.I)
+_HANDOFF = re.compile(r"\b(?:i|we)(?:'ve| have)?\s+(?:notified|informed|contacted|told|passed this to)\s+(?:the\s+)?(?:salon )?(?:owner|manager)\b|\b(?:salon )?(?:owner|manager)\s+(?:has been|was)\s+(?:notified|informed|contacted)\b|\b(?:salon )?(?:owner|manager)\s+will\s+(?:contact|reply|respond|get back to|call)\s+(?:you)?\b|\b(?:salon )?(?:owner|manager)\s+will be in touch\b", re.I)
 _POLICY = re.compile(r"\b(waiv\w*|discount\w*|free of charge|no deposit|punguzo|msamaha|bila amana|hakuna amana|bure)\b", re.I)
 _LEAK = re.compile(r"\b(tool call|function call|system prompt|developer message|find_slots|reserve_slot|cancel_booking|my_bookings|join_waitlist|hand_to_owner|list_businesses|platform_totals|business_status|json)\b|<think>|```", re.I)
+_DENIED_PAID = re.compile(r"\b(?:not|never|no|isn't|hasn't|has not|is not|wasn't|was not)\s+(?:yet\s+|been\s+)?(?:paid|received)\b", re.I)
+_DENIED_BOOKED = re.compile(r"\b(?:not|never|isn't|hasn't|has not|is not|wasn't|was not)\s+(?:yet\s+|been\s+)?(?:a\s+)?(?:confirmed|booked)\b", re.I)
+_DENIED_HELD = re.compile(r"\b(?:not|never|isn't|hasn't|has not|is not|wasn't|was not)\s+(?:yet\s+|been\s+)?(?:held|reserved)\b", re.I)
+_DENIED_CANCELLED = re.compile(r"\b(?:not|never|isn't|hasn't|has not|is not|wasn't|was not)\s+(?:yet\s+|been\s+)?cancell?ed\b", re.I)
+_DENIED_WAITLISTED = re.compile(r"\b(?:not|never|isn't|hasn't|has not|is not|wasn't|was not)\s+(?:yet\s+|been\s+)?(?:on|added to|joined)\s+(?:the\s+)?waitlist\b", re.I)
 
 MAX_REPLY = 700
 
@@ -34,9 +42,12 @@ class Facts:
     deposit_none: bool = False                            # the salon really asks for no deposit
     reporting: bool = False                               # owner-facing: tool results may be reported as paid/confirmed
     prices: set[int] = field(default_factory=set)        # every KES amount the model may mention
+    required_literals: set[str] = field(default_factory=set)  # transaction details that must reach the customer verbatim
     booked: bool = False                                  # a tool confirmed a booking this turn
     held: bool = False                                    # a tool held a slot this turn
     cancelled: bool = False                               # a tool cancelled a booking this turn
+    waitlisted: bool = False                              # a tool added the customer to the waitlist this turn
+    handed_off: bool = False                              # a tool notified the owner this turn
 
     def add(self, *parts: str) -> None:
         self.text.extend(p for p in parts if p)
@@ -82,6 +93,9 @@ def check(reply: str, facts: Facts) -> list[str]:
     blob = facts.blob()
     if _URL.search(text) and not _URL.search(blob):
         problems.append("link that was never provided")
+    for literal in facts.required_literals:
+        if literal not in text:
+            problems.append("omits a required transaction detail")
     known_digits = set(_DIGITS.findall(blob))
     # a time must be one the model was given (slot times, opening hours, or what the customer said)
     given_times = _times(facts.blob_with_user())
@@ -101,10 +115,16 @@ def check(reply: str, facts: Facts) -> list[str]:
             break
     if _POLICY.search(text) and not facts.deposit_none and not facts.reporting:
         problems.append("states a deposit or discount policy that is not in the facts")
-    if _PAID.search(text) and not facts.reporting:
+    if _PAID.search(_DENIED_PAID.sub("", text)) and not facts.reporting:
         problems.append("claims a payment (only the payment system may)")
-    if _BOOKED.search(text) and not facts.booked and not facts.reporting:
+    if _BOOKED.search(_DENIED_BOOKED.sub("", text)) and not facts.booked and not facts.reporting:
         problems.append("claims a confirmed booking that no tool confirmed")
-    if _CANCELLED.search(text) and not facts.cancelled:
+    if _HELD.search(_DENIED_HELD.sub("", text)) and not facts.held:
+        problems.append("claims a held slot that no tool held")
+    if _CANCELLED.search(_DENIED_CANCELLED.sub("", text)) and not facts.cancelled:
         problems.append("claims a cancellation that no tool made")
+    if _WAITLISTED.search(_DENIED_WAITLISTED.sub("", text)) and not facts.waitlisted:
+        problems.append("claims a waitlist entry that no tool made")
+    if _HANDOFF.search(text) and not facts.handed_off:
+        problems.append("claims an owner hand-off that no tool made")
     return sorted(set(problems))

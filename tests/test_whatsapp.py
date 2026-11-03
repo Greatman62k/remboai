@@ -1,7 +1,9 @@
 import hashlib
 import hmac
+from types import SimpleNamespace
 
 from app.channels import whatsapp as wa
+from app.channels.outbound import trace_thread
 
 
 def sig(body: bytes, secret: str = "s3cret") -> str:
@@ -47,3 +49,13 @@ def test_failed_delivery_reports_are_found_and_explained():
 
 def test_numbers_are_masked_for_logs():
     assert wa.mask("254712345678") == "...5678" and wa.mask("") == ""
+
+
+def test_trace_thread_is_stable_opaque_and_does_not_collide_on_sender_suffix():
+    ctx = SimpleNamespace(settings=SimpleNamespace(wa_app_secret="trace-test-secret"))
+    first = trace_thread(ctx, "254712340001")
+    second = trace_thread(ctx, "254799990001")
+    assert first == trace_thread(ctx, "254712340001")
+    assert first != second
+    assert "254712340001" not in first and first.startswith("whatsapp:")
+    assert trace_thread(ctx, "tg:1001").startswith("telegram:")

@@ -9,7 +9,7 @@ Target: one small VPS (2 GB RAM is plenty), Ubuntu 24.04, a domain you control. 
 4. Create a normal sudo user and disable root and password SSH logins if you plan to keep the server after the event.
 
 ## 2. Configuration
-`cp .env.example .env` and fill it in, then `chmod 600 .env` so only your user can read the secrets. Beyond the WhatsApp, model and M-Pesa values you need:
+`cp .env.example .env` and fill it in, then `chmod 600 .env` so only your user can read the secrets. Beyond WhatsApp and model settings, set these values. Daraja credentials are needed only for automatic M-PESA STK; manual M-PESA and Airtel Money destinations are configured by each owner during registration:
 - `DOMAIN` the domain above, `PUBLIC_BASE_URL=https://<DOMAIN>`
 - `POSTGRES_PASSWORD` a long random string; `MPESA_CALLBACK_SECRET` another (`openssl rand -hex 24`)
 - `WA_ACCESS_TOKEN` must be a **permanent system-user token** (Meta Business settings > System users). A temporary token dies after about 24 hours and the bot goes silent.
@@ -33,12 +33,13 @@ docker compose -f deploy/docker-compose.prod.yml exec app python scripts/seed_sa
   --till <HEAD_OFFICE>:<TILL> --owner 2547XXXXXXXX --deposit 200
 docker compose -f deploy/docker-compose.prod.yml exec app python scripts/doctor.py
 ```
-The command above configures Daraja STK. For a manual till, use only the bare seven-digit till number: `--till 5012345 --manual-till`. Do not include the head-office shortcode or any other details. Customers pay at that till, send the amount and M-Pesa code in chat, and the owner confirms each claim with one tap.
+The command above configures Daraja STK. For manual payments, owners can register in chat and choose a bare seven-digit M-PESA till, a phone number explicitly marked as Pochi la Biashara or direct M-PESA Send Money, or an Airtel Money number. Customers receive route-specific instructions and send the amount and transaction reference in chat. The owner confirms only after checking the destination account.
 `doctor` must end with "All set" (warnings about sandbox mode or failover are fine for a demo).
+It also sends an in-memory synthetic M-PESA receipt with fake details to the configured vision endpoint and checks every extracted field. This tests image parsing without uploading customer payment evidence or creating a payment. The output names the model and reports whether its fields matched the fixture.
 
 ## 5. Connect Meta and Safaricom
 - Meta developer dashboard > WhatsApp > Configuration: callback URL `https://<DOMAIN>/webhook`, verify token = `WA_VERIFY_TOKEN`, subscribe to **messages**.
-- The Daraja callback URL is built from `PUBLIC_BASE_URL` and `MPESA_CALLBACK_SECRET`. For real-money Daraja STK, each salon's till or paybill must be approved for production (Go Live), with `MPESA_ENV=production` and the passkey Safaricom issues. Manual till payments do not use Daraja or send an STK prompt. Configure a manual till with only its bare seven-digit number; customers send the amount and M-Pesa code in chat, and the owner confirms the claim with one tap.
+- The Daraja callback URL is built from `PUBLIC_BASE_URL` and `MPESA_CALLBACK_SECRET`. For real-money Daraja STK, each salon's till or paybill must be approved for production (Go Live), with `MPESA_ENV=production` and the passkey Safaricom issues. Manual M-PESA and Airtel Money destinations do not use Daraja or send an STK prompt. The customer pays the chosen destination and sends a transaction reference; the owner verifies and confirms the claim.
 - While the WhatsApp number is a test number, only recipients added under API Setup > To (maximum 5) can chat with it.
 
 - Telegram (optional): see [TELEGRAM.md](TELEGRAM.md). Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET`; with an https `PUBLIC_BASE_URL` the webhook is registered on start.
@@ -51,12 +52,9 @@ modal secret create rembo-asr ASR_TOKEN=$(openssl rand -hex 24)
 modal deploy deploy/modal_asr.py            # prints the web URL
 modal run deploy/modal_asr.py --audio some_voice_note.ogg --lang swh_Latn     # try it on a real Swahili recording first
 ```
-Put `ASR_URL=<url>/transcribe` and the same `ASR_TOKEN` in `.env`, restart the app, run `doctor`. The GPU container sleeps after 5 minutes idle, so the first voice note after a quiet spell is slow; send one just before you record the demo. If recognition is poor for a language mix, try `ASR_MODEL=omniASR_LLM_3B_v2` (needs a bigger GPU than the default L4 is comfortable with, edit `gpu=`) or `omniASR_CTC_1B_v2` for speed.
+Put `ASR_URL=<url>/transcribe` and the same `ASR_TOKEN` in `.env`, restart the app, and run `doctor`. The GPU container sleeps after 5 minutes idle, so its first request after a quiet spell may be slower. If recognition is poor for a language mix, try `ASR_MODEL=omniASR_LLM_3B_v2` (needs a bigger GPU than the default L4 is comfortable with, edit `gpu=`) or `omniASR_CTC_1B_v2` for speed.
 
 ## 7. Backups and upkeep
 - `echo '17 2 * * * root /opt/remboai/deploy/backup.sh' > /etc/cron.d/remboai-backup` for a nightly dump (14 days kept). Restore: `gunzip -c FILE | docker compose -f deploy/docker-compose.prod.yml exec -T db psql -U rembo rembo`.
 - Update: `git pull && docker compose -f deploy/docker-compose.prod.yml --env-file .env up -d --build` (new migrations apply on start).
 - Logs: `docker compose -f deploy/docker-compose.prod.yml logs --since 1h app`. Look for `DELIVERY FAILED` (Meta delivery problems, with the reason), `REFUND NEEDED` (money to return), `rate limit`.
-
-## 8. Before you demo
-Send `invite` from the owner number to get the customer link. Book a fade from a customer number and complete the configured payment flow. For a manual till, send the amount and M-Pesa code in chat, then confirm the claim from the owner account. Cancel the booking with `cancel 1` and confirm the customer is told.

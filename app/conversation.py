@@ -23,10 +23,15 @@ from .booking_flow import (
     _save,
     _till_claim,
     _visit_tap,
+    cancel_owner_availability_request,
+    expire_owner_availability_checks,
     example_for,
+    handle_manual_payment_tap,
     match_service,
     menu,
+    owner_availability_response,
     peek_state,
+    resume_late_owner_booking,
     save_stranger,
     stranger_state,
 )
@@ -364,6 +369,11 @@ async def _neutral_route(ctx, msg: Message, salon: dict, linked: bool, chat: Cha
                     {**seen_st, "picker_offer": {"id": fuzzy["id"], "slug": fuzzy.get("slug")}})
         await chat.text(t(lang, "ob_pick_confirm", name=fuzzy["name"]))
         return None, False
+    if msg.kind in ("audio", "image") or smalltalk.asks_identity(text) or smalltalk.asks_help(text):
+        # Generic identity and help questions belong to RemboAI itself. Do not
+        # expose a list of salons just because they share this channel number.
+        await _unallocated(ctx, msg)
+        return None, False
     from .channels import invites
     channel = invites.channel_of(msg.sender)
     from .channels.telegram import bot_username as _bot_username
@@ -421,6 +431,19 @@ async def _unallocated(ctx, msg: Message) -> None:
 
     It has no access to salon records. Each exchange is retained in stranger_state."""
     text = msg.text or ""
+    if msg.kind == "audio":
+        lang = smalltalk.language(text, "en")
+        if not msg.media_id or ctx.voice is None or not ctx.voice.enabled:
+            await outbound.send_plain(ctx, msg.sender, t(lang, "voice_failed"))
+            return
+        await _voice_typing(ctx, msg.sender)
+        heard = await _hear(ctx, msg, lang, outbound.salon_token(ctx, None))
+        text = guard.clean(heard)
+        if not text:
+            await outbound.send_plain(ctx, msg.sender, t(lang, "voice_failed"))
+            return
+        await outbound.update_inbound_text(ctx, text)
+        msg = dataclasses.replace(msg, kind="text", text=text, media_id=None)
     st = await stranger_state(ctx, msg.sender)
     hist = list(st.get("history") or []) + [{"role": "user", "text": text[:500], "ts": datetime.now(ZoneInfo("UTC")).isoformat()}]
 
@@ -456,13 +479,13 @@ async def _unallocated(ctx, msg: Message) -> None:
     if msg.kind == "image":
         await answer(t(lang, "main_photo"))
         return
-    if smalltalk.asks_user_identity(text):
-        await answer(t(lang, "main_unallocated_identity"))
-        return
     if agent.enabled(ctx):
         from .agent import bare_assistant
         if await bare_assistant.turn(ctx, msg, st, hist):
             return
+    if smalltalk.asks_user_identity(text):
+        await answer(t(lang, "main_unallocated_identity"))
+        return
     if smalltalk.asks_help(text):
         await answer(t(lang, "main_help"))
         return
@@ -504,9 +527,12 @@ async def _handle(ctx, msg: Message) -> None:
             if _registration_start(msg):
                 await _platform_registration(ctx, msg, None)
                 return
-        safe_voice_command = platform_audio and any(
-            pattern.match(msg.text or "") for pattern in (platform.SHOPS, platform.STATS, platform.HELP, platform.ROLE))
-        if msg.kind == "text" and (not platform_audio or safe_voice_command) and await platform.handle(ctx, msg.sender, msg.text or ""):
+        if msg.kind == "text" and guard.injection(msg.text or ""):
+            await guard.strike(ctx.pool, msg.sender, "platform_agent_injection")
+            await outbound.send_plain(ctx, msg.sender, platform.HELP_TEXT)
+            return
+        if (msg.kind == "text" and not platform_audio and platform.is_mutation_command(msg.text or "")
+                and await platform.handle(ctx, msg.sender, msg.text or "")):
             return
         owner_request = platform.owner_request(msg.text or "") if msg.kind == "text" and not platform_audio else None
         if owner_request is None:
@@ -518,10 +544,17 @@ async def _handle(ctx, msg: Message) -> None:
                 from .agent import platform_assistant
                 if await platform_assistant.turn(ctx, msg):
                     return
+            if (msg.kind == "text" and not (platform_audio and platform.is_mutation_command(msg.text or ""))
+                    and await platform.handle(ctx, msg.sender, msg.text or "")):
+                return
             await outbound.send_plain(ctx, msg.sender, platform.HELP_TEXT)
             return
         selector, owner_text = owner_request
         if not owner_text:
+            if msg.kind == "text" and agent.enabled(ctx):
+                from .agent import platform_assistant
+                if await platform_assistant.turn(ctx, msg):
+                    return
             await outbound.send_plain(ctx, msg.sender, platform.HELP_TEXT)
             return
         owned = await _owned_channel_salons(ctx, msg.sender, msg.phone_number_id, selector)
@@ -572,9 +605,22 @@ async def _handle(ctx, msg: Message) -> None:
     await outbound.set_conversation_salon(ctx, salon["id"])
     chat = Chat(ctx, salon, msg.sender)
     owner_mode = owner.is_owner(salon, msg.sender)
-    if owner_mode and msg.kind == "text" and smalltalk.asks_user_identity(msg.text or ""):
-        lang = smalltalk.language(msg.text or "", "en")
-        await chat.text(t(lang, "owner_self_identity", salon=salon["name"]))
+    if owner_mode and msg.kind == "audio":
+        lang = "en"
+        if not msg.media_id or ctx.voice is None or not ctx.voice.enabled:
+            await chat.text(t(lang, "voice_failed"))
+            return
+        await _voice_typing(ctx, msg.sender)
+        heard = await _hear(ctx, msg, lang, outbound.salon_token(ctx, salon), salon["id"])
+        text = guard.clean(heard)
+        if not text:
+            await chat.text(t(lang, "voice_failed"))
+            return
+        await outbound.update_inbound_text(ctx, text)
+        msg = dataclasses.replace(msg, kind="text", text=text, media_id=None, reply_id=None)
+    if owner_mode and msg.kind == "text" and guard.injection(msg.text or ""):
+        await guard.strike(ctx.pool, msg.sender, "owner_agent_injection")
+        await chat.text(t(smalltalk.language(msg.text or "", "en"), "owner_unrecognized"))
         return
     if owner_mode and msg.kind == "interactive" and msg.reply_id and await owner.handle_tap(ctx, salon, msg.sender, msg.reply_id):
         return
@@ -595,14 +641,18 @@ async def _handle(ctx, msg: Message) -> None:
 
     if owner_mode and (explicit_owner_route or sess is None) and not registration_start:
         if msg.kind == "text" and msg.text:
+            tz0 = ZoneInfo(salon["timezone"])
+            now0 = datetime.now(tz0)
+            if (agent.enabled(ctx) and not owner.is_command(msg.text)
+                    and await agent.owner_turn(ctx, salon, msg.sender, msg.text, tz0, now0, chat)):
+                return
             command = msg.text.strip().lower().strip(" ?.!")
             lang = smalltalk.language(msg.text, "en")
             if command in ("/id", "my id", "myid", "id"):
                 await chat.text(t(lang, "my_id", id=msg.sender))
                 return
             if smalltalk.asks_help(msg.text):
-                tz0 = ZoneInfo(salon["timezone"])
-                if await owner.handle(ctx, salon, msg.sender, msg.text, tz0, datetime.now(tz0)):
+                if await owner.handle(ctx, salon, msg.sender, msg.text, tz0, now0):
                     return
                 await chat.text(t(lang, "owner_help"))
                 return
@@ -620,16 +670,12 @@ async def _handle(ctx, msg: Message) -> None:
                 return
             tz0 = ZoneInfo(salon["timezone"])
             if await owner.owner_followup_is_pending(ctx, salon, msg.sender, msg.text):
-                if agent.enabled(ctx) and await agent.owner_turn(ctx, salon, msg.sender, msg.text, tz0, datetime.now(tz0), chat):
-                    return
                 await chat.text(t(smalltalk.language(msg.text, "en"), "owner_unrecognized"))
                 return
             if owner.DELETE_REQUEST.search(msg.text):
                 await chat.text(t(lang, "owner_business_delete"))
                 return
             if await owner.handle(ctx, salon, msg.sender, msg.text, tz0, datetime.now(tz0)):
-                return
-            if agent.enabled(ctx) and await agent.owner_turn(ctx, salon, msg.sender, msg.text, tz0, datetime.now(tz0), chat):
                 return
         if explicit_owner_route or sess is None:
             lang = smalltalk.language(msg.text or "", "en")
@@ -683,19 +729,12 @@ async def _handle(ctx, msg: Message) -> None:
     if _registration_start(msg):
         await onboarding_chat.begin(ctx, msg.sender, msg.phone_number_id, msg.text or "")
         return
-    if msg.kind == "text" and (smalltalk.asks_identity(msg.text or "") or (smalltalk.asks_help(msg.text or "") and not owner.is_owner(salon, msg.sender))):
-        await _identity(ctx, msg, salon, linked, chat)
-        return
     salon, arrival = await _neutral_route(ctx, msg, salon, linked, chat)
     if salon is None:
         return
     if arrival:
         msg = dataclasses.replace(msg, kind="text", text="hi", reply_id=None)
     chat = Chat(ctx, salon, msg.sender)
-    if msg.kind == "text" and smalltalk.asks_user_identity(msg.text or ""):
-        lang = smalltalk.language(msg.text or "", "en")
-        await chat.text(t(lang, "customer_self_identity", salon=salon["name"]))
-        return
     if msg.kind == "text" and (msg.text or "").strip().lower() in ("/id", "my id", "myid", "id"):
         lang = smalltalk.language(msg.text or "", "en")
         if owner.is_owner(salon, msg.sender):
@@ -711,6 +750,11 @@ async def _handle(ctx, msg: Message) -> None:
     client, st = await _load(ctx, salon["id"], msg.sender, msg.name)
     st = await _replay_aware_state(ctx, salon["id"], msg, st)
     lang = client["lang"]
+    if msg.kind == "interactive" and msg.reply_id and msg.reply_id.startswith("manualpay:"):
+        tz = ZoneInfo(salon["timezone"])
+        services = await _catalog(ctx, salon["id"])
+        await handle_manual_payment_tap(ctx, salon, client, st, services, tz, datetime.now(tz), chat, lang, msg.reply_id)
+        return
     if st.get("state") == "handoff":
         created = await ctx.pool.fetchval(
             "SELECT created_at FROM handoffs WHERE salon_id=$1::uuid AND client_id=$2::uuid AND status='open' ORDER BY created_at DESC LIMIT 1",
@@ -737,6 +781,62 @@ async def _handle(ctx, msg: Message) -> None:
         st["history"][-1]["text"] = heard_text
         msg = dataclasses.replace(msg, kind="text", text=heard_text, reply_id=None)
         if not owner.is_owner(salon, msg.sender) and await _handle_sensitive_text(ctx, salon, msg, chat, heard_text, client, st):
+            return
+    if guard.injection(msg.text or ""):
+        log.warning("prompt-injection attempt from %s: no model call", mask(msg.sender))
+        await guard.strike(ctx.pool, msg.sender, "injection")
+        services = await _catalog(ctx, salon["id"])
+        await _reply(ctx, salon["id"], msg.sender, st, chat,
+                     t(lang, "off_topic", salon=salon["name"], example=example_for(services, lang)))
+        return
+    if msg.reply_id and msg.reply_id.startswith("ownerresume:"):
+        match = re.fullmatch(r"ownerresume:(yes|no):([0-9a-fA-F-]{36})", msg.reply_id)
+        if match:
+            services = await _catalog(ctx, salon["id"])
+            tz = ZoneInfo(salon["timezone"])
+            await resume_late_owner_booking(ctx, salon, client, st, services, tz, datetime.now(tz), chat,
+                                            lang, match[2], match[1])
+            return
+    if st.get("state") == "owner_check_pending":
+        answer = (msg.text or "").strip().lower()
+        if msg.kind == "text" and answer in {"cancel", "stop", "ghairi", "sitisha"}:
+            if await cancel_owner_availability_request(ctx, salon, msg.sender, st, chat, lang):
+                return
+        pending = await ctx.pool.fetchrow(
+            "SELECT owner_check_status, owner_check_expires_at FROM bookings WHERE id=$1::uuid AND salon_id=$2::uuid",
+            st.get("booking_id"), salon["id"])
+        if pending and pending["owner_check_status"] == "approved":
+            await owner_availability_response(ctx, salon, st["booking_id"], "yes")
+            return
+        if (pending and pending["owner_check_status"] == "pending" and pending["owner_check_expires_at"]
+                and pending["owner_check_expires_at"] <= datetime.now(ZoneInfo("UTC"))):
+            await expire_owner_availability_checks(ctx)
+            return
+        await _reply(ctx, salon["id"], msg.sender, st, chat,
+                     t(lang, "owner_manual_waiting", service=st.get("service_name") or "your booking",
+                       when=st.get("held_when") or "your selected time", stylist=st.get("held_stylist") or "your stylist"))
+        return
+    if st.get("state") == "owner_late_offer":
+        answer = (msg.text or "").strip().lower()
+        yes = answer in {"yes", "yeah", "yep", "yup", "okay", "ok", "sawa", "ndio", "ndiyo", "ndioyo"}
+        no = answer in {"no", "nope", "hapana", "sio"}
+        if yes or no:
+            services = await _catalog(ctx, salon["id"])
+            tz = ZoneInfo(salon["timezone"])
+            await resume_late_owner_booking(ctx, salon, client, st, services, tz, datetime.now(tz), chat,
+                                            lang, st.get("owner_late_booking_id", ""), "yes" if yes else "no")
+            return
+        if st.get("owner_late_booking_id"):
+            st = {**st, "state": "asking"}
+            await _save(ctx, salon["id"], msg.sender, st)
+    if msg.kind == "image" and msg.media_id and st.get("state") == "held" and st.get("booking_id"):
+        acct = await payments.account(ctx.pool, salon["id"])
+        if acct is not None and acct.get("manual"):
+            guess = await _payment_screenshot(ctx, msg, outbound.salon_token(ctx, salon), payments.manual_provider(acct))
+            if guess is None:
+                await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, "till_photo_unreadable", salon=salon["name"]))
+            else:
+                await _till_claim(ctx, salon, client, st, chat, lang, "", extracted=guess)
             return
     if msg.kind == "image" and msg.media_id and ctx.vision is not None and ctx.vision.enabled:
         services = await _catalog(ctx, salon["id"])
@@ -778,27 +878,22 @@ async def _handle(ctx, msg: Message) -> None:
     if msg.reply_id and msg.reply_id.startswith("still-"):
         if await handle_still_tap(ctx, salon, client, st, chat, lang, tz, msg.reply_id):
             return
-    if WAITLIST_WORDS.match(msg.text or "") and st.get("state") == "no_slots" and st.get("service_id") and st.get("date"):
-        service = next((s for s in services if s["id"] == st["service_id"]), None)
-        if service is not None:
-            outcome = await waitlist.join(ctx.pool, salon["id"], client["id"], service["id"], date.fromisoformat(st["date"]))
-            key = "waitlist_joined" if outcome == "joined" else "waitlist_already"
-            await _reply(ctx, salon["id"], chat.to, st, chat, t(lang, key, service=service["name"], day=st["date"]))
-            return
     if st.get("state") == "awaiting_feedback" and (msg.text or "").strip() and not msg.reply_id and not msg.media_id:
         quick = rule_extract(msg.text, now.date(), services)
         if quick.intent == "other":
             await ctx.pool.execute("UPDATE visit_checks SET feedback=$2, answered_at=now() WHERE booking_id=$1::uuid",
                                    st["visit_booking"], msg.text.strip()[:500])
             cleared_feedback = {"history": st.get("history", [])}
-            await _save(ctx, salon["id"], chat.to, cleared_feedback)
-            await _reply(ctx, salon["id"], chat.to, cleared_feedback, chat, t(lang, "visit_feedback_thanks"))
+            await _reply(ctx, salon["id"], msg.sender, cleared_feedback, chat, t(lang, "visit_feedback_thanks"))
             return
     if st.get("state") == "held" and tap_id:
         svc_name = next((s["name"] for s in services if s["id"] == st.get("service_id")), st.get("service_name") or "your booking")
         when = st.get("held_when") or "your booked time"
         stylist = st.get("held_stylist") or "your stylist"
-        await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, "already_held", service=svc_name, when=when, stylist=stylist))
+        acct = await payments.account(ctx.pool, salon["id"])
+        await _reply(ctx, salon["id"], msg.sender, st, chat,
+                     t(lang, "already_held", service=svc_name, when=when, stylist=stylist,
+                       destination=payments.destination_label(acct, lang)))
         st["already_held_sent"] = True
         st["last_tap"] = {"id": tap_id, "at": now.isoformat()}
         await _save(ctx, salon["id"], msg.sender, st)
@@ -828,46 +923,61 @@ async def _handle(ctx, msg: Message) -> None:
             if mpesa.looks_like_phone_attempt(msg.text or ""):
                 await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, "invalid_phone"))
                 return
-            quick_held = rule_extract(msg.text or "", now.date(), services, st.get("state", "held"))
-            if quick_held.intent == "cancel":
-                pass
-            elif quick_held.intent in ("price_list", "hours", "greeting"):
-                if quick_held.intent == "price_list":
-                    note = ""
-                    if int(salon["deposit_kes"]) > 0 and await payments.account(ctx.pool, salon["id"]):
-                        note = "\n\n" + t(lang, "deposit_note", amount=int(salon["deposit_kes"]))
-                    await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, "prices", lines=menu(services)) + note + "\n\n" + t(lang, "remind_number", service=st.get("service_name") or "your booking", when=st.get("held_when") or "your booked time", stylist=st.get("held_stylist") or "your stylist", amount=st.get("amount") or 0))
-                    return
-                if quick_held.intent == "hours":
-                    await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, "hours", lines=_hours(salon, lang)) + "\n\n" + t(lang, "remind_number", service=st.get("service_name") or "your booking", when=st.get("held_when") or "your booked time", stylist=st.get("held_stylist") or "your stylist", amount=st.get("amount") or 0))
-                    return
-                if quick_held.intent == "greeting":
-                    hello = smalltalk.opener(msg.text) or "Hi"
-                    await _reply(ctx, salon["id"], msg.sender, st, chat, f"{hello} " + t(lang, "welcome", salon=salon["name"], example=example_for(services, lang)) + "\n\n" + t(lang, "remind_number", service=st.get("service_name") or "your booking", when=st.get("held_when") or "your booked time", stylist=st.get("held_stylist") or "your stylist", amount=st.get("amount") or 0))
-                    return
-            elif st.get("phone"):
-                svc_name = next((s["name"] for s in services if s["id"] == st.get("service_id")), st.get("service_name") or "your booking")
-                when = st.get("held_when") or "your booked time"
-                stylist = st.get("held_stylist") or "your stylist"
-                await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, "already_held", service=svc_name, when=when, stylist=stylist))
-                return
-            elif quick_held.intent != "cancel":
-                svc_name = st.get("service_name") or "your booking"
-                when = st.get("held_when") or "your booked time"
-                stylist = st.get("held_stylist") or "your stylist"
-                await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, "remind_number", service=svc_name, when=when, stylist=stylist, amount=st.get("amount") or 0))
-                return
+            # Other text in the held state reaches the model below. The
+            # payment instructions and phone-number validation remain here.
 
     if msg.reply_id and msg.reply_id.startswith("slot:") and msg.reply_id[5:].isdigit():
         res = Result(Extraction(intent="choose_slot", choice=int(msg.reply_id[5:]) + 1, language=lang), "button")
     elif msg.text.strip() in ("1", "2", "3") and st.get("state") == "offered":
         res = Result(Extraction(intent="choose_slot", choice=int(msg.text.strip()), language=lang), "button")
-    elif guard.injection(msg.text):
-        log.warning("prompt-injection attempt from %s: no model call", mask(msg.sender))
-        await guard.strike(ctx.pool, msg.sender, "injection")
-        await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, "off_topic", salon=salon["name"], example=example_for(services, lang)))
-        return
     else:
+        where = screen.route(msg.text, services, st.get("state", "idle"), now.date())
+        if where == "off" and agent.enabled(ctx) and any(h.get("role") == "assistant" for h in (st.get("history") or [])[-6:]):
+            where = "model"      # short follow-ups need the model to read recent context
+        if agent.enabled(ctx):
+            lang = await _speak(ctx, client, lang, msg.text or "")
+            if await agent.turn(ctx, salon, client, st, services, tz, now, chat, lang, msg):
+                return
+        if WAITLIST_WORDS.match(msg.text or "") and st.get("state") == "no_slots" and st.get("service_id") and st.get("date"):
+            service = next((s for s in services if s["id"] == st["service_id"]), None)
+            if service is not None:
+                outcome = await waitlist.join(ctx.pool, salon["id"], client["id"], service["id"], date.fromisoformat(st["date"]))
+                key = "waitlist_joined" if outcome == "joined" else "waitlist_already"
+                await _reply(ctx, salon["id"], chat.to, st, chat, t(lang, key, service=service["name"], day=st["date"]))
+                return
+        if st.get("state") == "held" and st.get("booking_id"):
+            quick_held = rule_extract(msg.text or "", now.date(), services, "held")
+            acct = await payments.account(ctx.pool, salon["id"])
+            reminder = (payments.manual_instructions(lang, int(st.get("amount") or 0), acct, salon["name"])
+                        if acct and acct.get("manual") else
+                        t(lang, "remind_number", service=st.get("service_name") or "your booking",
+                          when=st.get("held_when") or "your booked time",
+                          stylist=st.get("held_stylist") or "your stylist", amount=st.get("amount") or 0))
+            if quick_held.intent == "price_list":
+                note = ""
+                if int(salon["deposit_kes"]) > 0 and acct:
+                    note = "\n\n" + payments.deposit_note(lang, int(salon["deposit_kes"]), acct)
+                await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, "prices", lines=menu(services)) + note + "\n\n" + reminder)
+                return
+            if quick_held.intent == "hours":
+                await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, "hours", lines=_hours(salon, lang)) + "\n\n" + reminder)
+                return
+            if quick_held.intent == "greeting":
+                hello = smalltalk.opener(msg.text) or "Hi"
+                await _reply(ctx, salon["id"], msg.sender, st, chat,
+                             f"{hello} " + t(lang, "welcome", salon=salon["name"], example=example_for(services, lang)) + "\n\n" + reminder)
+                return
+            if quick_held.intent != "cancel":
+                if st.get("phone"):
+                    svc_name = next((s["name"] for s in services if s["id"] == st.get("service_id")), st.get("service_name") or "your booking")
+                    await _reply(ctx, salon["id"], msg.sender, st, chat,
+                                 t(lang, "already_held", service=svc_name,
+                                   when=st.get("held_when") or "your booked time",
+                                   stylist=st.get("held_stylist") or "your stylist",
+                                   destination=payments.destination_label(acct, lang)))
+                else:
+                    await _reply(ctx, salon["id"], msg.sender, st, chat, reminder)
+                return
         pleasant = smalltalk.thanks(msg.text or "")
         if pleasant and st.get("state", "idle") == "idle" and rule_extract(msg.text or "", now.date(), services, "idle").intent in ("other", "greeting"):
             key, speaking = pleasant
@@ -876,18 +986,11 @@ async def _handle(ctx, msg: Message) -> None:
                 await ctx.pool.execute("UPDATE clients SET lang=$2 WHERE id=$1::uuid", client["id"], lang)
             await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, key))
             return
-        where = screen.route(msg.text, services, st.get("state", "idle"), now.date())
-        if where == "off" and agent.enabled(ctx) and any(h.get("role") == "assistant" for h in (st.get("history") or [])[-6:]):
-            where = "model"      # mid-conversation follow-ups ("ok Brian then") have no salon words; the model reads them in context
         if where == "off":
-            log.info("screened out: nothing to do with a salon (%d chars) text=%r", len(msg.text), (msg.text or "")[:120])
+            log.info("screened out after model fallback: nothing to do with a salon (%d chars) text=%r", len(msg.text), (msg.text or "")[:120])
             lang = await _speak(ctx, client, lang, msg.text or "")
             await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, "off_topic", salon=salon["name"], example=example_for(services, lang)))
             return
-        if agent.enabled(ctx):
-            lang = await _speak(ctx, client, lang, msg.text or "")
-            if await agent.turn(ctx, salon, client, st, services, tz, now, chat, lang, msg):
-                return
         quick = rule_extract(msg.text, now.date(), services, st.get("state", "idle"))
         if where == "rules" or quick.intent == "greeting":
             res = Result(quick, "rules")
@@ -913,8 +1016,9 @@ async def _handle(ctx, msg: Message) -> None:
         await _cancel(*env)
     elif ex.intent == "price_list":
         note = ""
-        if int(salon["deposit_kes"]) > 0 and await payments.account(ctx.pool, salon["id"]):
-            note = "\n\n" + t(lang, "deposit_note", amount=int(salon["deposit_kes"]))
+        acct = await payments.account(ctx.pool, salon["id"])
+        if int(salon["deposit_kes"]) > 0 and acct:
+            note = "\n\n" + payments.deposit_note(lang, int(salon["deposit_kes"]), acct)
         await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, "prices", lines=menu(services)) + note)
     elif ex.intent == "hours":
         await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, "hours", lines=_hours(salon, lang)))
@@ -958,6 +1062,16 @@ async def _see(ctx, msg: Message, services: list[dict], token: str) -> dict | No
         return None
     log.info("photo matched to a service via %s in %d ms (confidence %.2f)", guess.model, guess.ms, guess.confidence)
     return match_service(guess.service, services)
+
+
+async def _payment_screenshot(ctx, msg: Message, token: str, expected_provider: str):
+    """Extract an unverified claim from an image; never treat it as payment confirmation."""
+    if ctx.vision is None or not ctx.vision.enabled:
+        return None
+    got = await ctx.wa.download_media(token, msg.media_id, max_bytes=4_000_000)
+    if got is None:
+        return None
+    return await ctx.vision.extract_payment(got[0], got[1], expected_provider)
 
 
 async def _speak(ctx, client: dict, lang: str, text: str) -> str:

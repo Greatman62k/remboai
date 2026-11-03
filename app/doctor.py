@@ -11,7 +11,8 @@ import httpx
 
 from .ai.llm import Extractor, _coerce, _json_from, sanitize
 from .ai.voice import Transcriber
-from .ai.vision import StyleMatcher, make_png
+from .ai.vision import StyleMatcher, make_mock_payment_png, make_png
+from . import payments
 from .mpesa import Daraja, MpesaError
 from .channels.whatsapp import explain
 from .platform import configured_ids
@@ -41,7 +42,7 @@ async def run_checks(s, http: httpx.AsyncClient, pool) -> list[Check]:
     salons = []
     try:
         salons = [dict(r) for r in await pool.fetch(
-            "SELECT s.id::text, s.name, s.wa_phone_number_id, s.tg_bot_id, s.owner_wa_id, s.deposit_kes, sp.kind, sp.shortcode, sp.party_b, sp.manual, "
+            "SELECT s.id::text, s.name, s.wa_phone_number_id, s.tg_bot_id, s.owner_wa_id, s.deposit_kes, sp.kind, sp.shortcode, sp.party_b, sp.manual, sp.phone_type, "
             "(SELECT count(*) FROM services v WHERE v.salon_id=s.id AND v.active) AS services, "
             "(SELECT count(*) FROM staff t WHERE t.salon_id=s.id AND t.active) AS staff "
             "FROM salons s LEFT JOIN salon_payment sp ON sp.salon_id=s.id WHERE s.active")]
@@ -71,15 +72,27 @@ async def run_checks(s, http: httpx.AsyncClient, pool) -> list[Check]:
         add(label, sl["services"] > 0 and sl["staff"] > 0, f"{sl['staff']} stylist(s), {sl['services']} service(s)")
         if sl["deposit_kes"] > 0 and not sl["kind"]:
             add(label + " deposits", False,
-                "deposit is set but no till/paybill: bookings will be confirmed with NO deposit. Configure Daraja with --till HEAD_OFFICE:TILL, or a manual till with --till SEVEN_DIGIT_NUMBER --manual-till.",
+                "deposit is set but no payment destination: deposit bookings are paused. Set one with the owner commands: payment till 1234567, payment pochi 0712 345 678, payment send 0712 345 678, or payment airtel 0712 345 678.",
                 warn=True)
         elif sl["kind"]:
-            manual = "manual till, owner confirms each deposit" if sl["manual"] else f"Daraja STK (shortcode {sl['shortcode']})"
-            add(label + " deposits", True, f"KES {sl['deposit_kes']} to {sl['kind']} {sl['party_b']} ({manual})")
+            route = payments.destination_label(sl)
+            method = "manual transfer, owner confirms each deposit" if sl["manual"] else f"M-PESA Daraja STK (shortcode {sl['shortcode']})"
+            add(label + " deposits", True, f"KES {sl['deposit_kes']} via {route} ({method})")
         try:
-            approved = await pool.fetchval("SELECT count(*) FROM reminder_templates WHERE salon_id=$1::uuid AND approved=true", sl["id"])
-            if not approved:
-                add(label + " reminders", False, "no approved reminder templates: no 24h/2h/thanks reminders go out until rows are added (see docs/TEMPLATES.md)", warn=True)
+            approved_names = {r["name"] for r in await pool.fetch(
+                "SELECT name FROM reminder_templates WHERE salon_id=$1::uuid AND approved=true", sl["id"])}
+            if not approved_names:
+                add(label + " reminders", False, "no approved reminder templates; WhatsApp reminders need per-salon approvals (see docs/TEMPLATES.md)", warn=True)
+            if sl["wa_phone_number_id"]:
+                required = {"reminder_soon"}
+                owner = sl.get("owner_wa_id")
+                if owner and not owner.startswith("tg:"):
+                    required.update({"owner_reminder_soon", "owner_booking_cancelled"})
+                missing_templates = sorted(required - approved_names)
+                if missing_templates:
+                    add(label + " ETA templates", False,
+                        "missing approved WhatsApp Utility template(s): " + ", ".join(missing_templates) + "; see docs/TEMPLATES.md",
+                        warn=True)
         except Exception as e:  # noqa: BLE001
             add(label + " reminders", False, f"could not read reminder_templates: {e.__class__.__name__}", warn=True)
         add(label + " owner", bool(sl["owner_wa_id"]), "owner contact set" if sl["owner_wa_id"] else "no --owner: no booking alerts or owner commands", warn=True)
@@ -141,6 +154,7 @@ async def run_checks(s, http: httpx.AsyncClient, pool) -> list[Check]:
     matcher = StyleMatcher(http, s, ext.endpoints)
     if not matcher.enabled:
         add("photo matching", False, "switched off (VISION_ENABLED=false or no LLM_API_KEY)", warn=True)
+        add("payment screenshot vision", False, "switched off (VISION_ENABLED=false or no LLM_API_KEY)", warn=True)
     for _backend, base, key, model, _ in ext.endpoints() if matcher.enabled else []:
         try:
             from .agent.policy import load_policy
@@ -153,8 +167,26 @@ async def run_checks(s, http: httpx.AsyncClient, pool) -> list[Check]:
                 warn=True)
         except Exception as e:  # noqa: BLE001
             add(f"photo matching {model}", False, f"{e.__class__.__name__}: {str(e)[:120]}", warn=True)
-    if not s.llm_fallback_base_url:
-        add("model failover", False, "no LLM_FALLBACK_* set: if Meta's API is down the keyword rules answer alone", warn=True)
+    if matcher.enabled:
+        expected = ("mpesa", 10, "RMB2AI7K9Q", "2026-11-03", "10:47", "REMBOAI DEMO SALON")
+        try:
+            guess = await matcher.extract_payment(make_mock_payment_png(), "image/png", "mpesa")
+            actual = ((guess.provider, guess.amount, guess.reference, guess.date, guess.time, guess.recipient)
+                      if guess else None)
+            good = actual == expected
+            detail = (f"{guess.ms} ms; extracted provider, amount, reference, date/time, recipient at confidence "
+                      f"{guess.confidence:.2f}" if guess else "model did not return a valid completed-payment claim")
+            if guess:
+                detail += f" using {guess.model}"
+            if not good:
+                detail += f"; expected {expected}, received {actual}"
+            add(f"payment screenshot vision {guess.model if guess else s.llm_model}", good, detail, warn=True)
+        except Exception as e:  # noqa: BLE001
+            add("payment screenshot vision", False, f"{e.__class__.__name__}: {str(e)[:120]}", warn=True)
+    if not s.llm_fallback_base_url or not s.llm_fallback_model:
+        add("model failover", False,
+            "no secondary model is configured; the primary remains active, and deterministic code fallback handles turns if no usable model response is available",
+            warn=True)
 
     if s.asr_url:
         try:

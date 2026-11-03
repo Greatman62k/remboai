@@ -360,7 +360,7 @@ async def test_owner_alerts_and_payment_notices_use_the_salons_own_token():
         checkout = await pool.fetchval("SELECT checkout_request_id FROM payments")
         before_customer, before_owner = len(out.to(B)), len(out.to(OWNER))
         await deliver(c, callback(checkout, phone=B))
-    assert len(out.to(B)) == before_customer + 1 and "Payment of KES 200 received" in out.bodies(B)[-1]
+        assert len(out.to(B)) == before_customer + 1 and "M-Pesa payment of KES 200 is confirmed" in out.bodies(B)[-1]
     assert out.to(B)[-1]["_auth"] == "Bearer SALON-OWN"
     assert len(out.to(OWNER)) == before_owner + 1 and out.to(OWNER)[-1]["_auth"] == "Bearer SALON-OWN"
     await pool.close()

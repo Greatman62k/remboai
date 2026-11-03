@@ -40,6 +40,10 @@ class Outside:
         self.media_mime = "audio/ogg; codecs=opus"
         self.vision: list[dict] = []
         self.vision_answer = {"service": "Fade", "style": "low skin fade", "confidence": 0.9}
+        self.payment_vision_answer = {
+            "is_payment_confirmation": False, "provider": None, "currency": None, "amount": None,
+            "reference": None, "date": None, "time": None, "recipient": None, "confidence": 0.0,
+        }
         self.tg: list[dict] = []
         self.tg_updates: list[dict] = []
         self.stk: list[dict] = []
@@ -98,10 +102,12 @@ class Outside:
         if req.url.path.endswith("/chat/completions") and isinstance(json.loads(req.content)["messages"][-1]["content"], list):
             body = json.loads(req.content)
             image = next(p for p in body["messages"][-1]["content"] if p["type"] == "image_url")["image_url"]["url"]
-            self.vision.append({"host": host, "model": body["model"], "image": image, "prompt": body["messages"][0]["content"]})
+            prompt = body["messages"][0]["content"]
+            self.vision.append({"host": host, "model": body["model"], "image": image, "prompt": prompt})
             if host in self.down:
                 return httpx.Response(503)
-            return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(self.vision_answer)}}]})
+            answer = self.payment_vision_answer if "payment screenshot" in prompt.lower() or "payment_screenshot" in prompt.lower() else self.vision_answer
+            return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(answer)}}]})
         if req.url.path.endswith("/chat/completions"):
             self.calls.append(host)
             if host in self.down:

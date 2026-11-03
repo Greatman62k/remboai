@@ -14,7 +14,7 @@ import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from . import binding, guard, smalltalk
+from . import binding, guard, mpesa, smalltalk
 from .channels import outbound
 from .db import clear_salon_cache
 from .messages import has as has_text, t
@@ -203,6 +203,55 @@ def parse_deposit(words: str) -> int | None:
             return None
         return amount if 0 <= amount <= MAX_DEPOSIT else None
     return 0 if _NO_DEPOSIT.search(text) else None
+
+
+def parse_payment_method(words: str) -> str | None:
+    """Choose the manual salon destination type without inferring a phone route."""
+    text = " ".join((words or "").casefold().split())
+    has_till = bool(re.search(r"\b(?:till|buy goods|lipa na m-?pesa)\b", text))
+    has_phone = bool(re.search(r"\b(?:phone|mobile|pochi|airtel|send money|tuma pesa)\b", text))
+    if has_till and not has_phone:
+        return "till"
+    if has_phone and not has_till:
+        return "phone"
+    return None
+
+
+def parse_payment_phone_type(words: str) -> str | None:
+    """Require the owner to identify which network and transfer route a phone uses."""
+    text = " ".join((words or "").casefold().split())
+    matches = set()
+    if re.search(r"\bairtel(?:\s+money)?\b", text):
+        matches.add("airtel_money")
+    if re.search(r"\bpochi(?:\s+la\s+biashara)?\b", text):
+        matches.add("pochi")
+    if re.search(r"\b(?:send\s+money|direct(?:\s+send\s+money)?|tuma\s+pesa)\b", text):
+        matches.add("send_money")
+    return next(iter(matches)) if len(matches) == 1 else None
+
+
+def parse_manual_till(words: str) -> str | None:
+    """Accept only the bare seven-digit till destination."""
+    value = (words or "").strip()
+    return value if re.fullmatch(r"\d{7}", value) else None
+
+
+def parse_payment_phone(words: str) -> str | None:
+    """Accept exactly one valid Kenyan mobile number, allowing a short natural sentence."""
+    text = words or ""
+    matches = list(mpesa._EXTRACT.finditer(text))
+    if len(matches) != 1:
+        normalized = mpesa.normalize_msisdn(text)
+        return normalized
+    return mpesa.normalize_msisdn(matches[0].group())
+
+
+def mpesa_display(number: str) -> str:
+    normalized = mpesa.normalize_msisdn(number)
+    if normalized:
+        local = "0" + normalized[3:]
+        return f"{local[:4]} {local[4:7]} {local[7:]}"
+    return number
 
 
 def parse_service_line(line: str) -> dict | None:
@@ -427,6 +476,10 @@ def parse_owners(words: str) -> list[str] | None:
 
 _CHANGE = re.compile(r"\b(change|changing|fix|correct|edit|update|wrong|mistake|badili|badilisha|sahihisha|rekebisha|kosea)\b", re.I)
 _REDIRECTS = (
+    ("ask_phone_type", re.compile(r"\b(pochi|airtel|send\s+money|payment\s+type|phone\s+type)\b", re.I)),
+    ("ask_payment_phone", re.compile(r"\b(phone\s+number|mobile\s+number|payment\s+number|destination\s+number)\b", re.I)),
+    ("ask_till_number", re.compile(r"\b(till\s+(?:number|no\.?|digits?)?|buy\s+goods)\b", re.I)),
+    ("ask_payment_method", re.compile(r"\b(payment\s+(?:method|destination|option)|where\s+(?:the\s+)?deposit|payment)\b", re.I)),
     ("ask_prices", re.compile(r"\b(price|prices|bei|gharama|service|services|huduma)\b", re.I)),
     ("ask_hours", re.compile(r"\b(hours|hour|open|opening|fungua|kufungua)\b", re.I)),
     ("ask_deposit", re.compile(r"\b(deposit|deposits|amana)\b", re.I)),
@@ -528,6 +581,14 @@ def _keep_data_present(state: dict) -> bool:
         return bool(data.get("open") and data.get("close"))
     if step == "ask_deposit":
         return "deposit" in data
+    if step == "ask_payment_method":
+        return data.get("payment_method") in ("till", "phone")
+    if step == "ask_till_number":
+        return parse_manual_till(data.get("payment_destination", "")) is not None
+    if step == "ask_phone_type":
+        return data.get("payment_method") == "phone" and data.get("payment_type") in ("pochi", "send_money", "airtel_money")
+    if step == "ask_payment_phone":
+        return data.get("payment_method") == "phone" and parse_payment_phone(data.get("payment_destination", "")) is not None
     return False
 
 
@@ -627,14 +688,28 @@ def registration_complete(state: dict) -> bool:
     if not all(service.get("explicit") for service in services):
         # Older sessions reached these steps only after the owner accepted the estimates.
         if not state.get("duration_defaults_accepted"):
-            if "duration_defaults_accepted" in state or state.get("step") not in ("ask_hours", "ask_deposit", "confirm_all"):
+            if "duration_defaults_accepted" in state or state.get("step") not in (
+                    "ask_hours", "ask_deposit", "ask_payment_method", "ask_till_number",
+                    "ask_phone_type", "ask_payment_phone", "confirm_all"):
                 return False
-    if not state.get("services_confirmed") and state.get("step") not in ("ask_durations", "ask_hours", "ask_deposit", "confirm_all"):
+    if not state.get("services_confirmed") and state.get("step") not in (
+            "ask_durations", "ask_hours", "ask_deposit", "ask_payment_method", "ask_till_number",
+            "ask_phone_type", "ask_payment_phone", "confirm_all"):
         return False
     if not data.get("open") or not data.get("close") or parse_time_pair(f"{data['open']}-{data['close']}") is None:
         return False
     deposit = data.get("deposit")
-    return isinstance(deposit, int) and not isinstance(deposit, bool) and 0 <= deposit <= MAX_DEPOSIT
+    if not isinstance(deposit, int) or isinstance(deposit, bool) or not 0 <= deposit <= MAX_DEPOSIT:
+        return False
+    if deposit == 0:
+        return True
+    method = data.get("payment_method")
+    if method == "till":
+        return parse_manual_till(data.get("payment_destination", "")) is not None
+    if method == "phone":
+        return (data.get("payment_type") in ("pochi", "send_money", "airtel_money")
+                and parse_payment_phone(data.get("payment_destination", "")) is not None)
+    return False
 
 
 def registration_next_step(state: dict) -> str:
@@ -673,6 +748,17 @@ def registration_next_step(state: dict) -> str:
     deposit = data.get("deposit")
     if not isinstance(deposit, int) or isinstance(deposit, bool) or not 0 <= deposit <= MAX_DEPOSIT:
         return "ask_deposit"
+    if deposit > 0:
+        method = data.get("payment_method")
+        if method not in ("till", "phone"):
+            return "ask_payment_method"
+        if method == "till" and parse_manual_till(data.get("payment_destination", "")) is None:
+            return "ask_till_number"
+        if method == "phone":
+            if data.get("payment_type") not in ("pochi", "send_money", "airtel_money"):
+                return "ask_phone_type"
+            if parse_payment_phone(data.get("payment_destination", "")) is None:
+                return "ask_payment_phone"
     return "confirm_all"
 
 
@@ -697,6 +783,12 @@ async def _go_live(ctx, pid: str, sender: str, state: dict) -> bool:
             "INSERT INTO salons (name, owner_wa_id, timezone, deposit_kes, open_hours, active, wa_phone_number_id, tg_bot_id) "
             "VALUES ($1,$2,'Africa/Nairobi',$3,$4,true,$5,$6) RETURNING id::text",
             data["salon"], sender, int(data.get("deposit", 0)), json.dumps({d: [data["open"], data["close"]] for d in DAY_KEYS}), wa_pid, tg_id)
+        if int(data.get("deposit", 0)) > 0:
+            kind = "till" if data["payment_method"] == "till" else "phone"
+            await con.execute(
+                "INSERT INTO salon_payment (salon_id, kind, shortcode, party_b, account_ref, manual, phone_type) "
+                "VALUES ($1::uuid,$2,NULL,$3,'RemboAI',true,$4)",
+                salon, kind, data["payment_destination"], data.get("payment_type"))
         staff_ids = []
         for own in data.get("owners") or [data.get("owner", "Owner")]:
             staff_ids.append(await con.fetchval(
@@ -742,11 +834,22 @@ def _question_for(state: dict) -> str:
         return t(lang, "ob_ask_hours")
     if step == "ask_deposit":
         return t(lang, "ob_ask_deposit")
+    if step == "ask_payment_method":
+        return t(lang, "ob_ask_payment_method")
+    if step == "ask_till_number":
+        return t(lang, "ob_ask_till_number")
+    if step == "ask_phone_type":
+        return t(lang, "ob_ask_phone_type")
+    if step == "ask_payment_phone":
+        return t(lang, "ob_ask_payment_phone")
     if step == "confirm_all":
         owners = ", ".join(data.get("owners", []))
+        payment = "No deposit" if not data.get("deposit") else (
+            f"M-PESA Till {data.get('payment_destination')}" if data.get("payment_method") == "till" else
+            f"{'Airtel Money' if data.get('payment_type') == 'airtel_money' else 'M-PESA Pochi la Biashara' if data.get('payment_type') == 'pochi' else 'M-PESA Send Money'} {mpesa_display(data.get('payment_destination', ''))}")
         return t(lang, "ob_confirm_all", salon=data.get("salon", ""), owners=owners,
                  lines=_service_lines(data.get("services", [])), fix=ex["fix"],
-                 hours=f"{data.get('open', '')}-{data.get('close', '')}", deposit=data.get("deposit", 0))
+                 hours=f"{data.get('open', '')}-{data.get('close', '')}", deposit=data.get("deposit", 0), payment=payment)
     return t(lang, "ob_ask_name")
 
 
@@ -782,7 +885,7 @@ async def _maybe_return(ctx, pid: str, sender: str, state: dict) -> bool:
     data = state.get("data", {})
     if not data.get("services"):
         return False
-    if dest == "confirm_all" and not (data.get("open") and data.get("close") and data.get("owners")):
+    if dest == "confirm_all" and not registration_complete(state):
         return False
     state["return_to"] = None
     state["stack"] = [state.get("step", "ask_hours")]
@@ -871,7 +974,8 @@ async def advance(ctx, sender: str, pid: str, text: str, media: dict | None = No
     duration_prompt = step == "confirm_services" and awaiting_duration_approval(state)
     duration_reply = is_duration_approval(words) and (
         step == "ask_durations" or (step == "confirm_services" and duration_prompt))
-    if wants_keep(words, bool(state.get("return_to"))) and not duration_reply:
+    if (step not in ("confirm_services", "confirm_all")
+            and wants_keep(words, bool(state.get("return_to"))) and not duration_reply):
         if _keep_data_present(state) and await _maybe_return(ctx, pid, sender, state):
             return True
         await _resend(ctx, pid, sender, state, t(lang, "ob_steer"))
@@ -893,12 +997,8 @@ async def advance(ctx, sender: str, pid: str, text: str, media: dict | None = No
     # below remain the authoritative fallback for outages and model refusals.
     if media is None and getattr(ctx, "agent", None) is not None and getattr(ctx.settings, "agent_mode", "off") == "on":
         from .onboarding_agent import advance as agent_advance
-        # Keep compact yes/no controls deterministic; natural confirmations are
-        # interpreted by the model but still checked against the current state.
-        simple_control = low in NO_WORDS and step in {"confirm_name", "confirm_services", "ask_durations", "confirm_all"}
-        if not simple_control:
-            if await agent_advance(ctx, sender, pid, words, state):
-                return True
+        if await agent_advance(ctx, sender, pid, words, state):
+            return True
 
     if step == "ask_name":
         if low in _NEVER_A_NAME or registration_start_only(words) or looks_off_topic(words) or looks_like_name_sentence(words):
@@ -1002,8 +1102,6 @@ async def advance(ctx, sender: str, pid: str, text: str, media: dict | None = No
         if duration_prompt and is_duration_approval(words):
             await _accept_duration_estimates(ctx, pid, sender, state, words)
         elif low in YES_WORDS:
-            if await _maybe_return(ctx, pid, sender, state):
-                return True
             state["stack"] = ["confirm_services"]
             state["services_confirmed"] = True
             if all(s.get("explicit") for s in data["services"]):
@@ -1011,6 +1109,8 @@ async def advance(ctx, sender: str, pid: str, text: str, media: dict | None = No
             else:
                 state["step"] = "ask_durations"
             await _save_session(ctx.pool, sender, state)
+            if await _maybe_return(ctx, pid, sender, state):
+                return True
             await _resend(ctx, pid, sender, state)
         elif low in NO_WORDS:
             state["step"] = "ask_prices"
@@ -1085,6 +1185,67 @@ async def advance(ctx, sender: str, pid: str, text: str, media: dict | None = No
             return True
         data["deposit"] = amount
         state["stack"] = ["ask_deposit"]
+        state["step"] = "ask_payment_method" if amount > 0 and data.get("payment_method") not in ("till", "phone") else registration_next_step(state)
+        await _save_session(ctx.pool, sender, state)
+        if await _maybe_return(ctx, pid, sender, state):
+            return True
+        await _resend(ctx, pid, sender, state)
+        return True
+
+    if step == "ask_payment_method":
+        method = parse_payment_method(words)
+        if method is None:
+            await _say(ctx, pid, sender, t(lang, "ob_payment_method_bad"))
+            return True
+        if method != data.get("payment_method"):
+            data.pop("payment_destination", None)
+            data.pop("payment_type", None)
+        data["payment_method"] = method
+        state["stack"] = ["ask_payment_method"]
+        state["step"] = "ask_till_number" if method == "till" else "ask_phone_type"
+        await _save_session(ctx.pool, sender, state)
+        if await _maybe_return(ctx, pid, sender, state):
+            return True
+        await _resend(ctx, pid, sender, state)
+        return True
+
+    if step == "ask_till_number":
+        till = parse_manual_till(words)
+        if till is None:
+            await _say(ctx, pid, sender, t(lang, "ob_till_bad"))
+            return True
+        data["payment_destination"] = till
+        state["stack"] = ["ask_till_number"]
+        state["step"] = "confirm_all"
+        await _save_session(ctx.pool, sender, state)
+        if await _maybe_return(ctx, pid, sender, state):
+            return True
+        await _resend(ctx, pid, sender, state)
+        return True
+
+    if step == "ask_phone_type":
+        phone_type = parse_payment_phone_type(words)
+        if phone_type is None:
+            await _say(ctx, pid, sender, t(lang, "ob_phone_type_bad"))
+            return True
+        if phone_type != data.get("payment_type"):
+            data.pop("payment_destination", None)
+        data["payment_type"] = phone_type
+        state["stack"] = ["ask_phone_type"]
+        state["step"] = "ask_payment_phone"
+        await _save_session(ctx.pool, sender, state)
+        if await _maybe_return(ctx, pid, sender, state):
+            return True
+        await _resend(ctx, pid, sender, state)
+        return True
+
+    if step == "ask_payment_phone":
+        phone = parse_payment_phone(words)
+        if phone is None:
+            await _say(ctx, pid, sender, t(lang, "ob_payment_phone_bad"))
+            return True
+        data["payment_destination"] = phone
+        state["stack"] = ["ask_payment_phone"]
         state["step"] = "confirm_all"
         await _save_session(ctx.pool, sender, state)
         if await _maybe_return(ctx, pid, sender, state):

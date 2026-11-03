@@ -177,6 +177,21 @@ async def test_yes_with_deposit_holds_for_payment():
 
 @needs_db
 @pytest.mark.asyncio
+async def test_deposit_waitlist_offer_is_not_sent_without_a_payment_destination():
+    pool, out, salon = await build(DSN)
+    ctx, ids, staff, svc, salon_d, starts, ends = await setup(pool, salon, 2, deposit=200)
+    await pool.execute("DELETE FROM salon_payment WHERE salon_id=$1::uuid", salon)
+    await waitlist.join(pool, salon, ids[B], svc, starts.date())
+
+    await waitlist.offer_freed_slot(ctx, salon_d, staff, "Brian", svc, "Fade", starts, ends)
+
+    assert await pool.fetchval("SELECT status FROM waitlist WHERE client_id=$1::uuid", ids[B]) == "waiting"
+    assert out.to(B) == []
+    await pool.close()
+
+
+@needs_db
+@pytest.mark.asyncio
 async def test_sweep_expires_stale_offers():
     pool, _, salon = await build(DSN)
     ctx, ids, staff, svc, salon_d, starts, ends = await setup(pool, salon, 6)

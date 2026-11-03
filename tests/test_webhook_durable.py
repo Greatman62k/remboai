@@ -277,6 +277,77 @@ async def test_payment_review_resolutions_are_atomic_and_single_winner():
         app.state.ctx.settings.ops_api_key = original_key
         await pool.close()
 
+
+@pytest.mark.parametrize(("payment_status", "review_status"), [
+    ("review", "pending_review"),
+    ("needs_refund", "refund_due"),
+])
+@pytest.mark.asyncio
+async def test_ops_closing_without_refund_closes_the_payment_too(payment_status, review_status):
+    from tests.harness import build
+    from app.main import app
+    from app.payments import confirm_manual_claim
+
+    pool, _out, salon = await build(DSN)
+    staff = await pool.fetchval("SELECT id::text FROM staff LIMIT 1")
+    service = await pool.fetchval("SELECT id::text FROM services LIMIT 1")
+    client_id = await pool.fetchval(
+        "INSERT INTO clients (salon_id,wa_id) VALUES ($1::uuid,'254711000088') RETURNING id::text", salon)
+    starts = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=2)
+    booking = await pool.fetchval(
+        "INSERT INTO bookings (salon_id,staff_id,service_id,client_id,starts_at,ends_at,status) "
+        "VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,'held') RETURNING id::text",
+        salon, staff, service, client_id, starts, starts + datetime.timedelta(minutes=30))
+    payment = await pool.fetchval(
+        "INSERT INTO payments (booking_id,salon_id,phone,amount_kes,method,provider,status,mpesa_receipt) "
+        "VALUES ($1::uuid,$2::uuid,'254711000088',200,'manual','mpesa',$3,'QAB1CD2EF3') RETURNING id::text",
+        booking, salon, payment_status)
+    review = await pool.fetchval(
+        "INSERT INTO payment_reviews (payment_id,reason,status,expected_amount,received_amount) "
+        "VALUES ($1::uuid,'payment_unresolved',$2,200,150) RETURNING id::text", payment, review_status)
+    key_value = "0123456789abcdef" * 4
+    original_key = app.state.ctx.settings.ops_api_key
+    app.state.ctx.settings.ops_api_key = key_value
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                f"/ops/payment-reviews/{review}/resolve", json={"action": "closed_no_refund"},
+                headers={"x-ops-key": key_value})
+        assert response.status_code == 200
+        statuses = await pool.fetchrow(
+            "SELECT r.status AS review, p.status AS payment, p.result_desc FROM payment_reviews r "
+            "JOIN payments p ON p.id=r.payment_id WHERE r.id=$1::uuid", review)
+        assert (statuses["review"], statuses["payment"]) == ("closed_no_refund", "closed_no_refund")
+        assert statuses["result_desc"] == "closed by ops without refund"
+        assert await pool.fetchval(
+            "SELECT count(*) FROM payments WHERE salon_id=$1::uuid AND method='manual' AND status IN ('pending','review')", salon) == 0
+        assert (await confirm_manual_claim(pool, payment))[0] == "stale"
+    finally:
+        app.state.ctx.settings.ops_api_key = original_key
+        await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_legacy_trace_threads_are_rekeyed_from_inbound_sender_ids():
+    from tests.harness import build
+    from app.channels.outbound import rekey_legacy_trace_threads
+    from app.main import app
+
+    pool, _out, _salon = await build(DSN)
+    await pool.execute(
+        "INSERT INTO inbound_messages (wa_message_id,wa_id) VALUES "
+        "('legacy-one','254712340001'),('legacy-two','254799990001')")
+    await pool.execute(
+        "INSERT INTO conversation_trace (message_id,thread,channel,message_kind,user_text) VALUES "
+        "('legacy-one','...0001','whatsapp','text','first'),"
+        "('legacy-two','...0001','whatsapp','text','second')")
+    assert await rekey_legacy_trace_threads(pool, app.state.ctx.settings) == 2
+    threads = await pool.fetch("SELECT thread FROM conversation_trace ORDER BY message_id")
+    assert threads[0]["thread"] != threads[1]["thread"]
+    assert all(row["thread"].startswith("whatsapp:") for row in threads)
+    assert await rekey_legacy_trace_threads(pool, app.state.ctx.settings) == 0
+    await pool.close()
+
 @pytest.mark.asyncio
 async def test_purge_expired():
     pool = await _pool(DSN)

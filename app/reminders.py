@@ -18,6 +18,10 @@ RETRY_DELAYS = (timedelta(minutes=5), timedelta(minutes=15))
 CLAIM_LEASE = timedelta(minutes=5)
 THANKS_TEMPLATE = "thanks_visit"
 STILL_TEMPLATE = "reminder_3h"
+SOON_TEMPLATE = "reminder_soon"
+OWNER_SOON_TEMPLATE = "owner_reminder_soon"
+OWNER_CANCELLED_TEMPLATE = "owner_booking_cancelled"
+SOON_LEAD = timedelta(minutes=30)
 
 
 async def ask_about_visits(pool, ctx) -> int:
@@ -57,46 +61,76 @@ class _Fmt(dict):
 
 async def schedule_reminders(pool, booking_id: str, template_24h: str = "reminder_24h", template_2h: str = "reminder_2h",
                          template_3h: str = STILL_TEMPLATE):
-    row = await pool.fetchrow("SELECT b.id::text, b.salon_id::text, b.client_id::text, b.starts_at, b.ends_at, b.status, c.wa_id, c.reminder_opt_out as client_opt, b.reminder_opt_out as booking_opt FROM bookings b JOIN clients c ON c.id=b.client_id WHERE b.id=$1::uuid", booking_id)
+    row = await pool.fetchrow("SELECT b.id::text, b.salon_id::text, b.client_id::text, b.starts_at, b.ends_at, b.status, c.wa_id, c.reminder_opt_out as client_opt, b.reminder_opt_out as booking_opt, s.owner_wa_id FROM bookings b JOIN clients c ON c.id=b.client_id JOIN salons s ON s.id=b.salon_id WHERE b.id=$1::uuid", booking_id)
     if not row or row["status"] not in ("held", "confirmed"):
-        return
-    if row["client_opt"] or row["booking_opt"]:
         return
     starts_at = row["starts_at"]
     if starts_at.tzinfo is None:
         starts_at = starts_at.replace(tzinfo=NBO)
     now = datetime.now(NBO)
-    if starts_at < now + timedelta(hours=2):
-        return
     salon_id = row["salon_id"]
     templates = await pool.fetch("SELECT name FROM reminder_templates WHERE salon_id=$1::uuid AND approved=true", salon_id)
-    if not templates:
-        return
     names = {r["name"] for r in templates}
     jobs = []
-    if template_24h in names:
-        run_at = starts_at - timedelta(hours=24)
-        if run_at > now:
-            jobs.append((template_24h, run_at))
-    if template_2h in names:
-        run_at = starts_at - timedelta(hours=2)
-        if run_at > now:
-            jobs.append((template_2h, run_at))
-    if template_3h in names:
-        run_at = starts_at - timedelta(hours=3)
-        if run_at > now:
-            jobs.append((template_3h, run_at))
-    if THANKS_TEMPLATE in names and row["ends_at"] is not None:
+    lead = starts_at - now
+    if lead > SOON_LEAD:
+        # The appointment ETA goes to both sides 30 minutes before the start.
+        # Inside that window the immediate booking messages are the timely notice.
+        if not (row["client_opt"] or row["booking_opt"]):
+            if row["wa_id"].startswith("tg:") or SOON_TEMPLATE in names:
+                jobs.append((row["wa_id"], SOON_TEMPLATE, starts_at - SOON_LEAD))
+        owner = row["owner_wa_id"]
+        if owner and (owner.startswith("tg:") or OWNER_SOON_TEMPLATE in names):
+            jobs.append((owner, OWNER_SOON_TEMPLATE, starts_at - SOON_LEAD))
+        if not (row["client_opt"] or row["booking_opt"]) and lead > timedelta(hours=2):
+            if template_24h in names:
+                run_at = starts_at - timedelta(hours=24)
+                if run_at > now:
+                    jobs.append((row["wa_id"], template_24h, run_at))
+            if template_2h in names:
+                run_at = starts_at - timedelta(hours=2)
+                if run_at > now:
+                    jobs.append((row["wa_id"], template_2h, run_at))
+            if template_3h in names:
+                run_at = starts_at - timedelta(hours=3)
+                if run_at > now:
+                    jobs.append((row["wa_id"], template_3h, run_at))
+    if not (row["client_opt"] or row["booking_opt"]) and THANKS_TEMPLATE in names and row["ends_at"] is not None:
         run_at = (row["ends_at"] if row["ends_at"].tzinfo else row["ends_at"].replace(tzinfo=NBO)) + timedelta(hours=2)
         if run_at > now:
-            jobs.append((THANKS_TEMPLATE, run_at))
-    for name, run_at in jobs:
-        exists = await pool.fetchval("SELECT 1 FROM reminder_jobs WHERE booking_id=$1::uuid AND template_name=$2 AND status='pending'", booking_id, name)
+            jobs.append((row["wa_id"], THANKS_TEMPLATE, run_at))
+    for recipient, name, run_at in jobs:
+        exists = await pool.fetchval("SELECT 1 FROM reminder_jobs WHERE booking_id=$1::uuid AND template_name=$2 AND wa_id=$3 AND status='pending'", booking_id, name, recipient)
         if exists:
             continue
-        await pool.execute("INSERT INTO reminder_jobs (booking_id, salon_id, client_id, wa_id, run_at, template_name) VALUES ($1::uuid,$2::uuid,$3::uuid,$4,$5,$6)", booking_id, row["salon_id"], row["client_id"], row["wa_id"], run_at, name)
+        await pool.execute("INSERT INTO reminder_jobs (booking_id, salon_id, client_id, wa_id, run_at, template_name) VALUES ($1::uuid,$2::uuid,$3::uuid,$4,$5,$6)", booking_id, row["salon_id"], row["client_id"], recipient, run_at, name)
         reminders_queued.inc()
         log.info("scheduled %s for %s at %s", name, booking_id, run_at.isoformat())
+
+
+async def schedule_owner_cancellation(pool, booking_id: str) -> None:
+    """Queue one owner notice when the customer explicitly cancels a booking."""
+    row = await pool.fetchrow(
+        "SELECT b.salon_id::text, b.client_id::text, b.status, s.owner_wa_id "
+        "FROM bookings b JOIN salons s ON s.id=b.salon_id WHERE b.id=$1::uuid", booking_id)
+    if not row or row["status"] != "cancelled" or not row["owner_wa_id"]:
+        return
+    recipient = row["owner_wa_id"]
+    if not recipient.startswith("tg:"):
+        approved = await pool.fetchval(
+            "SELECT 1 FROM reminder_templates WHERE salon_id=$1::uuid AND name=$2 AND approved=true",
+            row["salon_id"], OWNER_CANCELLED_TEMPLATE)
+        if not approved:
+            log.warning("owner cancellation notice for booking %s needs approved %s template", booking_id, OWNER_CANCELLED_TEMPLATE)
+            return
+    inserted = await pool.fetchval(
+        "INSERT INTO reminder_jobs (booking_id, salon_id, client_id, wa_id, run_at, template_name) "
+        "SELECT $1::uuid,$2::uuid,$3::uuid,$4,now(),$5 WHERE NOT EXISTS "
+        "(SELECT 1 FROM reminder_jobs WHERE booking_id=$1::uuid AND wa_id=$4 AND template_name=$5) "
+        "RETURNING id::text",
+        booking_id, row["salon_id"], row["client_id"], recipient, OWNER_CANCELLED_TEMPLATE)
+    if inserted:
+        reminders_queued.inc()
 
 async def cancel_reminders(pool, booking_id: str):
     await pool.execute("UPDATE reminder_jobs SET status='cancelled' WHERE booking_id=$1::uuid AND status='pending'", booking_id)
@@ -121,9 +155,11 @@ async def run_reminders(ctx):
         "SELECT r.id::text, r.booking_id::text, r.salon_id::text, r.wa_id, r.template_name, b.starts_at, b.ends_at, s.name AS salon_name, s.wa_phone_number_id, s.wa_access_token, "
         "t.body, t.language, t.variables, c.name AS client_name, c.lang, sv.name AS service_name "
         "FROM reminder_jobs r JOIN bookings b ON b.id=r.booking_id JOIN salons s ON s.id=r.salon_id "
-        "JOIN reminder_templates t ON t.salon_id=r.salon_id AND t.name=r.template_name "
+        "LEFT JOIN reminder_templates t ON t.salon_id=r.salon_id AND t.name=r.template_name AND t.approved=true "
         "JOIN clients c ON c.id=r.client_id JOIN services sv ON sv.id=b.service_id "
-        "WHERE r.status='pending' AND r.run_at <= now() AND t.approved=true ORDER BY r.run_at LIMIT 20")
+        "WHERE r.status='pending' AND r.run_at <= now() "
+        "AND (t.approved=true OR (r.wa_id LIKE 'tg:%' AND r.template_name IN ($1,$2,$3,$4))) "
+        "ORDER BY r.run_at LIMIT 20", SOON_TEMPLATE, OWNER_SOON_TEMPLATE, OWNER_CANCELLED_TEMPLATE, STILL_TEMPLATE)
     for r in rows:
         attempts = await ctx.pool.fetchval(
             "UPDATE reminder_jobs SET attempts=attempts+1, run_at=now()+$2 WHERE id=$1::uuid AND status='pending' AND run_at <= now() RETURNING attempts",
@@ -142,16 +178,34 @@ async def run_reminders(ctx):
 
 
 def _template_values(r, local: datetime) -> dict:
+    minutes = max(1, int((local - datetime.now(NBO)).total_seconds() + 59) // 60)
     return _Fmt(salon=r["salon_name"], name=r["client_name"] or "there", service=r["service_name"], when=local.strftime("%a %d %b %H:%M"),
-                date=local.strftime("%Y-%m-%d"), time=local.strftime("%H:%M"))
+                date=local.strftime("%Y-%m-%d"), time=local.strftime("%H:%M"), minutes=minutes)
 
 
 async def _deliver(ctx, r, attempts: int, starts_at: datetime) -> None:
     pool = ctx.pool
     cancel = "UPDATE reminder_jobs SET status='cancelled' WHERE id=$1::uuid"
     state = await pool.fetchrow("SELECT b.status, c.reminder_opt_out OR b.reminder_opt_out AS opt_out FROM bookings b JOIN clients c ON c.id=b.client_id WHERE b.id=$1::uuid", r["booking_id"])
-    if state is None or state["opt_out"]:
+    is_owner_job = r["template_name"] in (OWNER_SOON_TEMPLATE, OWNER_CANCELLED_TEMPLATE)
+    if state is None or (state["opt_out"] and not is_owner_job):
         await pool.execute(cancel, r["id"])
+        return
+    if r["template_name"] == OWNER_CANCELLED_TEMPLATE:
+        if state["status"] != "cancelled":
+            await pool.execute(cancel, r["id"])
+            return
+        local = starts_at.astimezone(NBO)
+        values = _template_values(r, local)
+        if r["wa_id"].startswith("tg:") or not r["body"]:
+            body = t("en", "owner_booking_cancelled", name=values["name"], service=r["service_name"],
+                     salon=r["salon_name"], when=values["when"])
+            params = [body]
+        else:
+            body = r["body"].format_map(values)
+            names = r["variables"] if isinstance(r["variables"], list) else json.loads(r["variables"] or "[]")
+            params = [str(values[n]) for n in names] if names else [body]
+        await _send_reminder(ctx, r, attempts, starts_at, body, params)
         return
     if r["template_name"] == THANKS_TEMPLATE:
         ends_at = r["ends_at"]
@@ -175,9 +229,25 @@ async def _deliver(ctx, r, attempts: int, starts_at: datetime) -> None:
         return
     local = starts_at.astimezone(NBO)
     values = _template_values(r, local)
-    body = r["body"].format_map(values)
-    names = r["variables"] if isinstance(r["variables"], list) else json.loads(r["variables"] or "[]")
-    params = [str(values[n]) for n in names] if names else [body]
+    if r["template_name"] == SOON_TEMPLATE and (r["wa_id"].startswith("tg:") or not r["body"]):
+        minutes = values["minutes"]
+        body = t(r["lang"] or "en", "reminder_soon", salon=r["salon_name"], service=r["service_name"],
+                 when=local.strftime("%a %d %b %H:%M"), minutes=minutes)
+        params = [body]
+    elif r["template_name"] == OWNER_SOON_TEMPLATE and (r["wa_id"].startswith("tg:") or not r["body"]):
+        minutes = values["minutes"]
+        body = t("en", "owner_eta_soon", name=r["client_name"] or "Customer", service=r["service_name"],
+                 salon=r["salon_name"], when=local.strftime("%a %d %b %H:%M"), minutes=minutes)
+        params = [body]
+    else:
+        body = r["body"].format_map(values)
+        names = r["variables"] if isinstance(r["variables"], list) else json.loads(r["variables"] or "[]")
+        params = [str(values[n]) for n in names] if names else [body]
+    await _send_reminder(ctx, r, attempts, starts_at, body, params)
+
+
+async def _send_reminder(ctx, r, attempts: int, starts_at: datetime, body: str, params: list[str]) -> None:
+    pool = ctx.pool
     token, pid, to = outbound.salon_token(ctx, {"id": r["salon_id"], "wa_access_token": r["wa_access_token"]}), r["wa_phone_number_id"], r["wa_id"]
     sent = False
     if not to.startswith("tg:"):
@@ -196,7 +266,7 @@ async def _deliver(ctx, r, attempts: int, starts_at: datetime) -> None:
 
 
 async def _deliver_still(ctx, r, starts_at: datetime) -> None:
-    """The 3h Still-coming nudge always carries Keep/Cancel buttons, on every channel."""
+    """The 3h Still-coming check offers Keep/Cancel; silence leaves the booking confirmed."""
     lang = r["lang"] or "en"
     body = r["body"].format_map(_template_values(r, starts_at.astimezone(NBO)))
     buttons = [(f"still-keep:{r['booking_id']}", t(lang, "still_btn_keep")[:20]),
@@ -212,7 +282,7 @@ async def _deliver_still(ctx, r, starts_at: datetime) -> None:
 
 
 async def handle_still_tap(ctx, salon: dict, client: dict, st: dict, chat, lang: str, tz, reply_id: str) -> bool:
-    """Keep confirms the customer is still coming; Cancel frees the slot toward the waitlist."""
+    """Keep acknowledges the booking; Cancel frees the slot toward the waitlist."""
     from .booking_flow import _reply, _save, when_label
     kind, _, bid = reply_id.partition(":")
     if kind not in ("still-keep", "still-cancel") or not bid:
@@ -231,44 +301,11 @@ async def handle_still_tap(ctx, salon: dict, client: dict, st: dict, chat, lang:
         return True
     await ctx.pool.execute("UPDATE bookings SET status='cancelled' WHERE id=$1::uuid AND status IN ('held','confirmed')", bid)
     await payments.park_for_cancellation(ctx.pool, bid)
-    await payments.fail_open_manual_claims(ctx.pool, bid)
     await cancel_reminders(ctx.pool, bid)
     cleared = {"history": st.get("history", [])}
     await _save(ctx, salon["id"], chat.to, cleared)
     await _reply(ctx, salon["id"], chat.to, cleared, chat,
                  t(lang, "cancelled", when=when_label(row["starts_at"], tz), salon=salon["name"]))
+    await schedule_owner_cancellation(ctx.pool, bid)
     await waitlist.offer_for_booking(ctx, salon, bid)
     return True
-
-
-async def release_silent(ctx) -> int:
-    """Bookings whose 3h nudge went out, was never answered, and whose start is
-    now under 2h away lose the slot toward the waitlist. Runs every minute."""
-    rows = await ctx.pool.fetch(
-        "SELECT b.id::text AS bid, b.salon_id::text AS salon_id, s.name AS salon_name, s.owner_wa_id, "
-        "s.wa_phone_number_id, s.wa_access_token, s.tg_bot_id, s.deposit_kes, c.wa_id AS phone, c.lang, "
-        "b.starts_at, sv.name AS service "
-        "FROM reminder_jobs r JOIN bookings b ON b.id=r.booking_id JOIN salons s ON s.id=r.salon_id "
-        "JOIN clients c ON c.id=r.client_id JOIN services sv ON sv.id=b.service_id "
-        "WHERE r.template_name=$1 AND r.status='sent' AND NOT r.replied "
-        "AND b.status IN ('held','confirmed') AND b.starts_at > now() AND b.starts_at <= now() + make_interval(hours => 2) "
-        "LIMIT 20", STILL_TEMPLATE)
-    n = 0
-    for r in rows:
-        try:
-            await ctx.pool.execute("UPDATE bookings SET status='cancelled' WHERE id=$1::uuid AND status IN ('held','confirmed')", r["bid"])
-            await payments.park_for_cancellation(ctx.pool, r["bid"])
-            await payments.fail_open_manual_claims(ctx.pool, r["bid"])
-            await cancel_reminders(ctx.pool, r["bid"])
-            lang = r["lang"] or "en"
-            salon = {"id": r["salon_id"], "name": r["salon_name"], "owner_wa_id": r["owner_wa_id"],
-                     "wa_phone_number_id": r["wa_phone_number_id"], "wa_access_token": r["wa_access_token"],
-                     "tg_bot_id": r["tg_bot_id"], "deposit_kes": r["deposit_kes"]}
-            await outbound.send_text(ctx, salon, r["phone"],
-                                     t(lang, "still_released", service=r["service"],
-                                       when=r["starts_at"].astimezone(NBO).strftime("%a %d %b, %H:%M"), salon=r["salon_name"]))
-            await waitlist.offer_for_booking(ctx, salon, r["bid"])
-            n += 1
-        except Exception:
-            log.exception("silent release failed for booking %s", r["bid"])
-    return n

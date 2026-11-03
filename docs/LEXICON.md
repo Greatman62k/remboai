@@ -1,7 +1,7 @@
 # Vocabulary (`app/lexicon.json`)
 
-The words the receptionist understands without a language model live in one data file, not in code: what counts as salon talk (the screen in front of
-the model), the keyword rules used when the model is unavailable, day and time words, greetings, and Swahili/Sheng prompt-injection phrases.
+The words the receptionist understands without a language model live in one data file, not in code: the keyword rules used when the model is unavailable,
+day and time words, greetings, and Swahili/Sheng prompt-injection phrases.
 Adding words never means editing Python.
 
 ## Filling it from another tool
@@ -10,12 +10,12 @@ Adding words never means editing Python.
    word lists get wrong. Nothing is replaced. Fix and repeat.
 3. `python scripts/check_lexicon.py filled.json --write app/lexicon.json` checks it and saves a cleaned copy: words that are too generic for their list
    (people slang like "dem" or "baba", "am"/"pm" as parts of the day, money slang as price words) are removed automatically.
-4. Have a Kenyan Swahili or Sheng speaker skim the `sheng` lists: a wrong word makes unrelated chat reach the paid model or mis-read a date.
+4. Have a Kenyan Swahili or Sheng speaker skim the `sheng` lists: a wrong word can mis-read a date, greeting, or injection attempt.
 5. `python -m pytest -q`, commit.
 
-How the lists are used: a first message goes to the paid model only if it has a word from `services_styles` or `booking_words`, an item on the salon's menu,
-or (when the free keyword rules cannot read it) a specific price, payment, hours or cancel word. Prices, hours, cancel, greetings and bare days or times are
-answered by the free rules. Request words ("nataka", "nifanyie") alone never qualify.
+How the lists are used: ordinary valid text reaches the model first when agent mode is enabled. If the model is unavailable, these lists help the deterministic
+fallback recognize salon requests, prices, payments, hours, cancellations, greetings, and dates. They also support input safety checks. Request words ("nataka",
+"nifanyie") alone are not enough for the deterministic fallback to infer a booking.
 
 Entries: lowercase, 2-40 characters, letters digits spaces `'` `-` `.` only. A trailing `*` accepts any ending (`nyoa*` matches `nyoaji`), a trailing `+` a repeated last
 letter (`hi+` matches `hiii`). Common function words (`na`, `ya`, `the`, `is`...) are dropped from the topic lists because they would let every message through.
@@ -29,7 +29,7 @@ Unusable entries are reported and ignored, never fatal.
 > (na, ya, ni, kwa, the, and, is). Categories:
 > - `services_styles`: this covers BOTH barbershops and women's salons. Barber: haircuts, fades, tapers, line-ups, shaves, beard work, kids' cuts. Salon: braids (box, knotless, cornrows, twists), weaves, wig making and installs, silk press, relaxers, natural hair care, treatments, colour, lashes, brows, makeup, waxing, nails (manicure, pedicure, gel, acrylic), facials. Spa: massage, facials, steam, body treatments. Also the words for the shop, the barber and the stylist, and slang for each. Aim for 80+ in `sw` and `sheng` together, covering all three kinds of business.
 > - `booking_words`, `request_words`: how people ask for a slot ("nipangie", "niko free", "nataka kuja"), ask whether someone is free, or walk in.
-> - `price_payment_words`, `hours_cancel_words`, `cancel`, `price`, `hours`: asking cost, deposits, M-Pesa and till, opening times, cancelling or moving a booking.
+> - `price_payment_words`, `hours_cancel_words`, `cancel`, `price`, `hours`: asking cost, deposits, M-PESA or Airtel Money, opening times, cancelling or moving a booking.
 > - `sw_markers`: words that show someone is writing Swahili or Sheng.
 > - `greetings`, `how_are_you`: Sheng and Swahili greetings and "how are you".
 > - `today`, `tomorrow`, `day_after_tomorrow`, weekdays, `morning`, `afternoon`, `evening`: including Sheng and short forms. Careful: "kesho kutwa" is the DAY AFTER tomorrow.

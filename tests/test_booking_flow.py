@@ -292,7 +292,8 @@ def test_tapping_again_while_holding_gets_an_answer_not_silence():
         async with client() as c:
             await to_pay(c, out, pool)
             await post(c, payload(A, "1", mid="n1"))
-        assert "already reserved" in out.bodies(A)[-1]
+        assert "still held" in out.bodies(A)[-1]
+        assert "till 5012345" in out.bodies(A)[-1]
         assert await pool.fetchval("SELECT status FROM bookings") == "held"
         await pool.close()
     asyncio.run(run())

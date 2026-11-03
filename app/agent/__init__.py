@@ -3,10 +3,9 @@
 One customer message becomes one agent turn:
   1. The model is briefed with the salon's real facts and the conversation, and given tools (find_slots, reserve_slot, ...).
   2. It decides what to do, step by step. Each tool call is validated and executed by code against the real diary and money path.
-  3. Its reply is checked against what it was actually told (grounding). Words that state a binding fact (the hold, the payment
-     steps, a cancellation) always come from code, built from the tool results.
-  4. If the model is down, out of budget, or ungroundable, the turn falls back to the code-written templates, or to the
-     keyword flow when nothing was done yet. The receptionist never goes silent and never states something unchecked.
+  3. Verified action results go back to the model, whose customer-facing draft is checked against those facts before it is sent.
+  4. If the model is down, out of budget, or still ungroundable after repair, code uses the verified outcome text or deterministic
+     fallback. The receptionist never goes silent and never states something unchecked.
 
 Every turn is written to `agent_turns`, so it can be inspected (/ops/agent-trace) and a retried message resends the same reply."""
 from __future__ import annotations
@@ -82,15 +81,35 @@ async def _trace(ctx, *, mid, salon, sender, user_text, steps, final_text, butto
 
 
 def _compose(outcomes: list[Outcome], lead: str) -> tuple[str, list[tuple[str, str]]]:
-    """Code's words for anything that changed, the model's words around them. No lead means code's words only."""
-    code = "\n\n".join(o.text for o in outcomes if o.mutating)
-    plain = "\n\n".join(o.text for o in outcomes if not o.mutating)
+    """Keep the model's natural reply and attach verified wording for binding outcomes."""
     buttons = next((o.buttons for o in reversed(outcomes) if o.buttons), [])
-    if not lead:
-        return "\n\n".join(x for x in (code, plain) if x), buttons
-    if plain:                                   # the model presents the options; code's confirmation of any change comes first
-        return "\n\n".join(x for x in (code, lead) if x), buttons
-    return "\n\n".join(x for x in (lead, code) if x), buttons
+    if lead:
+        body = lead.strip()
+        prior_to_offer = []
+        later_outcomes = []
+        seen_offer = False
+        for outcome in outcomes:
+            if outcome.kind == "offered":
+                seen_offer = True
+            elif outcome.text and seen_offer:
+                later_outcomes.append(outcome)
+            elif outcome.text:
+                prior_to_offer.append(outcome)
+        # A tool may cancel the current booking and then offer alternatives.
+        # State the completed cancellation before the model's offer summary.
+        prefix = [o for o in prior_to_offer if any(x.kind == "offered" for x in outcomes)]
+        suffix = [o for o in prior_to_offer if o not in prefix] + later_outcomes
+        for outcome in prefix:
+            if outcome.text.casefold() not in body.casefold():
+                body = outcome.text + "\n\n" + body
+        for outcome in suffix:
+            # Offers use verified buttons; other outcomes need the code-written
+            # facts and next steps alongside the model's natural wording.
+            if outcome.text.casefold() not in body.casefold():
+                body += "\n\n" + outcome.text
+        return body, buttons
+    fallback = "\n\n".join(outcome.text for outcome in outcomes if outcome.text)
+    return fallback, buttons
 
 
 @dataclass
@@ -181,8 +200,16 @@ async def turn(ctx, salon: dict, client: dict, st: dict, services: list[dict], t
     staff_by_service = {r["sid"]: list(r["names"]) for r in rows}
     acct = await payments.account(ctx.pool, salon["id"])
     deposit = int(salon.get("deposit_kes") or 0)
-    deposit_line = (f"Deposit: KES {deposit} (never more than the service price) is requested by M-Pesa when a slot is held. The system sends and verifies the payment steps."
-                    if acct and deposit > 0 else "Deposit: none is required.")
+    if deposit <= 0:
+        deposit_line = "Deposit: none is required."
+    elif acct is None:
+        deposit_line = f"Deposit: KES {deposit} is configured, but the salon has no payment destination. Do not offer or confirm a deposit booking."
+    elif acct.get("manual"):
+        deposit_line = (f"Deposit: KES {deposit} (never more than the service price). Customers pay manually to "
+                        f"{payments.destination_label(acct)}. The owner verifies each payment claim; RemboAI does not initiate or verify these transfers.")
+    else:
+        deposit_line = (f"Deposit: KES {deposit} (never more than the service price). M-PESA Daraja sends an STK prompt to the customer's chosen M-PESA phone when a slot is held, "
+                        f"and verifies payment by callback or status query to {payments.destination_label(acct)}.")
     toolbox = Toolbox(ctx, salon, client, st, services, tz, now, lang, chat.to, text)
     view = dict(toolbox.st)
     view["_offered_view"] = toolbox.view_slots()
@@ -230,23 +257,25 @@ async def turn(ctx, salon: dict, client: dict, st: dict, services: list[dict], t
 
 async def owner_turn(ctx, salon: dict, to: str, text: str, tz: ZoneInfo, now: datetime, chat) -> bool:
     """The owner talks to the diary in plain words. False means the model could not help and the message goes on as before."""
-    from .admin import ADMIN_TOOLS, AdminToolbox, admin_prompt, looks_like_admin, looks_like_admin_followup
+    from .admin import ADMIN_TOOLS, AdminToolbox, admin_prompt
     if not enabled(ctx):
         return False
     raw = await ctx.pool.fetchval("SELECT state FROM conversations WHERE salon_id=$1::uuid AND wa_id=$2", salon["id"], to)
     saved = _jload(raw, {}) or {}
     history = saved.get("owner_history", []) if isinstance(saved, dict) else []
-    recent_context = False
     history_at = saved.get("owner_history_at") if isinstance(saved, dict) else None
-    if isinstance(history, list) and history and isinstance(history[-1], dict) and history[-1].get("role") == "assistant" and history_at:
+    if isinstance(history, list) and history and history_at:
         try:
             stamp = datetime.fromisoformat(history_at) if isinstance(history_at, str) else history_at
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=ZoneInfo("UTC"))
             age = (datetime.now(ZoneInfo("UTC")) - stamp.astimezone(ZoneInfo("UTC"))).total_seconds()
-            recent_context = 0 <= age <= 600
+            if not 0 <= age <= 600:
+                history = []
         except (TypeError, ValueError):
-            recent_context = False
-    if not looks_like_admin(text) and not (recent_context and looks_like_admin_followup(text)):
-        return False
+            history = []
+    elif not history_at:
+        history = []
     try:
         policy = load_policy(getattr(ctx.settings, "agent_policy_path", None))
     except PolicyError:
@@ -262,8 +291,11 @@ async def owner_turn(ctx, salon: dict, to: str, text: str, tz: ZoneInfo, now: da
         await ctx.wa.typing(to)
     except Exception:
         pass
-    toolbox = AdminToolbox(ctx, salon, to, tz, now)
-    system = admin_prompt(salon, now, policy)
+    toolbox = AdminToolbox(ctx, salon, to, tz, now, text)
+    services = await bf._catalog(ctx, salon["id"])
+    system = admin_prompt(salon, now, policy, services)
+    toolbox.facts.prices.update(int(service["price_kes"]) for service in services)
+    toolbox.facts.prices.add(int(salon.get("deposit_kes") or 0))
     tools = with_tool_descriptions(ADMIN_TOOLS, policy, "salon_owner_assistant")
     history = history if isinstance(history, list) else []
     messages = [*history[-6:], {"role": "user", "content": text[:500]}]

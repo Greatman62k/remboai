@@ -32,7 +32,7 @@ async def test_schedule_creates_two_jobs():
     await pool.close()
 
 @pytest.mark.asyncio
-async def test_schedule_skips_if_soon():
+async def test_near_whatsapp_booking_requires_an_approved_soon_template():
     import os
     dsn = os.environ.get("TEST_DATABASE_URL")
     if not dsn:
@@ -52,6 +52,88 @@ async def test_schedule_skips_if_soon():
     await pool.execute("INSERT INTO reminder_templates (salon_id, name, body, approved) VALUES ($1::uuid,'reminder_24h','Hi',true)", salon)
     await schedule_reminders(pool, booking)
     assert await pool.fetchval("SELECT count(*) FROM reminder_jobs") == 0
+    await pool.execute("INSERT INTO reminder_templates (salon_id, name, body, approved) VALUES ($1::uuid,'reminder_soon','Your appointment is soon: {service} at {time}',true)", salon)
+    await schedule_reminders(pool, booking)
+    assert await pool.fetchval("SELECT template_name FROM reminder_jobs WHERE booking_id=$1::uuid", booking) == "reminder_soon"
+    await pool.close()
+
+@pytest.mark.asyncio
+async def test_a_telegram_booking_gets_one_eta_30_minutes_before():
+    import os
+    dsn = os.environ.get("TEST_DATABASE_URL")
+    if not dsn:
+        pytest.skip("needs TEST_DATABASE_URL")
+    from app.db import make_pool, migrate
+    from app.reminders import schedule_reminders, SOON_TEMPLATE
+    pool = await make_pool(dsn)
+    await pool.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+    await migrate(pool)
+    salon = await pool.fetchval("INSERT INTO salons (name, tg_bot_id) VALUES ('Soon Salon','tg:111') RETURNING id::text")
+    staff = await pool.fetchval("INSERT INTO staff (salon_id, name) VALUES ($1::uuid,'A') RETURNING id::text", salon)
+    svc = await pool.fetchval("INSERT INTO services (salon_id, name, duration_min, price_kes) VALUES ($1::uuid,'Fade',30,500) RETURNING id::text", salon)
+    client = await pool.fetchval("INSERT INTO clients (salon_id, wa_id, lang) VALUES ($1::uuid,'tg:5001','en') RETURNING id::text", salon)
+    starts = datetime.now(NBO) + timedelta(minutes=40)
+    booking = await pool.fetchval(
+        "INSERT INTO bookings (salon_id, staff_id, service_id, client_id, starts_at, ends_at, status) "
+        "VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,'confirmed') RETURNING id::text",
+        salon, staff, svc, client, starts, starts + timedelta(minutes=30))
+    await schedule_reminders(pool, booking)
+    row = await pool.fetchrow("SELECT template_name, run_at, booking_id::text FROM reminder_jobs WHERE booking_id=$1::uuid", booking)
+    assert row["template_name"] == SOON_TEMPLATE
+    assert row["booking_id"] == booking
+    assert abs((row["run_at"] - (starts - timedelta(minutes=30))).total_seconds()) < 1
+    await pool.close()
+
+@pytest.mark.asyncio
+async def test_soon_reminder_sends_to_telegram_without_a_whatsapp_template_row():
+    import os
+    dsn = os.environ.get("TEST_DATABASE_URL")
+    if not dsn:
+        pytest.skip("needs TEST_DATABASE_URL")
+    from app.reminders import run_reminders, SOON_TEMPLATE
+    from tests.harness import build
+    pool, out, salon = await build(dsn)
+    from app.main import app
+    staff = await pool.fetchval("SELECT id::text FROM staff LIMIT 1")
+    svc = await pool.fetchval("SELECT id::text FROM services WHERE name='Fade' LIMIT 1")
+    client = await pool.fetchval("INSERT INTO clients (salon_id, wa_id, lang) VALUES ($1::uuid,'tg:5002','en') RETURNING id::text", salon)
+    starts = datetime.now(NBO) + timedelta(minutes=10)
+    booking = await pool.fetchval(
+        "INSERT INTO bookings (salon_id, staff_id, service_id, client_id, starts_at, ends_at, status) "
+        "VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,'confirmed') RETURNING id::text",
+        salon, staff, svc, client, starts, starts + timedelta(minutes=45))
+    await pool.execute(
+        "INSERT INTO reminder_jobs (booking_id, salon_id, client_id, wa_id, run_at, template_name) "
+        "VALUES ($1::uuid,$2::uuid,$3::uuid,'tg:5002',now()-interval '1 second',$4)",
+        booking, salon, client, SOON_TEMPLATE)
+    await run_reminders(app.state.ctx)
+    assert await pool.fetchval("SELECT status FROM reminder_jobs WHERE booking_id=$1::uuid", booking) == "sent"
+    assert len(out.tg_bodies("5002")) == 1
+    assert "Fade" in out.tg_bodies("5002")[0] and "minutes" in out.tg_bodies("5002")[0]
+    await pool.close()
+
+@pytest.mark.asyncio
+async def test_a_booking_within_30_minutes_uses_its_confirmation_without_a_duplicate_eta():
+    import os
+    dsn = os.environ.get("TEST_DATABASE_URL")
+    if not dsn:
+        pytest.skip("needs TEST_DATABASE_URL")
+    from app.db import make_pool, migrate
+    from app.reminders import schedule_reminders
+    pool = await make_pool(dsn)
+    await pool.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+    await migrate(pool)
+    salon = await pool.fetchval("INSERT INTO salons (name, tg_bot_id) VALUES ('Immediate Salon','tg:111') RETURNING id::text")
+    staff = await pool.fetchval("INSERT INTO staff (salon_id, name) VALUES ($1::uuid,'A') RETURNING id::text", salon)
+    svc = await pool.fetchval("INSERT INTO services (salon_id, name, duration_min, price_kes) VALUES ($1::uuid,'Fade',30,500) RETURNING id::text", salon)
+    client = await pool.fetchval("INSERT INTO clients (salon_id, wa_id) VALUES ($1::uuid,'tg:5003') RETURNING id::text", salon)
+    starts = datetime.now(NBO) + timedelta(minutes=10)
+    booking = await pool.fetchval(
+        "INSERT INTO bookings (salon_id, staff_id, service_id, client_id, starts_at, ends_at, status) "
+        "VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,'confirmed') RETURNING id::text",
+        salon, staff, svc, client, starts, starts + timedelta(minutes=30))
+    await schedule_reminders(pool, booking)
+    assert await pool.fetchval("SELECT count(*) FROM reminder_jobs WHERE booking_id=$1::uuid", booking) == 0
     await pool.close()
 
 @pytest.mark.asyncio
@@ -275,4 +357,72 @@ async def test_opt_out_blocks():
     await pool.execute("INSERT INTO reminder_templates (salon_id, name, body, approved) VALUES ($1::uuid,'reminder_24h','Hi',true)", salon)
     await schedule_reminders(pool, booking)
     assert await pool.fetchval("SELECT count(*) FROM reminder_jobs") == 0
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_customer_and_owner_get_one_eta_30_minutes_before_a_long_range_booking():
+    import os
+    dsn = os.environ.get("TEST_DATABASE_URL")
+    if not dsn:
+        pytest.skip("needs TEST_DATABASE_URL")
+    from app.reminders import run_reminders, schedule_reminders, SOON_TEMPLATE, OWNER_SOON_TEMPLATE
+    from tests.harness import build
+    pool, out, salon = await build(dsn)
+    await pool.execute("UPDATE salons SET owner_wa_id='tg:6001' WHERE id=$1::uuid", salon)
+    from app.main import app
+    staff = await pool.fetchval("SELECT id::text FROM staff WHERE salon_id=$1::uuid LIMIT 1", salon)
+    svc = await pool.fetchval("SELECT id::text FROM services WHERE salon_id=$1::uuid AND name='Fade'", salon)
+    client = await pool.fetchval(
+        "INSERT INTO clients (salon_id, wa_id, name, lang) VALUES ($1::uuid,'tg:6002','Amina','en') RETURNING id::text", salon)
+    starts = datetime.now(NBO) + timedelta(days=1)
+    booking = await pool.fetchval(
+        "INSERT INTO bookings (salon_id, staff_id, service_id, client_id, starts_at, ends_at, status) "
+        "VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,'confirmed') RETURNING id::text",
+        salon, staff, svc, client, starts, starts + timedelta(minutes=45))
+    await schedule_reminders(pool, booking)
+    rows = await pool.fetch(
+        "SELECT template_name, wa_id, run_at FROM reminder_jobs WHERE booking_id=$1::uuid ORDER BY template_name", booking)
+    assert {(r["template_name"], r["wa_id"]) for r in rows} == {
+        (SOON_TEMPLATE, "tg:6002"), (OWNER_SOON_TEMPLATE, "tg:6001")}
+    assert all(abs((r["run_at"] - (starts - timedelta(minutes=30))).total_seconds()) < 1 for r in rows)
+
+    # Make the scheduled job due while keeping the appointment in the future.
+    await pool.execute("UPDATE bookings SET starts_at=now()+interval '20 minutes', ends_at=now()+interval '65 minutes' WHERE id=$1::uuid", booking)
+    await pool.execute("UPDATE reminder_jobs SET run_at=now()-interval '1 second' WHERE booking_id=$1::uuid", booking)
+    await run_reminders(app.state.ctx)
+    assert "appointment" in out.tg_bodies("6002")[-1]
+    owner_msg = out.tg_bodies("6001")[-1]
+    assert "Amina" in owner_msg and "Fade" in owner_msg and "remains confirmed" in owner_msg
+    assert await pool.fetchval("SELECT count(*) FROM reminder_jobs WHERE booking_id=$1::uuid AND status='sent'", booking) == 2
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_owner_cancellation_eta_notice_survives_customer_reminder_opt_out():
+    import os
+    dsn = os.environ.get("TEST_DATABASE_URL")
+    if not dsn:
+        pytest.skip("needs TEST_DATABASE_URL")
+    from app.reminders import run_reminders, schedule_owner_cancellation, OWNER_CANCELLED_TEMPLATE
+    from tests.harness import build
+    pool, out, salon = await build(dsn)
+    await pool.execute("UPDATE salons SET owner_wa_id='tg:6011' WHERE id=$1::uuid", salon)
+    from app.main import app
+    staff = await pool.fetchval("SELECT id::text FROM staff WHERE salon_id=$1::uuid LIMIT 1", salon)
+    svc = await pool.fetchval("SELECT id::text FROM services WHERE salon_id=$1::uuid AND name='Fade'", salon)
+    client = await pool.fetchval(
+        "INSERT INTO clients (salon_id, wa_id, name, reminder_opt_out) "
+        "VALUES ($1::uuid,'254700000061','Kendi',true) RETURNING id::text", salon)
+    starts = datetime.now(NBO) + timedelta(hours=1)
+    booking = await pool.fetchval(
+        "INSERT INTO bookings (salon_id, staff_id, service_id, client_id, starts_at, ends_at, status) "
+        "VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,'cancelled') RETURNING id::text",
+        salon, staff, svc, client, starts, starts + timedelta(minutes=45))
+    await schedule_owner_cancellation(pool, booking)
+    await schedule_owner_cancellation(pool, booking)
+    assert await pool.fetchval("SELECT count(*) FROM reminder_jobs WHERE booking_id=$1::uuid AND template_name=$2", booking, OWNER_CANCELLED_TEMPLATE) == 1
+    await run_reminders(app.state.ctx)
+    assert "Kendi" in out.tg_bodies("6011")[-1] and "cancelled" in out.tg_bodies("6011")[-1]
+    assert await pool.fetchval("SELECT status FROM reminder_jobs WHERE booking_id=$1::uuid", booking) == "sent"
     await pool.close()

@@ -63,6 +63,6 @@ async def expire_holds(pool: asyncpg.Pool) -> int:
         "RETURNING b.id")
     for r in rows:
         await pool.execute("UPDATE reminder_jobs SET status='cancelled' WHERE booking_id=$1::uuid AND status='pending'", r["id"])
-        await pool.execute("UPDATE payments SET status='failed', result_desc='hold expired before the salon confirmed', settled_at=now() "
+        await pool.execute("UPDATE payments SET result_desc='booking hold expired; owner verification still pending', updated_at=now() "
                            "WHERE booking_id=$1::uuid AND status='pending' AND method='manual'", r["id"])
     return len(rows)

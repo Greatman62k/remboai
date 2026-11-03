@@ -1,6 +1,7 @@
 """Telegram as a second channel: same engine, same rules. Real app and Postgres; Telegram, Safaricom and the model are faked at the HTTP layer."""
 import asyncio
 import os
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -11,6 +12,14 @@ DSN = os.environ.get("TEST_DATABASE_URL")
 needs_db = pytest.mark.skipif(not DSN, reason="needs TEST_DATABASE_URL")
 BOT = "tg:111"
 C1, C2, OWNER = 5001, 5002, 7001
+
+
+def owner_button(out, prefix: str) -> str:
+    request = next(m for m in reversed(out.tg_to(str(OWNER))) if m.get("reply_markup") and
+                   any(b["callback_data"].startswith(prefix)
+                       for row in m["reply_markup"]["inline_keyboard"] for b in row))
+    return next(b["callback_data"] for row in request["reply_markup"]["inline_keyboard"] for b in row
+                if b["callback_data"].startswith(prefix))
 
 
 def test_parsing_text_start_button_voice_photo_contact_and_groups():
@@ -34,11 +43,38 @@ def test_parsing_text_start_button_voice_photo_contact_and_groups():
     assert parse_update({"update_id": 9}, BOT) == (None, None)
 
 
+def test_telegram_message_time_is_preserved_but_callback_time_is_not_guessed():
+    stamp = 1_800_000_000
+    message, _ = parse_update(tg_update(11, C1, "hi", date=stamp), BOT)
+    assert message.sent_at == datetime.fromtimestamp(stamp, timezone.utc)
+    callback, _ = parse_update(tg_update(12, C1, data="slot:0", date=stamp), BOT)
+    assert callback.sent_at is None
+
+
+@needs_db
+def test_stale_telegram_backlog_gets_one_resend_notice_without_processing_old_requests():
+    async def run():
+        pool, out, _ = await build(DSN)
+        old_date = int((datetime.now(timezone.utc) - timedelta(minutes=31)).timestamp())
+        async with client() as c:
+            await post_tg(c, tg_update(401, C1, "fade", date=old_date))
+            await post_tg(c, tg_update(402, C1, "tomorrow afternoon", date=old_date))
+        notices = out.tg_bodies(str(C1))
+        assert len(notices) == 1
+        assert "offline" in notices[0].lower() and "send it again" in notices[0].lower()
+        assert await pool.fetchval("SELECT count(*) FROM inbound_messages WHERE wa_id=$1 AND completed_at IS NOT NULL", f"tg:{C1}") == 2
+        assert await pool.fetchval("SELECT count(*) FROM clients WHERE wa_id=$1", f"tg:{C1}") == 0
+        assert out.calls == [] and out.agent_requests == []
+        await pool.close()
+    asyncio.run(run())
+
+
 @needs_db
 def test_a_telegram_customer_can_book_through_text_and_buttons():
     async def run():
         pool, out, salon = await build(DSN)
         await pool.execute("DELETE FROM salon_payment")
+        await pool.execute("UPDATE salons SET deposit_kes=0")
         out.script["fade"] = {"intent": "book", "service": "Fade", "date": open_day().isoformat(), "window": "afternoon"}
         async with client() as c:
             assert (await post_tg(c, tg_update(1, C1, "fade"))).json() == {"ok": True}
@@ -52,6 +88,152 @@ def test_a_telegram_customer_can_book_through_text_and_buttons():
         assert await pool.fetchval("SELECT status FROM bookings") == "confirmed"
         assert await pool.fetchval("SELECT wa_id FROM clients") == f"tg:{C1}"
         assert out.sent == []
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
+def test_telegram_manual_till_does_not_ask_the_customer_for_a_phone_number():
+    async def run():
+        pool, out, salon = await build(DSN)
+        await pool.execute("UPDATE salons SET owner_wa_id=$1 WHERE id=$2::uuid", f"tg:{OWNER}", salon)
+        await pool.execute("UPDATE salon_payment SET manual=true, shortcode=NULL WHERE salon_id=$1::uuid", salon)
+        out.script["fade"] = {"intent": "book", "service": "Fade", "date": open_day().isoformat(), "window": "afternoon"}
+        async with client() as c:
+            await post_tg(c, tg_update(1, C1, "fade"))
+            await post_tg(c, tg_update(2, C1, data="slot:0"))
+            await post_tg(c, tg_update(3, OWNER, data=owner_button(out, "availability:yes:")))
+        body = out.tg_bodies(str(C1))[-1]
+        assert "seven-digit till number: 5012345" in body
+        assert "number should we use" not in body.lower()
+        assert "M-Pesa request" not in body
+        assert out.stk == []
+        assert await pool.fetchval("SELECT status FROM bookings") == "held"
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
+def test_a_payment_screenshot_is_only_a_claim_until_the_owner_confirms_it():
+    async def run():
+        pool, out, salon = await build(DSN)
+        await pool.execute("UPDATE salons SET owner_wa_id=$1 WHERE id=$2::uuid", f"tg:{OWNER}", salon)
+        await pool.execute("UPDATE salon_payment SET manual=true, shortcode=NULL WHERE salon_id=$1::uuid", salon)
+        out.payment_vision_answer = {
+            "is_payment_confirmation": True, "provider": "mpesa", "currency": "KES", "amount": 200,
+            "reference": "UK3L70E32K", "date": "2026-11-03", "time": "10:47",
+            "recipient": "SAMUEL MUSYOKA", "confidence": 0.99,
+        }
+        out.script["fade"] = {"intent": "book", "service": "Fade", "date": open_day().isoformat(), "window": "afternoon"}
+        async with client() as c:
+            await post_tg(c, tg_update(1, C1, "fade"))
+            await post_tg(c, tg_update(2, C1, data="slot:0"))
+            await post_tg(c, tg_update(3, OWNER, data=owner_button(out, "availability:yes:")))
+            assert await pool.fetchval("SELECT status FROM bookings") == "held"
+            payment_prompt = out.tg_to(str(C1))[-1]
+            customer_buttons = [button for row in payment_prompt["reply_markup"]["inline_keyboard"] for button in row]
+            assert {button["text"] for button in customer_buttons} == {"I've paid", "Cancel booking"}
+            paid_id = next(button["callback_data"] for button in customer_buttons
+                           if button["callback_data"].startswith("manualpay:paid:"))
+            cancel_id = next(button["callback_data"] for button in customer_buttons
+                             if button["callback_data"].startswith("manualpay:cancel:"))
+            await post_tg(c, tg_update(4, C1, data=paid_id))
+            evidence_prompt = out.tg_to(str(C1))[-1]
+            assert "screenshot" in evidence_prompt["text"].lower() and "transaction reference" in evidence_prompt["text"].lower()
+            assert evidence_prompt["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == cancel_id
+            await post_tg(c, tg_update(5, C1, caption="Paid", photo=[{"file_id": "PHOTO_RECEIPT", "file_size": 500}]))
+            assert await pool.fetchval("SELECT status FROM bookings") == "held"
+            payment = await pool.fetchrow("SELECT id::text, status, method, provider, amount_kes, mpesa_receipt, claim_ref FROM payments")
+            assert (payment["status"], payment["method"], payment["provider"], payment["amount_kes"], payment["mpesa_receipt"]) == (
+                "pending", "manual", "mpesa", 200, "UK3L70E32K")
+            assert "SAMUEL MUSYOKA" in payment["claim_ref"] and "2026-11-03 10:47" in payment["claim_ref"]
+            assert "TG-FILE-BYTES" not in payment["claim_ref"]
+            customer_text = out.tg_bodies(str(C1))[-1]
+            assert "unverified" in customer_text.lower() and "SAMUEL MUSYOKA" in customer_text
+            assert "not confirmed" in customer_text.lower()
+            owner_request = out.tg_to(str(OWNER))[-1]
+            assert "UNVERIFIED manual payment claim" in owner_request["text"]
+            assert "Vision extracted (unverified)" in owner_request["text"]
+            assert "SAMUEL MUSYOKA" in owner_request["text"]
+            assert "2026-11-03 10:47" in owner_request["text"]
+            assert "UK3L70E32K" in owner_request["text"]
+            yes_id = next(button["callback_data"] for row in owner_request["reply_markup"]["inline_keyboard"]
+                          for button in row if button["callback_data"].startswith("till:yes:"))
+            waiting_prompt = out.tg_to(str(C1))[-1]
+            assert any(button["callback_data"] == cancel_id
+                       for row in waiting_prompt["reply_markup"]["inline_keyboard"] for button in row)
+            await post_tg(c, tg_update(6, C1, data=yes_id))
+            assert await pool.fetchval("SELECT status FROM payments") == "pending"
+            assert await pool.fetchval("SELECT status FROM bookings") == "held"
+            await post_tg(c, tg_update(7, OWNER, data=yes_id))
+        assert await pool.fetchval("SELECT status FROM payments") == "paid"
+        assert await pool.fetchval("SELECT status FROM bookings") == "confirmed"
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
+def test_payment_screenshot_provider_mismatch_is_rejected_and_amount_mismatch_goes_to_review():
+    async def run():
+        pool, out, salon = await build(DSN)
+        await pool.execute("UPDATE salons SET owner_wa_id=$1 WHERE id=$2::uuid", f"tg:{OWNER}", salon)
+        await pool.execute("UPDATE salon_payment SET manual=true, shortcode=NULL WHERE salon_id=$1::uuid", salon)
+        out.script["fade"] = {"intent": "book", "service": "Fade", "date": open_day().isoformat(), "window": "afternoon"}
+        async with client() as c:
+            await post_tg(c, tg_update(1, C1, "fade"))
+            await post_tg(c, tg_update(2, C1, data="slot:0"))
+            await post_tg(c, tg_update(3, OWNER, data=owner_button(out, "availability:yes:")))
+            out.payment_vision_answer = {
+                "is_payment_confirmation": True, "provider": "airtel_money", "currency": "KES", "amount": 200,
+                "reference": "UK3L70E32K", "date": "2026-11-03", "time": "10:47",
+                "recipient": "SAMUEL MUSYOKA", "confidence": 0.99,
+            }
+            await post_tg(c, tg_update(4, C1, photo=[{"file_id": "PHOTO_WRONG_PROVIDER", "file_size": 500}]))
+            assert await pool.fetchval("SELECT count(*) FROM payments") == 0
+            assert "send them as text" in out.tg_bodies(str(C1))[-1].lower()
+            out.payment_vision_answer |= {"provider": "mpesa", "amount": 150, "reference": "UK3L70E32L"}
+            await post_tg(c, tg_update(5, C1, photo=[{"file_id": "PHOTO_WRONG_AMOUNT", "file_size": 500}]))
+        payment = await pool.fetchrow("SELECT status, mpesa_receipt FROM payments")
+        review = await pool.fetchrow("SELECT reason, received_amount FROM payment_reviews")
+        assert (payment["status"], payment["mpesa_receipt"]) == ("review", "UK3L70E32L")
+        assert (review["reason"], review["received_amount"]) == ("amount_mismatch", 150)
+        assert await pool.fetchval("SELECT status FROM bookings") == "held"
+        assert "human eye" in out.tg_bodies(str(C1))[-1].lower()
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
+def test_the_owner_can_reopen_every_unresolved_manual_claim_from_the_payment_queue():
+    async def run():
+        pool, out, salon = await build(DSN)
+        await pool.execute("UPDATE salons SET owner_wa_id=$1 WHERE id=$2::uuid", f"tg:{OWNER}", salon)
+        await pool.execute("UPDATE salon_payment SET manual=true, shortcode=NULL WHERE salon_id=$1::uuid", salon)
+        out.script["fade first"] = {"intent": "book", "service": "Fade", "date": open_day(1).isoformat(), "window": "afternoon"}
+        out.script["fade second"] = {"intent": "book", "service": "Fade", "date": open_day(2).isoformat(), "window": "afternoon"}
+        async with client() as c:
+            await post_tg(c, tg_update(1, C1, "fade first"))
+            await post_tg(c, tg_update(2, C1, data="slot:0"))
+            await post_tg(c, tg_update(3, OWNER, data=owner_button(out, "availability:yes:")))
+            await post_tg(c, tg_update(4, C2, "fade second"))
+            await post_tg(c, tg_update(5, C2, data="slot:0"))
+            await post_tg(c, tg_update(6, OWNER, data=owner_button(out, "availability:yes:")))
+            await post_tg(c, tg_update(7, C1, "200 QAB1CD2EF3"))
+            await post_tg(c, tg_update(8, C2, "200 QAB2CD2EF4"))
+            expected = {r["id"] for r in await pool.fetch("SELECT id::text AS id FROM payments WHERE status='pending'")}
+            assert len(expected) == 2
+            await post_tg(c, tg_update(9, OWNER, "pending payments"))
+            queue = out.tg_to(str(OWNER))[-2:]
+            queued_ids = {
+                button["callback_data"].split(":", 2)[2]
+                for message in queue for row in message["reply_markup"]["inline_keyboard"] for button in row
+                if button["callback_data"].startswith("till:yes:")
+            }
+            assert queued_ids == expected
+            for i, pay_id in enumerate(sorted(expected), start=10):
+                await post_tg(c, tg_update(i, OWNER, data=f"till:yes:{pay_id}"))
+        assert await pool.fetchval("SELECT count(*) FROM payments WHERE status='paid'") == 2
+        assert await pool.fetchval("SELECT count(*) FROM bookings WHERE status='confirmed'") == 2
         await pool.close()
     asyncio.run(run())
 
@@ -84,6 +266,7 @@ def test_voice_notes_and_photos_work_over_telegram():
     async def run():
         pool, out, salon = await build(DSN)
         await pool.execute("DELETE FROM salon_payment")
+        await pool.execute("UPDATE salons SET deposit_kes=0")
         out.script["nataka fade kesho mchana"] = {"intent": "book", "service": "Fade", "date": open_day().isoformat(), "window": "afternoon", "language": "sw"}
         async with client() as c:
             await post_tg(c, tg_update(1, C1, voice={"file_id": "VOICE1", "duration": 3}))
@@ -159,6 +342,7 @@ def test_the_poller_handles_updates_in_order_acknowledges_buttons_and_backs_off_
         from app.inbound import inbound
         pool, out, salon = await build(DSN)
         await pool.execute("DELETE FROM salon_payment")
+        await pool.execute("UPDATE salons SET deposit_kes=0")
         ctx = main.app.state.ctx
         out.script["fade"] = {"intent": "book", "service": "Fade", "date": open_day().isoformat(), "window": "afternoon"}
         out.tg_updates = [tg_update(1, C1, "fade")]

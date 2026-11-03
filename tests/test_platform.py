@@ -36,8 +36,8 @@ def test_platform_admin_help_and_role_are_scannable_plain_text_lists():
     assert platform.ROLE_TEXT.startswith("You are authenticated as a RemboAI platform administrator.")
     for lang in ("en", "sw"):
         owner_help = t(lang, "owner_help")
-        assert owner_help.count("\n") == 8
-        assert "\n1. " in owner_help and "\n8. " in owner_help
+        assert owner_help.count("\n") == 10
+        assert "\n1. " in owner_help and "\n10. " in owner_help
         assert "\n- " not in owner_help
 
 

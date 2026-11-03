@@ -185,7 +185,7 @@ def test_stranger_gets_specific_answers_not_one_fallback():
             await post_tg(c, tg_update(2, 9003, "asante"))
             assert "Karibu" in out.tg_bodies("9003")[-1]
             await post_tg(c, tg_update(3, 9003, voice={"file_id": "VOICE1", "duration": 4}))
-            assert "listen to voice notes" in out.tg_bodies("9003")[-1]
+            assert "RemboAI" in out.tg_bodies("9003")[-1] and "kiungo" in out.tg_bodies("9003")[-1].lower()
             await post_tg(c, tg_update(4, 9003, photo=[{"file_id": "PHOTO_S", "file_size": 10}, {"file_id": "PHOTO_L", "file_size": 900}]))
             assert "read photos" in out.tg_bodies("9003")[-1]
         await pool.close()

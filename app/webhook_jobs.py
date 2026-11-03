@@ -5,6 +5,7 @@ import logging
 import uuid
 from collections import Counter
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 from . import poolstate
 from .channels.whatsapp import mask
@@ -18,6 +19,18 @@ HEARTBEAT_SECONDS = 15
 _QUEUE_LOCK = 1383000578
 
 RESERVED_CONNECTIONS = 2
+
+
+def _payload_sent_at(payload: dict) -> datetime | None:
+    value = payload.get("sent_at")
+    if isinstance(value, datetime):
+        return value
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def job_slots(pool) -> asyncio.Semaphore:
@@ -170,6 +183,7 @@ async def _process_claimed_job(ctx, job: dict) -> None:
             media_id=payload.get("media_id"),
             name=payload.get("name"),
             reply_id=payload.get("reply_id"),
+            sent_at=_payload_sent_at(payload),
         )
         if not msg.sender or not msg.id:
             raise PermanentJobError("invalid whatsapp payload")
@@ -191,6 +205,7 @@ async def _process_claimed_job(ctx, job: dict) -> None:
             media_id=payload.get("media_id"),
             name=payload.get("name"),
             reply_id=payload.get("reply_id"),
+            sent_at=_payload_sent_at(payload),
         )
         await handle_inbound(ctx, msg)
         await complete_job(ctx.pool, job["id"], job["claim_token"])

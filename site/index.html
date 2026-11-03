@@ -6,11 +6,11 @@
 <meta name="theme-color" content="#072352">
 <script>document.documentElement.classList.replace('no-js','js');</script>
 <title>RemboAI: Your salon's booking receptionist on Telegram, WhatsApp-ready</title>
-<meta name="description" content="RemboAI books appointments, takes M-Pesa deposits, sends reminders, and fills cancellations for Kenyan salons and barbershops. Your customers just chat.">
+<meta name="description" content="RemboAI books appointments, guides M-PESA and Airtel Money deposits, sends reminders, and fills cancellations for Kenyan salons and barbershops. Your customers just chat.">
 <link rel="canonical" href="https://remboai.duckdns.org/">
 <meta property="og:type" content="website">
 <meta property="og:title" content="RemboAI: Your salon's booking receptionist">
-<meta property="og:description" content="Bookings, M-Pesa deposits, reminders, and waitlist fill for salons. Your customers just chat.">
+<meta property="og:description" content="Bookings, M-PESA and Airtel Money deposits, reminders, and waitlist fill for salons. Your customers just chat.">
 <meta property="og:url" content="https://remboai.duckdns.org/">
 <meta name="twitter:card" content="summary">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
@@ -19,7 +19,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="assets/site.css">
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"SoftwareApplication","name":"RemboAI","applicationCategory":"BusinessApplication","operatingSystem":"Telegram","offers":{"@type":"Offer","price":"0","priceCurrency":"KES"},"description":"Chat receptionist for salons: bookings, M-Pesa deposits, reminders, waitlist fill."}
+{"@context":"https://schema.org","@type":"SoftwareApplication","name":"RemboAI","applicationCategory":"BusinessApplication","operatingSystem":"Telegram","offers":{"@type":"Offer","price":"0","priceCurrency":"KES"},"description":"Chat receptionist for salons: bookings, M-PESA and Airtel Money deposits, reminders, waitlist fill."}
 </script>
 </head>
 <body>
@@ -34,6 +34,7 @@
       <a href="index.html" aria-current="page">Home</a>
       <a href="pricing.html">Pricing</a>
       <a href="setup.html">Setup guide</a>
+      <a href="https://github.com/Greatman62k/remboai" target="_blank" rel="noopener noreferrer">Code</a>
       <div class="nav-cta">
         <a class="btn btn-primary btn-sm" href="https://t.me/Remboai1_bot">Telegram</a>
       </div>
@@ -52,7 +53,7 @@
         <p class="standfirst">RemboAI is a receptionist that lives inside Telegram today, with WhatsApp built in and switching on as Meta's business verification completes. Customers write what they want in English, Swahili, or Sheng, even as a voice note, and get a confirmed booking after the configured deposit is paid.</p>
         <ul class="hero-points">
           <li>No app to install, no links to fumble with. Just chat.</li>
-          <li>M-Pesa deposits secured before the chair is promised.</li>
+          <li>Deposits sent to the salon's chosen M-PESA or Airtel Money destination.</li>
           <li>Cancellations offered to your waitlist within seconds.</li>
         </ul>
         <div class="btn-row">
@@ -76,7 +77,7 @@
   <section class="band-tint" aria-labelledby="how">
     <div class="wrap reveal">
       <p class="section-kicker">How it works</p>
-      <h2 id="how">Three steps between a message and money in the till.</h2>
+      <h2 id="how">Three steps between a message and money in your account.</h2>
       <ol class="steps">
         <li>
           <div><h3>The customer writes like a person</h3>
@@ -84,11 +85,11 @@
         </li>
         <li>
           <div><h3>The deposit locks the chair</h3>
-          <p>Daraja-enabled tills get an automatic M-Pesa prompt. A manual till uses a guided payment claim that the owner confirms with one tap. Pasted SMS screenshots never confirm a booking on their own.</p></div>
+          <p>Where configured, Daraja sends an M-PESA prompt. Owners can also choose a seven-digit M-PESA till, Pochi la Biashara, direct M-PESA Send Money, or Airtel Money. The owner checks each manual transfer claim before confirming the booking.</p></div>
         </li>
         <li>
           <div><h3>Reminders and the waitlist do the follow-up</h3>
-          <p>24-hour, 2-hour, and 3-hour nudges with Keep or Cancel buttons. A cancellation, or a silence, hands the freed slot to the next waiting customer in seconds.</p></div>
+          <p>Configured 24-hour and 2-hour reminders, a 3-hour Keep or Cancel check, and a 30-minute ETA for the customer and owner. A customer cancellation frees the slot for the waitlist; silence leaves the confirmed booking in place.</p></div>
         </li>
       </ol>
     </div>
@@ -102,7 +103,7 @@
       <div class="feature-row">
         <div>
           <h3>Set up by chatting, not by forms</h3>
-          <p>Type <code>/start register</code> and answer a few questions: business name, services with prices (typed or as a voice note), opening hours. You get a live invite link like <code>t.me/…?start=your-shop</code> to share with customers.</p>
+          <p>Type <code>/start register</code> and answer a few questions: business name, services with prices (typed or as a voice note), opening hours. Your salon gets its own invite link. Example only: <code>t.me/Remboai1_bot?start=your-shop</code>; the real link uses your salon's slug.</p>
         </div>
         <div class="feature-visual">
           <div class="mini-chat">
@@ -153,11 +154,11 @@
       <div class="faq">
         <details>
           <summary>Do my customers need to install anything?</summary>
-          <p>No. Everything happens in the WhatsApp or Telegram they already use. The invite link opens a chat, not a download page.</p>
+          <p>Customers who already use Telegram can book there now without installing anything else. The current invite link opens our Telegram bot. WhatsApp will be available after Meta completes our business verification.</p>
         </details>
         <details>
-          <summary>My salon uses a manual till without Daraja. Does that work?</summary>
-          <p>Yes. Configure it with only the bare seven-digit till number. The customer pays there and sends the amount plus M-Pesa code in chat; you confirm the claim with one tap and the booking locks in. Screenshots alone never confirm anything.</p>
+          <summary>Can customers pay without an M-PESA prompt?</summary>
+          <p>Yes. During setup, choose a seven-digit M-PESA till or a phone destination identified as Pochi la Biashara, direct M-PESA Send Money, or Airtel Money. Customers receive matching instructions and send the transaction reference in chat. You confirm after checking your account. A till is entered as only its seven digits.</p>
         </details>
         <details>
           <summary>What happens when someone cancels?</summary>
@@ -165,7 +166,7 @@
         </details>
         <details>
           <summary>What if a customer ignores the reminders?</summary>
-          <p>The 3-hour Still-coming nudge carries Keep or Cancel buttons. A Cancel frees the slot at once; silence close to the appointment releases it toward the waitlist, and the customer is told.</p>
+          <p>The 3-hour Still-coming check carries Keep or Cancel buttons. A Cancel frees the slot at once and tells the owner; if the customer does not reply, the booking stays confirmed. The customer and owner receive an ETA 30 minutes before the appointment.</p>
         </details>
         <details>
           <summary>Can two customers book the same chair?</summary>
@@ -204,6 +205,7 @@
           <li><a href="index.html">Home</a></li>
           <li><a href="pricing.html">Pricing</a></li>
           <li><a href="setup.html">Setup guide</a></li>
+          <li><a href="https://github.com/Greatman62k/remboai" target="_blank" rel="noopener noreferrer">Code</a></li>
         </ul>
       </div>
       <div>

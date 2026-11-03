@@ -143,6 +143,12 @@ async def turn(ctx, msg) -> bool:
     run = await drive(ctx, system, messages.copy(), toolbox, tools,
                       policy["repair_prompts"]["platform_admin"])
     if not run.lead:
+        if run.unavailable:
+            await _trace(ctx, mid=mid, salon={"id": None}, sender="platform_admin", user_text=msg.text or "",
+                         steps=run.steps, final_text=None, buttons=None, state_after=None,
+                         outcome="unavailable", grounded=None, problems=run.problems, model=run.first_model,
+                         calls=run.calls, ms=run.ms)
+            return False
         body = _fallback_reply(run)
         await _trace(ctx, mid=mid, salon={"id": None}, sender="platform_admin", user_text=msg.text or "",
                      steps=run.steps, final_text=body, buttons=None, state_after=None,

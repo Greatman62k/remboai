@@ -14,11 +14,16 @@ from app.onboarding_chat import (
     find_service,
     looks_off_topic,
     parse_deposit,
+    parse_manual_till,
     parse_owners,
+    parse_payment_method,
+    parse_payment_phone,
+    parse_payment_phone_type,
     parse_price,
     parse_service_line,
     parse_time_pair,
     redirect_step,
+    registration_complete,
     wants_keep,
     wants_register,
 )
@@ -139,6 +144,26 @@ def test_deposit_amounts_parse_with_a_plain_no_for_free():
     assert redirect_step("change the deposit please") == "ask_deposit"
 
 
+def test_payment_destination_choices_are_explicit_and_validated():
+    assert parse_payment_method("TILL") == "till"
+    assert parse_payment_method("phone") == "phone"
+    assert parse_payment_method("M-PESA") is None
+    assert parse_manual_till("5012345") == "5012345"
+    assert parse_manual_till("Till 5012345") is None
+    assert parse_manual_till("123456") is None and parse_manual_till("12345678") is None
+    assert parse_payment_phone_type("Pochi la Biashara") == "pochi"
+    assert parse_payment_phone_type("direct M-PESA Send Money") == "send_money"
+    assert parse_payment_phone_type("Airtel Money") == "airtel_money"
+    assert parse_payment_phone_type("M-PESA") is None
+    assert parse_payment_phone("0712 345 678") == "254712345678"
+    assert parse_payment_phone("pay 0712 345 678") == "254712345678"
+    assert parse_payment_phone("0712 345 678 or 0733 222 111") is None
+    assert parse_payment_phone("1234567") is None
+    assert redirect_step("change payment method") == "ask_payment_method"
+    assert redirect_step("change the till number") == "ask_till_number"
+    assert redirect_step("change to Airtel Money") == "ask_phone_type"
+
+
 def test_bare_times_belong_to_the_only_service():
     one = [{"name": "Fade", "price": 500, "minutes": 30}]
     assert apply_durations([dict(one[0])], "45") == (1, [])
@@ -216,9 +241,14 @@ def test_chat_onboarding_registers_a_salon_with_no_model_calls():
             await post_tg(c, tg_update(10, OWNER_CHAT, "09:00-18:00"))
             assert "deposit" in out.tg_bodies(str(OWNER_CHAT))[-1].lower()
             await post_tg(c, tg_update(11, OWNER_CHAT, "200"))
+            assert "TILL" in out.tg_bodies(str(OWNER_CHAT))[-1]
+            await post_tg(c, tg_update(12, OWNER_CHAT, "TILL"))
+            assert "seven-digit" in out.tg_bodies(str(OWNER_CHAT))[-1]
+            await post_tg(c, tg_update(13, OWNER_CHAT, "5012345"))
             assert "ready to open" in out.tg_bodies(str(OWNER_CHAT))[-1].lower()
             assert "KES 200" in out.tg_bodies(str(OWNER_CHAT))[-1]
-            await post_tg(c, tg_update(12, OWNER_CHAT, "YES"))
+            assert "M-PESA Till 5012345" in out.tg_bodies(str(OWNER_CHAT))[-1]
+            await post_tg(c, tg_update(14, OWNER_CHAT, "YES"))
             live = out.tg_bodies(str(OWNER_CHAT))[-1]
             assert "is live" in live.lower() and "amina-braids" in live
         assert out.calls == []
@@ -229,10 +259,182 @@ def test_chat_onboarding_registers_a_salon_with_no_model_calls():
         hours = row["open_hours"] if isinstance(row["open_hours"], dict) else json.loads(row["open_hours"])
         assert hours["mon"] == ["09:00", "18:00"] and hours["sun"] == ["09:00", "18:00"]
         assert await pool.fetchval("SELECT name FROM staff WHERE salon_id=(SELECT id FROM salons WHERE slug='amina-braids')") == "Amina"
+        account = await pool.fetchrow("SELECT kind, party_b, shortcode, manual, phone_type FROM salon_payment WHERE salon_id=(SELECT id FROM salons WHERE slug='amina-braids')")
+        assert (account["kind"], account["party_b"], account["shortcode"], account["manual"], account["phone_type"]) == ("till", "5012345", None, True, None)
         services = await pool.fetch("SELECT name, price_kes, duration_min FROM services WHERE salon_id=(SELECT id FROM salons WHERE slug='amina-braids') ORDER BY name")
         assert [(s["name"], s["price_kes"], s["duration_min"]) for s in services] == [("Braids", 1500, 180), ("Fade", 500, 30)]
         assert await pool.fetchval("SELECT count(*) FROM onboarding_sessions WHERE sender=$1", sender) == 0
         await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
+def test_onboarding_saves_an_airtel_money_destination_only_after_explicit_type_choice():
+    async def run():
+        from app.main import app
+        from app import onboarding_chat
+        pool, out, _seed = await build(DSN)
+        ctx = app.state.ctx
+        sender, chat = "tg:9001", "9001"
+        await onboarding_chat.begin(ctx, sender, BOT, "/start register")
+        for text in (
+            "Airtel Test Salon", "salon", "Amina", "Braids 1500 90", "YES", "09:00-18:00", "200",
+        ):
+            await onboarding_chat.advance(ctx, sender, BOT, text)
+        assert "TILL" in out.tg_bodies(chat)[-1]
+        await onboarding_chat.advance(ctx, sender, BOT, "PHONE")
+        assert "Pochi" in out.tg_bodies(chat)[-1]
+        await onboarding_chat.advance(ctx, sender, BOT, "AIRTEL")
+        phone_prompt = out.tg_bodies(chat)[-1]
+        assert "mobile number" in phone_prompt
+        assert "where this salon receives payments" in phone_prompt
+        assert "no separate contact number is needed" in phone_prompt
+        await onboarding_chat.advance(ctx, sender, BOT, "0712 345 678")
+        summary = out.tg_bodies(chat)[-1]
+        assert "Airtel Money 0712 345 678" in summary
+        assert await pool.fetchval("SELECT count(*) FROM salons WHERE name='Airtel Test Salon'") == 0
+        await onboarding_chat.advance(ctx, sender, BOT, "YES")
+        account = await pool.fetchrow(
+            "SELECT sp.kind, sp.party_b, sp.shortcode, sp.manual, sp.phone_type FROM salon_payment sp "
+            "JOIN salons s ON s.id=sp.salon_id WHERE s.name='Airtel Test Salon'")
+        assert (account["kind"], account["party_b"], account["shortcode"], account["manual"], account["phone_type"]) == (
+            "phone", "254712345678", None, True, "airtel_money")
+        assert "is live" in out.tg_bodies(chat)[-1].lower()
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
+def test_registration_agent_validates_payment_route_and_phone_as_separate_evidence():
+    async def run():
+        from app.main import app
+        from app.onboarding_agent import RegistrationToolbox
+        pool, _out, _seed = await build(DSN)
+        ctx = app.state.ctx
+        state = {
+            "step": "ask_payment_method", "lang": "en", "services_confirmed": True,
+            "duration_defaults_accepted": True,
+            "data": {
+                "salon": "Evidence Payment Salon", "kind": "salon", "owners": ["Amina"],
+                "services": [{"name": "Braids", "price": 1500, "minutes": 90, "explicit": True}],
+                "open": "09:00", "close": "18:00", "deposit": 200,
+            },
+        }
+        first = RegistrationToolbox(ctx, "tg:9002", "PHONE", state)
+        result = await first.run("capture_registration_details", {"payment_method_evidence": "PHONE"})
+        assert result["accepted"] == ["payment_method"] and state["step"] == "ask_phone_type"
+
+        second = RegistrationToolbox(ctx, "tg:9002", "Airtel Money", state)
+        result = await second.run("capture_registration_details", {"payment_type_evidence": "Airtel Money"})
+        assert result["accepted"] == ["payment_type"] and state["step"] == "ask_payment_phone"
+
+        third = RegistrationToolbox(ctx, "tg:9002", "0712 345 678", state)
+        result = await third.run("capture_registration_details", {"payment_destination_evidence": "0712 345 678"})
+        assert result["accepted"] == ["payment_destination"]
+        assert state["data"]["payment_destination"] == "254712345678"
+        assert state["step"] == "confirm_all" and registration_complete(state)
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
+def test_model_guided_payment_correction_returns_to_summary_and_only_code_creates_on_final_yes():
+    async def run():
+        from app import onboarding_chat
+
+        pool, out, _seed = await build(DSN, agent_mode="on")
+        sender, chat = "tg:9003", "9003"
+        state = {
+            "step": "confirm_all", "lang": "en", "services_confirmed": True,
+            "duration_defaults_accepted": True, "final_confirmation_pending": True,
+            "data": {
+                "salon": "Correction Flow Salon", "kind": "salon", "owners": ["Amina"],
+                "services": [{"name": "Braids", "price": 1500, "minutes": 90, "explicit": True}],
+                "open": "09:00", "close": "18:00", "deposit": 200,
+                "payment_method": "till", "payment_destination": "5012345",
+            },
+        }
+        await onboarding_chat._save_session(pool, sender, state)
+        moves = [
+            ("tool", "capture_registration_details", {
+                "payment_method_evidence": "phone", "payment_type_evidence": "Airtel Money",
+            }),
+            ("say", "What number should customers use for Airtel Money payments?"),
+            ("tool", "capture_registration_details", {"payment_destination_evidence": "0712 345 678"}),
+            ("say", "I have updated the payment details."),
+        ]
+        out.agent = lambda _body: moves.pop(0) if moves else ("say", "Please review the summary.")
+
+        async with client() as c:
+            await post_tg(c, tg_update(1, 9003, "Change the payment method to phone and Airtel Money"))
+            interim = await onboarding_chat.load_session(pool, sender)
+            assert interim["step"] == "ask_payment_phone"
+            assert "number" in out.tg_bodies(chat)[-1].lower()
+            assert await pool.fetchval("SELECT count(*) FROM salons WHERE name='Correction Flow Salon'") == 0
+
+            await post_tg(c, tg_update(2, 9003, "0712 345 678"))
+            summary = out.tg_bodies(chat)[-1]
+            final_state = await onboarding_chat.load_session(pool, sender)
+            assert final_state["step"] == "confirm_all"
+            assert final_state["final_confirmation_pending"] is True
+            assert "Airtel Money 0712 345 678" in summary
+            assert await pool.fetchval("SELECT count(*) FROM salons WHERE name='Correction Flow Salon'") == 0
+
+            calls_before_yes = len(out.agent_requests)
+            await post_tg(c, tg_update(3, 9003, "YES"))
+            assert len(out.agent_requests) == calls_before_yes
+            account = await pool.fetchrow(
+                "SELECT sp.kind, sp.party_b, sp.shortcode, sp.manual, sp.phone_type FROM salon_payment sp "
+                "JOIN salons s ON s.id=sp.salon_id WHERE s.name='Correction Flow Salon'")
+            assert (account["kind"], account["party_b"], account["shortcode"], account["manual"], account["phone_type"]) == (
+                "phone", "254712345678", None, True, "airtel_money")
+            assert await pool.fetchval("SELECT count(*) FROM salons WHERE name='Correction Flow Salon'") == 1
+            assert await onboarding_chat.load_session(pool, sender) is None
+        await pool.close()
+
+    asyncio.run(run())
+
+
+@needs_db
+def test_deterministic_payment_correction_returns_to_summary_without_prompt_loop():
+    async def run():
+        from app import onboarding_chat
+
+        pool, out, _seed = await build(DSN)
+        sender, chat = "tg:9004", "9004"
+        state = {
+            "step": "confirm_all", "lang": "en", "services_confirmed": True,
+            "duration_defaults_accepted": True, "final_confirmation_pending": True,
+            "data": {
+                "salon": "Fallback Correction Salon", "kind": "salon", "owners": ["Amina"],
+                "services": [{"name": "Braids", "price": 1500, "minutes": 90, "explicit": True}],
+                "open": "09:00", "close": "18:00", "deposit": 200,
+                "payment_method": "till", "payment_destination": "5012345",
+            },
+        }
+        await onboarding_chat._save_session(pool, sender, state)
+        async with client() as c:
+            await post_tg(c, tg_update(1, 9004, "change payment method"))
+            assert (await onboarding_chat.load_session(pool, sender))["step"] == "ask_payment_method"
+            await post_tg(c, tg_update(2, 9004, "PHONE"))
+            assert (await onboarding_chat.load_session(pool, sender))["step"] == "ask_phone_type"
+            await post_tg(c, tg_update(3, 9004, "AIRTEL"))
+            assert (await onboarding_chat.load_session(pool, sender))["step"] == "ask_payment_phone"
+            await post_tg(c, tg_update(4, 9004, "0712 345 678"))
+            final_state = await onboarding_chat.load_session(pool, sender)
+            assert final_state["step"] == "confirm_all" and final_state["final_confirmation_pending"] is True
+            assert "Airtel Money 0712 345 678" in out.tg_bodies(chat)[-1]
+            assert await pool.fetchval("SELECT count(*) FROM salons WHERE name='Fallback Correction Salon'") == 0
+            await post_tg(c, tg_update(5, 9004, "YES"))
+        account = await pool.fetchrow(
+            "SELECT sp.kind, sp.party_b, sp.phone_type FROM salon_payment sp "
+            "JOIN salons s ON s.id=sp.salon_id WHERE s.name='Fallback Correction Salon'")
+        assert (account["kind"], account["party_b"], account["phone_type"]) == (
+            "phone", "254712345678", "airtel_money")
+        assert await pool.fetchval("SELECT count(*) FROM salons WHERE name='Fallback Correction Salon'") == 1
+        assert out.agent_requests == []
+        await pool.close()
+
     asyncio.run(run())
 
 
