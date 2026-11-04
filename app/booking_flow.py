@@ -42,16 +42,6 @@ async def _save(ctx, salon_id: str, wa_id: str, state: dict) -> None:
         "ON CONFLICT (salon_id, wa_id) DO UPDATE SET state=EXCLUDED.state, updated_at=now()", salon_id, wa_id, json.dumps(state))
 
 
-async def peek_state(ctx, salon_id: str, wa_id: str) -> dict:
-    """The saved conversation state, without creating a client row.
-
-    Strangers the shared bot has only shown the business list to must not
-    materialise as customers; the picker repeat guard reads this instead of _load."""
-    raw = await ctx.pool.fetchval("SELECT state FROM conversations WHERE salon_id=$1::uuid AND wa_id=$2", salon_id, wa_id)
-    state = raw if isinstance(raw, dict) else json.loads(raw or "{}")
-    return state if isinstance(state, dict) else {}
-
-
 async def stranger_state(ctx, sender: str) -> dict:
     """What the shared bot remembers about a sender it met before any business existed."""
     raw = await ctx.pool.fetchval("SELECT state FROM stranger_state WHERE sender=$1", sender)
@@ -297,19 +287,31 @@ async def _visit_tap(ctx, salon, client, st, tz, chat, lang, reply_id: str) -> N
     clang = row["lang"] or lang
     if answer == "yes":
         await ctx.pool.execute("UPDATE visit_checks SET attended=true, answered_at=now() WHERE booking_id=$1::uuid", bid)
-        state = {"state": "awaiting_feedback", "visit_booking": bid, "history": st.get("history", [])}
+        state = {"state": "awaiting_feedback", "visit_booking": bid,
+                 "visit_feedback_at": datetime.now(ZoneInfo("UTC")).isoformat(), "history": st.get("history", [])}
         await _save(ctx, salon["id"], chat.to, state)
-        await _reply(ctx, salon["id"], chat.to, state, chat, t(clang, "visit_thanks", salon=row["salon_name"]))
+        from .agent.visit_feedback import reply as feedback_reply
+        _, body = await feedback_reply(ctx, salon=row["salon_name"], service=row["service"], lang=clang,
+                                       phase="welcome", feedback="The customer confirmed they were attended.")
+        await _reply(ctx, salon["id"], chat.to, state, chat, body)
         return
     await ctx.pool.execute("UPDATE visit_checks SET attended=false, answered_at=now() WHERE booking_id=$1::uuid", bid)
-    cleared_visit = {"history": st.get("history", [])}
-    await _save(ctx, salon["id"], chat.to, cleared_visit)
     when = row["starts_at"].astimezone(tz).strftime("%a %d %b, %H:%M") if row["starts_at"] else ""
+    owner_notified = False
     if row["owner_wa_id"]:
-        await outbound.send_text(ctx, salon, row["owner_wa_id"],
-                                 t("en", "owner_visit_missed", client=row["client_name"] or display_contact(row["phone"]), phone=display_contact(row["phone"]),
-                                   service=row["service"], when=when))
-    await _reply(ctx, salon["id"], chat.to, cleared_visit, chat, t(clang, "visit_owner_told"))
+        owner_notified = await outbound.send_text(
+            ctx, salon, row["owner_wa_id"],
+            t("en", "owner_visit_missed", client=row["client_name"] or display_contact(row["phone"]),
+              phone=display_contact(row["phone"]), service=row["service"], when=when),
+        )
+    state = {"state": "awaiting_feedback_detail", "visit_booking": bid, "visit_feedback_phase": "missed",
+             "visit_feedback_at": datetime.now(ZoneInfo("UTC")).isoformat(), "history": st.get("history", [])}
+    await _save(ctx, salon["id"], chat.to, state)
+    from .agent.visit_feedback import reply as feedback_reply
+    _, body = await feedback_reply(ctx, salon=row["salon_name"], service=row["service"], lang=clang,
+                                   phase="missed", feedback=f"The customer said they were not attended for {row['service']}.",
+                                   owner_notified=owner_notified)
+    await _reply(ctx, salon["id"], chat.to, state, chat, body)
 
 
 async def find_slots(ctx, salon, service: dict, day: date, window: str | None, at: time | None, tz, now) -> tuple[list[Slot], bool]:

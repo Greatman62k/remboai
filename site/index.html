@@ -35,6 +35,7 @@
       <a href="pricing.html">Pricing</a>
       <a href="setup.html">Setup guide</a>
       <a href="https://github.com/Greatman62k/remboai" target="_blank" rel="noopener noreferrer">Code</a>
+      <a href="https://youtu.be/ViY7qTttQIo?si=OLrcEnUPW74LLhoD" target="_blank" rel="noopener noreferrer">Watch the demo</a>
       <div class="nav-cta">
         <a class="btn btn-primary btn-sm" href="https://t.me/Remboai1_bot">Telegram</a>
       </div>
@@ -60,15 +61,15 @@
           <a class="btn btn-tg" href="https://t.me/Remboai1_bot">Start on Telegram</a>
         </div>
       </div>
-      <div class="chat-mock reveal d1" role="img" aria-label="Example chat: a customer books a fade for Saturday afternoon and pays a deposit">
+      <div class="chat-mock reveal d1" role="group" aria-label="Example chat: a customer books a fade for Saturday afternoon and pays a deposit">
         <header>
           <span class="chat-avatar">R</span>
           <div><strong>Zuri Cuts bookings</strong><small>online</small></div>
         </header>
         <p class="bubble me">Nataka fade Saturday afternoon</p>
-        <p class="bubble them">Karibu tena! Nafasi za mapema za Fade:<br>1. Sat 2:00 PM na Brian<br>2. Sat 2:30 PM na Brian<br><span class="tap">Bonyeza moja</span></p>
+        <p class="bubble them">Karibu tena! Nafasi za mapema za Fade:<br>1. Sat 2:00 PM na Brian<br>2. Sat 2:30 PM na Brian<br><a class="tap" href="https://t.me/Remboai1_bot" title="Try it on Telegram">Bonyeza moja</a></p>
         <p class="bubble me">1</p>
-        <p class="bubble them">Umehifadhiwa! Lipa deposit ya KES 200 kwa M-Pesa kukamilisha.<br><span class="tap">Lipa sasa</span></p>
+        <p class="bubble them">Umehifadhiwa! Lipa deposit ya KES 200 kwa M-Pesa kukamilisha.<br><a class="tap" href="https://t.me/Remboai1_bot" title="Try it on Telegram">Lipa sasa</a></p>
         <p class="chat-caption">Example using a Daraja-enabled till, in two languages.</p>
       </div>
     </div>
@@ -139,6 +140,24 @@
     </div>
   </section>
 
+  <section aria-labelledby="meta">
+    <div class="wrap reveal">
+      <p class="section-kicker">Under the hood</p>
+      <h2 id="meta">Meta's models understand. Code guarantees.</h2>
+      <div class="feature-row">
+        <div>
+          <h3>Muse Spark runs the conversation, and every action is checked</h3>
+          <p>Meta's Muse Spark 1.3 reads each message, searches real slots and books through guarded tools. Code validates every call, and a grounding checker blocks any price, time or "paid" the system cannot back up. Voice notes use Meta's Omnilingual ASR, and photos are read by Muse Spark vision.</p>
+          <p><a href="https://github.com/Greatman62k/remboai#measured-results">See how it was measured</a></p>
+        </div>
+        <div class="feature-visual">
+          <p class="stat">33/33</p>
+          <p>correct first actions on 33 held-out messages, against 25/33 for a keyword-rules bot. A small test that scores only the model's first move.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <section class="band-dark" aria-labelledby="langs">
     <div class="wrap reveal">
       <p class="section-kicker">Language</p>
@@ -172,6 +191,18 @@
           <summary>Can two customers book the same chair?</summary>
           <p>No. The calendar holds a slot the moment it is tapped and the database refuses overlaps, so even two simultaneous taps cannot double-book one stylist.</p>
         </details>
+        <details>
+          <summary>What happens if the AI model is unavailable?</summary>
+          <p>The chat does not go silent. If the model cannot answer, or its reply fails the checks, a deterministic booking flow takes over and answers from verified facts. It is simpler, but bookings and holds still work.</p>
+        </details>
+        <details>
+          <summary>Where does my customers' data go?</summary>
+          <p>Messages are sent to Meta's Model API to be answered. Voice notes and photos are processed in memory and not stored. Chat traces are kept for 14 days for debugging and then deleted, and a salon that has had no bookings for 14 days is removed with its data.</p>
+        </details>
+        <details>
+          <summary>Is RemboAI open source?</summary>
+          <p>Yes, under the MIT licence. It was built for the Meta Global AI Developer Hackathon (Indie track). <a href="https://github.com/Greatman62k/remboai">Read the code on GitHub</a>.</p>
+        </details>
       </div>
     </div>
   </section>
@@ -198,6 +229,7 @@
           RemboAI
         </p>
         <p>The booking receptionist for Kenyan barbershops and salons. Bookings, deposits, reminders, waitlist.</p>
+        <p>Built for the Meta Global AI Developer Hackathon.</p>
       </div>
       <div>
         <h3>Site</h3>
@@ -206,6 +238,7 @@
           <li><a href="pricing.html">Pricing</a></li>
           <li><a href="setup.html">Setup guide</a></li>
           <li><a href="https://github.com/Greatman62k/remboai" target="_blank" rel="noopener noreferrer">Code</a></li>
+          <li><a href="https://youtu.be/ViY7qTttQIo?si=OLrcEnUPW74LLhoD" target="_blank" rel="noopener noreferrer">Watch the demo</a></li>
         </ul>
       </div>
       <div>

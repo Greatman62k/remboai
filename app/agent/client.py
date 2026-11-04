@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
-from app.ai.llm import _breaker_note, _breaker_open, strip_reasoning
+from app.ai.llm import _breaker_note, _breaker_open, safe_chat_endpoint, strip_reasoning
 from app.agent.policy import load_policy
 
 log = logging.getLogger("rembo.agent")
@@ -44,6 +44,15 @@ class Step:
     model: str = ""
     ms: int = 0
     protocol: str = "tools"
+    endpoint: str = ""
+    request_id: str = ""
+
+
+def request_evidence(step: Step) -> dict:
+    return {
+        "backend": step.backend, "model_id": step.model, "endpoint": step.endpoint,
+        "request_id": step.request_id or None, "latency_ms": step.ms,
+    }
 
 
 def _json_object(content: str) -> dict:
@@ -153,7 +162,13 @@ class AgentModel:
                     body = r.json()
                     ms = int((clock.perf_counter() - t0) * 1000)
                     step = self._parse(body["choices"][0]["message"], protocol)
-                    step.backend, step.model, step.ms, step.protocol = backend, model, ms, protocol
+                    step.backend = backend
+                    step.model = str(body.get("model") or model)
+                    step.ms, step.protocol = ms, protocol
+                    step.endpoint = safe_chat_endpoint(base)
+                    step.request_id = str(
+                        r.headers.get("x-request-id") or r.headers.get("request-id") or body.get("id") or ""
+                    )[:200]
                     _breaker_note(backend, True, self.s)
                     await self._log(backend, model, ms, True, body.get("usage"))
                     self.calls_made += 1

@@ -162,14 +162,14 @@ async def turn(ctx, msg) -> bool:
             await _trace(ctx, mid=mid, salon={"id": None}, sender="platform_admin", user_text=msg.text or "",
                          steps=run.steps, final_text=None, buttons=None, state_after=None,
                          outcome="unavailable", grounded=None, problems=run.problems, model=run.first_model,
-                         calls=run.calls, ms=run.ms)
+                         calls=run.calls, ms=run.ms, model_requests=run.model_requests)
             return False
         body = _fallback_reply(run, lang)
         await _trace(ctx, mid=mid, salon={"id": None}, sender="platform_admin", user_text=msg.text or "",
                      steps=run.steps, final_text=body, buttons=None, state_after=None,
                      outcome="unavailable" if run.unavailable else "grounding_fallback",
                      grounded=False if run.problems else None, problems=run.problems, model=run.first_model,
-                     calls=run.calls, ms=run.ms)
+                     calls=run.calls, ms=run.ms, model_requests=run.model_requests)
         await outbound.send_plain(ctx, msg.sender, body)
         return True
 
@@ -184,6 +184,6 @@ async def turn(ctx, msg) -> bool:
     await _trace(ctx, mid=mid, salon={"id": None}, sender="platform_admin", user_text=msg.text or "",
                  steps=run.steps, final_text=body, buttons=None, state_after=None,
                  outcome="platform_agent", grounded=not run.problems, problems=run.problems,
-                 model=run.first_model, calls=run.calls, ms=run.ms)
+                 model=run.first_model, calls=run.calls, ms=run.ms, model_requests=run.model_requests)
     await outbound.send_plain(ctx, msg.sender, body)
     return True

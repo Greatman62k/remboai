@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 760" role="img" aria-labelledby="t d">
+  <title id="t">Manual payment: owner-verified</title>
+  <desc id="d">For manual payments the slot is held for five minutes while the owner confirms availability. The customer is given the shop's till, Pochi, Send Money or Airtel Money destination and sends a code or screenshot. Muse Spark vision reads a screenshot as an unverified claim. Only the owner's tap confirms the booking. With no answer in 30 minutes the slot is released but the claim stays open, and a late confirmation rechecks the slot before confirming or sending the payment to refund review.</desc>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Helvetica, Arial, sans-serif; text-anchor: middle; }
+    .t { font-weight: 700; }
+    .s { font-weight: 600; }
+    .m { font-weight: 600; fill: #fff; text-anchor: start; }
+    .h { font-weight: 700; fill: #fff; text-anchor: start; }
+    .d { font-weight: 500; fill: #c9ccd6; text-anchor: start; }
+    .k { fill: #000; }
+    .w { fill: #fff; }
+    .ln { stroke: #fff; stroke-width: 3; fill: none; }
+  </style>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerUnits="userSpaceOnUse" markerWidth="13" markerHeight="13" orient="auto"><path d="M0 0L10 5L0 10z" fill="#fff"/></marker>
+  </defs>
+  <rect width="720" height="760" rx="16" fill="#000"/>
+    <text class="h" x="24" y="34" style="font-size:20px;">Manual payment: only the owner confirms</text>
+  <rect x="24" y="56" width="300" height="56" rx="28" fill="#fff"/>
+  <text class="t k" x="174.0" y="90.0" style="font-size:16px">Customer picks a slot</text>
+  <path class="ln" d="M174 112V132" marker-end="url(#a)"/>
+  <rect x="24" y="132" width="300" height="56" rx="10" fill="#FF7A00"/>
+  <text class="t w" x="174.0" y="156.0" style="font-size:16px">Slot held 5 minutes</text>
+  <text class="s w" x="174.0" y="176.0" style="font-size:13px">Owner asked: Available?</text>
+  <path class="ln" d="M174 188V208" marker-end="url(#a)"/>
+  <rect x="24" y="208" width="300" height="56" rx="10" fill="#fff"/>
+  <text class="t k" x="174.0" y="232.0" style="font-size:16px">Payment instructions</text>
+  <text class="s k" x="174.0" y="252.0" style="font-size:13px">Till, Pochi, Send Money or Airtel Money</text>
+  <path class="ln" d="M174 264V284" marker-end="url(#a)"/>
+  <rect x="24" y="284" width="300" height="56" rx="10" fill="#fff"/>
+  <text class="t k" x="174.0" y="308.0" style="font-size:16px">Customer sends code or screenshot</text>
+  <text class="s k" x="174.0" y="328.0" style="font-size:13px">Muse Spark vision reads it</text>
+  <path class="ln" d="M174 340V360" marker-end="url(#a)"/>
+  <rect x="24" y="360" width="300" height="56" rx="10" fill="#00A651"/>
+  <text class="t w" x="174.0" y="384.0" style="font-size:16px">Owner checks their own account</text>
+  <text class="s w" x="174.0" y="404.0" style="font-size:13px">and taps Confirm</text>
+  <path class="ln" d="M174 416V436" marker-end="url(#a)"/>
+  <rect x="24" y="436" width="300" height="56" rx="28" fill="#00A651"/>
+  <text class="t w" x="174.0" y="470.0" style="font-size:16px">Booking confirmed</text>
+  <path class="ln" d="M324 160H378" marker-end="url(#a)"/>
+  <rect x="378" y="132" width="318" height="56" rx="10" fill="#E5101D"/>
+  <text class="t w" x="537.0" y="156.0" style="font-size:15px">Unavailable, or no reply in 5 minutes</text>
+  <text class="s w" x="537.0" y="176.0" style="font-size:13px">Hold released, customer told</text>
+  <path class="ln" d="M324 312H378" marker-end="url(#a)"/>
+  <rect x="378" y="284" width="318" height="56" rx="28" fill="#0057FF"/>
+  <text class="t w" x="537.0" y="308.0" style="font-size:15px">Unverified claim</text>
+  <text class="s w" x="537.0" y="328.0" style="font-size:13px">A model reading never confirms a payment</text>
+  <path class="ln" d="M324 388H378" marker-end="url(#a)"/>
+  <rect x="378" y="360" width="318" height="56" rx="28" fill="#E5101D"/>
+  <text class="t w" x="537.0" y="384.0" style="font-size:15px">Decline</text>
+  <text class="s w" x="537.0" y="404.0" style="font-size:13px">Claim closed, booking stays held</text>
+  <line x1="24" y1="520" x2="696" y2="520" stroke="#444" stroke-width="1.5" stroke-dasharray="6 6"/>
+  <text class="h" x="24" y="548" style="font-size:16px;">If the owner has not answered after 30 minutes</text>
+  <rect x="24" y="570" width="300" height="64" rx="10" fill="#FF7A00"/>
+  <text class="t w" x="174.0" y="598.0" style="font-size:16px">Slot released</text>
+  <text class="s w" x="174.0" y="618.0" style="font-size:13px">Claim stays in 'pending payments'</text>
+  <path class="ln" d="M324 602H378" marker-end="url(#a)"/>
+  <rect x="378" y="570" width="318" height="64" rx="10" fill="#fff"/>
+  <text class="t k" x="537.0" y="598.0" style="font-size:16px">Late Confirm</text>
+  <text class="s k" x="537.0" y="618.0" style="font-size:13px">Slot rechecked under a database lock</text>
+  <path class="ln" d="M440 634V648H182V670" marker-end="url(#a)"/>
+  <path class="ln" d="M537 634V670" marker-end="url(#a)"/>
+  <text class="m" x="196" y="660" style="font-size:12px;">still free</text>
+  <text class="m" x="549" y="660" style="font-size:12px;">taken or cancelled</text>
+  <rect x="24" y="670" width="316" height="66" rx="33" fill="#00A651"/>
+  <text class="t w" x="182.0" y="699.0" style="font-size:16px">Booking confirmed</text>
+  <text class="s w" x="182.0" y="719.0" style="font-size:13px">The hold is rechecked first</text>
+  <rect x="380" y="670" width="316" height="66" rx="33" fill="#E5101D"/>
+  <text class="t w" x="538.0" y="699.0" style="font-size:16px">Refund review</text>
+  <text class="s w" x="538.0" y="719.0" style="font-size:13px">Customer told not to pay again</text>
+</svg>

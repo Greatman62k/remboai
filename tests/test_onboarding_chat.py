@@ -69,11 +69,24 @@ def test_mangled_pairs_are_rejected_and_bare_evenings_roll():
     assert parse_time_pair("7-7") is None
     assert parse_time_pair("09:00-18:00") == (time(9), time(18))
     assert parse_time_pair("9am-5pm") == (time(9), time(17))
+    assert parse_time_pair("From eight to eight") == (time(8), time(20))
+    assert parse_time_pair("from eight in the morning to eight in the evening") == (time(8), time(20))
     assert default_minutes("Skin fade") == 30
     assert default_minutes("Knotless braids") == 180
     assert default_minutes("Something new") == 45
     assert detect_lang("habari, nataka kujiandikisha") == "sw"
     assert detect_lang("hello, I want to register") == "en"
+
+
+def test_registration_agent_parses_spoken_english_and_swahili_prices():
+    from app.onboarding_agent import _spoken_amount
+
+    assert _spoken_amount("Fade at one hundred shillings", "Fade") == 100
+    assert _spoken_amount("Cut costs two thousand five hundred", "Cut") == 2500
+    assert _spoken_amount("Fades kwa shilingi mia moja", "Fades") == 100
+    assert _spoken_amount("Braids kwa shilingi elfu mbili mia tano", "Braids") == 2500
+    assert _spoken_amount("KES 100") == 100
+    assert _spoken_amount("Fade one hundred or two hundred", "Fade") is None
 
 
 def test_off_topic_steering_and_service_matching_are_deterministic():
@@ -300,6 +313,7 @@ def test_onboarding_saves_an_airtel_money_destination_only_after_explicit_type_c
         assert (account["kind"], account["party_b"], account["shortcode"], account["manual"], account["phone_type"]) == (
             "phone", "254712345678", None, True, "airtel_money")
         assert "is live" in out.tg_bodies(chat)[-1].lower()
+        assert len(out.tg_photos(chat)) == 1 and out.tg_photos(chat)[0]["photo_png"]  # the QR sticker comes with the link
         await pool.close()
     asyncio.run(run())
 
@@ -311,6 +325,17 @@ def test_registration_agent_validates_payment_route_and_phone_as_separate_eviden
         from app.onboarding_agent import RegistrationToolbox
         pool, _out, _seed = await build(DSN)
         ctx = app.state.ctx
+        swahili_state = {
+            "step": "ask_prices", "lang": "sw",
+            "data": {"salon": "Mtaa Cuts", "kind": "kinyozi", "owners": ["Amina"], "services": []},
+        }
+        swahili = RegistrationToolbox(ctx, "tg:9004", "Fades kwa shilingi mia moja", swahili_state)
+        spoken_result = await swahili.run("capture_registration_details", {
+            "services": [{"name": "Fades", "price_kes": 100, "evidence": "Fades kwa shilingi mia moja"}],
+        })
+        assert "services" in spoken_result["accepted"]
+        assert swahili_state["data"]["services"][0]["price"] == 100
+
         state = {
             "step": "ask_payment_method", "lang": "en", "services_confirmed": True,
             "duration_defaults_accepted": True,
@@ -333,6 +358,57 @@ def test_registration_agent_validates_payment_route_and_phone_as_separate_eviden
         assert result["accepted"] == ["payment_destination"]
         assert state["data"]["payment_destination"] == "254712345678"
         assert state["step"] == "confirm_all" and registration_complete(state)
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
+def test_registration_agent_preserves_a_service_name_while_waiting_for_its_price():
+    async def run():
+        from app.main import app
+        from app.onboarding_agent import RegistrationToolbox
+
+        pool, _out, _seed = await build(DSN)
+        ctx = app.state.ctx
+        state = {
+            "step": "ask_prices", "lang": "en",
+            "data": {"salon": "Pending Price Cuts", "kind": "kinyozi", "owners": ["Amina"], "services": []},
+        }
+        first = RegistrationToolbox(ctx, "tg:9002", "Fades", state)
+        result = await first.run("capture_registration_details", {
+            "services": [{"name": "Fades", "price_kes": 100, "evidence": "Fades"}],
+        })
+        assert "services" in result["needs_clarification"]
+        assert state["step"] == "ask_prices" and state["pending_service"]["name"] == "Fades"
+
+        second = RegistrationToolbox(ctx, "tg:9002", "100", state)
+        result = await second.run("capture_registration_details", {})
+        assert "services" in result["accepted"]
+        assert state["data"]["services"][0]["name"] == "Fades"
+        assert state["data"]["services"][0]["price"] == 100
+        assert "pending_service" not in state and state["step"] == "confirm_services"
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
+def test_direct_registration_start_uses_model_for_first_name_question():
+    async def run():
+        from app import onboarding_chat
+        pool, out, _seed = await build(DSN, agent_mode="on")
+        out.agent = lambda _body: ("say", "What name should customers know this business by?")
+        async with client() as c:
+            await post_tg(c, tg_update(1, OWNER_CHAT, "/start register"))
+        body = out.tg_bodies(str(OWNER_CHAT))[-1]
+        assert "What name should customers know this business by?" in body
+        assert "Type HELP anytime" in body
+        assert len(out.agent_requests) == 1
+        trace = await pool.fetchrow(
+            "SELECT outcome, model_calls FROM agent_turns WHERE message_id=$1", "tg:1")
+        assert trace["outcome"] == "registration_agent" and trace["model_calls"] == 1
+        state = await onboarding_chat.load_session(pool, f"tg:{OWNER_CHAT}")
+        assert state["step"] == "ask_name" and not state["data"]
+        assert await pool.fetchval("SELECT count(*) FROM salons") == 1
         await pool.close()
     asyncio.run(run())
 
@@ -711,24 +787,27 @@ def test_plain_register_sentences_begin_onboarding_in_either_language():
 
 
 @needs_db
-def test_unlinked_senders_pick_a_business_while_links_and_owners_route_directly():
+def test_unlinked_senders_need_the_business_link_while_links_and_owners_route_directly():
     async def run():
         pool, out, seed = await build(DSN)
+        await binding.ensure_slug(pool, seed, "Zuri Cuts")
         new = await pool.fetchval("INSERT INTO salons (name, tg_bot_id) VALUES ('Malaika', 'tg:111') RETURNING id::text")
         await binding.ensure_slug(pool, new, "Malaika")
         await pool.execute("UPDATE salons SET owner_wa_id='tg:7003' WHERE id=$1::uuid", new)
         async with client() as c:
-            await post_tg(c, tg_update(1, 5001, "hi"))
-            picker = out.tg_bodies("5001")[-1]
-            assert "Zuri Cuts" in picker and "Malaika" in picker
-            assert "t.me/rembo_test_bot?start=malaika" in picker
-            assert "Fade Saturday" not in picker
+            await post_tg(c, tg_update(1, 5001, "Fade Saturday"))
+            guidance = out.tg_bodies("5001")[-1]
+            assert "send you its invite link" in guidance.lower()
+            assert "zuri cuts" not in guidance.lower() and "malaika" not in guidance.lower()
             assert await pool.fetchval("SELECT count(*) FROM sender_salon WHERE sender='tg:5001'") == 0
             assert await pool.fetchval("SELECT count(*) FROM clients WHERE wa_id='tg:5001'") == 0
             await post_tg(c, tg_update(2, 5001, "2"))
-            assert "Malaika" in out.tg_bodies("5001")[-1]
+            assert "malaika" not in out.tg_bodies("5001")[-1].lower()
+            assert await pool.fetchval("SELECT count(*) FROM sender_salon WHERE sender='tg:5001'") == 0
+            await post_tg(c, tg_update(3, 5001, "/start malaika"))
             assert await pool.fetchval("SELECT salon_id::text FROM sender_salon WHERE sender='tg:5001'") == new
-            await post_tg(c, tg_update(3, 7003, "hi"))
+            assert "malaika" in out.tg_bodies("5001")[-1].lower()
+            await post_tg(c, tg_update(4, 7003, "hi"))
             assert "Malaika" in out.tg_bodies("7003")[-1]
             assert await pool.fetchval("SELECT count(*) FROM sender_salon WHERE sender='tg:7003'") == 0
         assert out.calls == []
@@ -737,20 +816,21 @@ def test_unlinked_senders_pick_a_business_while_links_and_owners_route_directly(
 
 
 @needs_db
-def test_whatsapp_picker_links_carry_the_slug_prefilled():
+def test_unlinked_shared_whatsapp_customer_is_not_offered_a_business_picker():
     async def run():
         from tests.harness import payload, post
         pool, out, seed = await build(DSN, central_whatsapp_number="254700111222")
         new = await pool.fetchval("INSERT INTO salons (name, wa_phone_number_id) VALUES ('Malaika', 'PID1') RETURNING id::text")
         await binding.ensure_slug(pool, new, "Malaika")
         async with client() as c:
-            await post(c, payload("254722000002", "hi", mid="w1"))
-            picker = out.bodies("254722000002")[-1]
-            assert "Zuri Cuts" in picker and "Malaika" in picker
-            assert "https://wa.me/254700111222?text=/start%20malaika" in picker
+            await post(c, payload("254722000002", "Fade Saturday", mid="w1"))
+            guidance = out.bodies("254722000002")[-1]
+            assert "send you its invite link" in guidance.lower()
+            assert "zuri cuts" not in guidance.lower() and "malaika" not in guidance.lower()
             await post(c, payload("254722000002", "malaika", mid="w2"))
-            assert "Malaika" in out.bodies("254722000002")[-1]
-            assert await pool.fetchval("SELECT salon_id::text FROM sender_salon WHERE sender='254722000002'") == new
+            assert "malaika" not in out.bodies("254722000002")[-1].lower()
+            assert await pool.fetchval("SELECT count(*) FROM sender_salon WHERE sender='254722000002'") == 0
+            assert await pool.fetchval("SELECT count(*) FROM clients WHERE wa_id='254722000002'") == 0
         assert out.calls == []
         await pool.close()
     asyncio.run(run())
@@ -760,13 +840,18 @@ def test_whatsapp_picker_links_carry_the_slug_prefilled():
 def test_id_command_answers_owners_and_guides_customers():
     async def run():
         pool, out, seed = await build(DSN)
+        await binding.ensure_slug(pool, seed, "Zuri Cuts")
         async with client() as c:
             await post_tg(c, tg_update(1, 7001, "/id"))
             body = out.tg_bodies("7001")[-1]
-            assert "tg:7001" not in body and "Zuri Cuts" in body
+            assert body == "Your id: tg:7001"
+            await post_tg(c, tg_update(2, 7001, "/start zuri-cuts"))
+            await post_tg(c, tg_update(3, 7001, "/id"))
+            assert "Zuri Cuts" in out.tg_bodies("7001")[-1]
+            assert "Your id:" not in out.tg_bodies("7001")[-1]
         await pool.execute("UPDATE salons SET owner_wa_id='tg:7001'")
         async with client() as c:
-            await post_tg(c, tg_update(2, 7001, "/id"))
+            await post_tg(c, tg_update(4, 7001, "/id"))
             assert "tg:7001" in out.tg_bodies("7001")[-1]
         await pool.close()
     asyncio.run(run())
@@ -784,7 +869,9 @@ def test_deep_link_binds_and_routes_while_unknown_links_fall_back():
             assert "malaika" in out.tg_bodies(str(CUST_CHAT))[-1].lower()
             await post_tg(c, tg_update(2, 6001, "/start no-such-salon"))
             assert await pool.fetchval("SELECT count(*) FROM sender_salon WHERE sender='tg:6001'") == 0
-            assert "zuri cuts" in out.tg_bodies("6001")[-1].lower()
+            unknown_link_reply = out.tg_bodies("6001")[-1].lower()
+            assert "remboai" in unknown_link_reply and "invite link" in unknown_link_reply
+            assert "zuri cuts" not in unknown_link_reply and "malaika" not in unknown_link_reply
         assert out.calls == []
         await pool.close()
     asyncio.run(run())

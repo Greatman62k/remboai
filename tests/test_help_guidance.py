@@ -35,14 +35,14 @@ def test_opening_messages_invite_help_in_english_and_swahili():
             "welcome": {"salon": "Brian's Kinyozi", "example": "Fade Saturday afternoon"},
             "welcome_back_ask": {"example": "Fade Saturday afternoon"},
             "main_identity": {}, "main_help": {}, "main_hello": {},
-            "main_voice": {}, "main_photo": {}, "voice_failed": {}, "ob_pick_salon": {"lines": "1. Example"},
+            "main_voice": {}, "main_photo": {}, "voice_failed": {},
             "ob_ask_name": {}, "ob_platform_owner_confirm": {},
         },
         "sw": {
             "welcome": {"salon": "Kinyozi cha Brian", "example": "Fade Jumamosi mchana"},
             "welcome_back_ask": {"example": "Fade Jumamosi mchana"},
             "main_identity": {}, "main_help": {}, "main_hello": {},
-            "main_voice": {}, "main_photo": {}, "voice_failed": {}, "ob_pick_salon": {"lines": "1. Mfano"},
+            "main_voice": {}, "main_photo": {}, "voice_failed": {},
             "ob_ask_name": {}, "ob_platform_owner_confirm": {},
         },
     }
@@ -72,6 +72,12 @@ def test_help_sheets_are_short_copyable_and_bilingual():
 
 
 def test_model_prompts_teach_help_and_first_reply_hint_for_each_chat_role():
+    scope = " ".join(POLICY["bare_assistant"]["scope"]).lower()
+    assert "never list businesses" in scope and "ask a customer to choose a shop" in scope
+    assert "ask the business to send or resend it" in scope
+    assert "business_selection_reply_patterns" in POLICY["bare_assistant"]
+    assert "invite link" in POLICY["bare_assistant"]["business_link_required_reply"]["en"].lower()
+    assert "kiungo" in POLICY["bare_assistant"]["business_link_required_reply"]["sw"].lower()
     bare = bare_system_prompt(POLICY, "en", first_reply=True)
     assert "Type HELP anytime to see what I can do." in bare
     assert "HELP GUIDE, KISWAHILI" in bare and "Jinsi ya kutumia RemboAI" in bare

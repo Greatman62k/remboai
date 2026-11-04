@@ -63,9 +63,15 @@ def _validate(policy: object) -> dict:
     _strings(bare.get("follow_up_patterns", []), "bare_assistant.follow_up_patterns")
     _strings(bare.get("out_of_scope_patterns"), "bare_assistant.out_of_scope_patterns")
     _strings(bare.get("unsafe_reply_patterns"), "bare_assistant.unsafe_reply_patterns")
-    for key in ("out_of_scope_reply", "model_unavailable_reply", "model_rejected_reply", "rate_limited_reply"):
+    _strings(bare.get("business_selection_reply_patterns"), "bare_assistant.business_selection_reply_patterns")
+    for key in ("identity_question_patterns", "identity_safe_reply_patterns", "identity_claim_patterns"):
+        _strings(bare.get(key), f"bare_assistant.{key}")
+    for key in ("out_of_scope_reply", "model_unavailable_reply", "model_rejected_reply", "rate_limited_reply",
+                "identity_unverified_reply", "business_link_required_reply"):
         replies = bare.get(key)
-        if replies is None and key != "out_of_scope_reply":
+        if replies is None and key not in (
+            "out_of_scope_reply", "identity_unverified_reply", "business_link_required_reply"
+        ):
             continue
         if not isinstance(replies, dict) or not all(
             isinstance(replies.get(lang), str) and replies[lang].strip() for lang in ("en", "sw")
@@ -74,7 +80,11 @@ def _validate(policy: object) -> dict:
     for name, patterns in (("in_scope_patterns", bare["in_scope_patterns"]),
                            ("follow_up_patterns", bare.get("follow_up_patterns", [])),
                            ("out_of_scope_patterns", bare["out_of_scope_patterns"]),
-                           ("unsafe_reply_patterns", bare["unsafe_reply_patterns"])):
+                           ("unsafe_reply_patterns", bare["unsafe_reply_patterns"]),
+                           ("business_selection_reply_patterns", bare["business_selection_reply_patterns"]),
+                           ("identity_question_patterns", bare["identity_question_patterns"]),
+                           ("identity_safe_reply_patterns", bare["identity_safe_reply_patterns"]),
+                           ("identity_claim_patterns", bare["identity_claim_patterns"])):
         for pattern in patterns:
             if len(pattern) > 2000:
                 raise PolicyError(f"bare_assistant.{name} contains a pattern that is too long")
@@ -113,6 +123,13 @@ def _validate(policy: object) -> dict:
         if not isinstance(salon_owner.get(key), str) or not salon_owner[key].strip():
             raise PolicyError(f"salon_owner_assistant.{key} must be a non-empty string")
     _strings(salon_owner.get("response_rules"), "salon_owner_assistant.response_rules")
+
+    visit_feedback = policy.get("visit_feedback")
+    if not isinstance(visit_feedback, dict):
+        raise PolicyError("visit_feedback must be an object")
+    if not isinstance(visit_feedback.get("identity"), str) or not visit_feedback["identity"].strip():
+        raise PolicyError("visit_feedback.identity must be a non-empty string")
+    _strings(visit_feedback.get("reply_rules"), "visit_feedback.reply_rules")
 
     registration = policy.get("registration")
     if not isinstance(registration, dict):

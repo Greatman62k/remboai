@@ -18,7 +18,7 @@ from decimal import Decimal, InvalidOperation
 import httpx
 from pydantic import ValidationError
 
-from .llm import _json_from
+from .llm import _json_from, safe_chat_endpoint
 
 log = logging.getLogger("rembo.vision")
 MAX_IMAGE = 4_000_000
@@ -33,6 +33,9 @@ class StyleGuess:
     confidence: float
     model: str
     ms: int
+    backend: str = ""
+    endpoint: str = ""
+    request_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +50,9 @@ class PaymentScreenshotGuess:
     confidence: float
     model: str
     ms: int
+    backend: str = ""
+    endpoint: str = ""
+    request_id: str = ""
 
 
 def _payment_date(value: object) -> str | None:
@@ -88,7 +94,8 @@ def _payment_recipient(value: object) -> str | None:
     return name
 
 
-def parse_payment_guess(data: object, model: str = "", ms: int = 0) -> PaymentScreenshotGuess | None:
+def parse_payment_guess(data: object, model: str = "", ms: int = 0, *, backend: str = "",
+                        endpoint: str = "", request_id: str = "") -> PaymentScreenshotGuess | None:
     """Validate model output as a cautious, unverified screenshot claim."""
     if not isinstance(data, dict) or data.get("is_payment_confirmation") is not True:
         return None
@@ -125,6 +132,9 @@ def parse_payment_guess(data: object, model: str = "", ms: int = 0) -> PaymentSc
         confidence=confidence,
         model=model,
         ms=ms,
+        backend=backend,
+        endpoint=endpoint,
+        request_id=request_id,
     )
 
 
@@ -210,7 +220,7 @@ class StyleMatcher:
             return None
         if self.budget is not None and not await self.budget.take("vision"):
             return None
-        for _backend, base, key, model, _ in self._endpoints():
+        for backend, base, key, model, _ in self._endpoints():
             t0 = clock.perf_counter()
             try:
                 from app.agent.policy import load_policy
@@ -219,10 +229,16 @@ class StyleMatcher:
                 r = await self.http.post(base.rstrip("/") + "/chat/completions", json=self.body(model, prompt, image, mime, caption),
                                          headers={"Authorization": f"Bearer {key}"}, timeout=self.s.llm_timeout_s * 2)
                 r.raise_for_status()
-                d = _json_from(r.json()["choices"][0]["message"]["content"])
+                body = r.json()
+                d = _json_from(body["choices"][0]["message"]["content"])
                 conf = max(0.0, min(1.0, float(d.get("confidence") or 0)))
                 svc = d.get("service")
-                return StyleGuess(svc if isinstance(svc, str) and svc.strip() else None, str(d.get("style") or "")[:60], conf, model, int((clock.perf_counter() - t0) * 1000))
+                request_id = r.headers.get("x-request-id") or r.headers.get("request-id") or body.get("id") or ""
+                return StyleGuess(
+                    svc if isinstance(svc, str) and svc.strip() else None,
+                    str(d.get("style") or "")[:60], conf, str(body.get("model") or model),
+                    int((clock.perf_counter() - t0) * 1000), backend, safe_chat_endpoint(base), str(request_id)[:200],
+                )
             except (httpx.HTTPError, KeyError, IndexError, ValueError, TypeError, AttributeError, ValidationError) as e:
                 log.warning("photo matching on %s failed: %s", model, e.__class__.__name__)
         return None
@@ -236,7 +252,7 @@ class StyleMatcher:
             return None
         if self.budget is not None and not await self.budget.take("vision"):
             return None
-        for _backend, base, key, model, _ in self._endpoints():
+        for backend, base, key, model, _ in self._endpoints():
             t0 = clock.perf_counter()
             try:
                 from app.agent.policy import load_policy
@@ -250,8 +266,13 @@ class StyleMatcher:
                 response = await self.http.post(base.rstrip("/") + "/chat/completions", json=body,
                                                 headers={"Authorization": f"Bearer {key}"}, timeout=self.s.llm_timeout_s * 2)
                 response.raise_for_status()
-                raw = _json_from(response.json()["choices"][0]["message"]["content"])
-                guess = parse_payment_guess(raw, model, int((clock.perf_counter() - t0) * 1000))
+                body = response.json()
+                raw = _json_from(body["choices"][0]["message"]["content"])
+                request_id = response.headers.get("x-request-id") or response.headers.get("request-id") or body.get("id") or ""
+                guess = parse_payment_guess(
+                    raw, str(body.get("model") or model), int((clock.perf_counter() - t0) * 1000),
+                    backend=backend, endpoint=safe_chat_endpoint(base), request_id=str(request_id)[:200],
+                )
                 if guess is not None:
                     return guess
             except (httpx.HTTPError, KeyError, IndexError, ValueError, TypeError, AttributeError, ValidationError) as exc:

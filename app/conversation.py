@@ -30,12 +30,13 @@ from .booking_flow import (
     match_service,
     menu,
     owner_availability_response,
-    peek_state,
     resume_late_owner_booking,
     save_stranger,
     stranger_state,
+    when_label,
 )
 from .channels import outbound
+from .contact import display_contact
 from .ai.llm import Extraction, Result, rule_extract
 from .reminders import handle_still_tap
 from .messages import t
@@ -47,6 +48,7 @@ WAITLIST_WORDS = re.compile(r"^\s*(waitlist|waiting list|notify me|let me know|n
 DIRECT_CUSTOMER_BOOKING = re.compile(
     r"\b(?:i\s+(?:want|need|would like|'d like)\s+to\s+book|book\s+me(?:\s+for)?|can\s+i\s+book|"
     r"naomba\s+kuweka\s+miadi|nataka\s+kuweka\s+miadi)\b", re.I)
+PLATFORM_OWNER_ACTION_TAP = re.compile(r"^(availability|till):(yes|no):([0-9a-fA-F-]{36})$")
 
 
 def _explicit_customer_booking(text: str, services: list[dict]) -> bool:
@@ -141,11 +143,86 @@ async def _handle_sensitive_text(ctx, salon: dict, msg: Message, chat: Chat, tex
     if client is None:
         client, state = await _load(ctx, salon["id"], msg.sender, msg.name)
     category, detected_lang = hit
+    if category == "complaint" and (state or {}).get("state") in ("awaiting_feedback", "awaiting_feedback_detail"):
+        # A service complaint in the dedicated feedback exchange belongs to the
+        # feedback assistant. Medical, legal, payment, and safety handoffs remain guarded.
+        return False
     lang = detected_lang if detected_lang in ("en", "sw") else client["lang"]
     await guard.hand_off(ctx, salon, client, lang, category, text)
     handoff_state = {**(state or {"history": []}), "state": "handoff", "category": category}
     await _reply(ctx, salon["id"], msg.sender, handoff_state, chat, guard.reply_for(category, lang))
     return True
+
+
+def _visit_feedback_expired(state: dict) -> bool:
+    raw = state.get("visit_feedback_at")
+    if raw is None:
+        # Older pending feedback states predate the expiry marker; let one reply
+        # finish them instead of silently dropping the customer's message.
+        return False
+    try:
+        stamp = datetime.fromisoformat(raw) if isinstance(raw, str) else raw
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=ZoneInfo("UTC"))
+        age = (datetime.now(ZoneInfo("UTC")) - stamp.astimezone(ZoneInfo("UTC"))).total_seconds()
+        return age < 0 or age > 24 * 3600
+    except (AttributeError, TypeError, ValueError):
+        return True
+
+
+async def _record_visit_feedback(ctx, salon: dict, client: dict, state: dict, chat: Chat, lang: str, text: str) -> None:
+    booking_id = state.get("visit_booking")
+    row = await ctx.pool.fetchrow(
+        "SELECT v.feedback, b.starts_at, sv.name AS service, c.wa_id AS phone, c.name AS client_name, "
+        "c.lang, s.owner_wa_id, s.name AS salon_name FROM visit_checks v "
+        "JOIN bookings b ON b.id=v.booking_id JOIN services sv ON sv.id=b.service_id "
+        "JOIN clients c ON c.id=b.client_id JOIN salons s ON s.id=b.salon_id "
+        "WHERE v.booking_id=$1::uuid AND v.salon_id=$2::uuid AND v.client_id=$3::uuid",
+        booking_id, salon["id"], client["id"],
+    ) if booking_id else None
+    if row is None:
+        await _save(ctx, salon["id"], chat.to, {"history": state.get("history", [])})
+        return
+
+    feedback = guard.clean(text)[:500]
+    if not feedback:
+        await _reply(ctx, salon["id"], chat.to, state, chat, t(lang, "visit_feedback_neutral", salon=salon["name"]))
+        return
+    previous = (row["feedback"] or "").strip()
+    phase = "details" if state.get("state") == "awaiting_feedback_detail" else "feedback"
+    combined = "\n".join(part for part in (previous, feedback) if part)[:1000]
+    await ctx.pool.execute(
+        "UPDATE visit_checks SET feedback=$2, answered_at=now() WHERE booking_id=$1::uuid",
+        booking_id, combined,
+    )
+
+    owner_notified = False
+    if row["owner_wa_id"]:
+        tz = ZoneInfo(salon["timezone"])
+        owner_body = t(
+            "en", "owner_visit_feedback",
+            client=row["client_name"] or display_contact(row["phone"]),
+            phone=display_contact(row["phone"]), service=row["service"],
+            when=when_label(row["starts_at"], tz), feedback=feedback,
+        )
+        owner_notified = await outbound.send_text(ctx, salon, row["owner_wa_id"], owner_body)
+        if not owner_notified:
+            log.warning("could not deliver post-visit feedback to the owner for booking %s", booking_id)
+
+    from .agent.visit_feedback import reply as feedback_reply
+    sentiment, body = await feedback_reply(
+        ctx, salon=row["salon_name"], service=row["service"], lang=row["lang"] or lang,
+        phase=phase, feedback=feedback, previous_feedback=previous, owner_notified=owner_notified,
+    )
+    if phase == "feedback" and sentiment == "negative":
+        next_state = {
+            "state": "awaiting_feedback_detail", "visit_booking": booking_id,
+            "visit_feedback_at": state.get("visit_feedback_at") or datetime.now(ZoneInfo("UTC")).isoformat(),
+            "history": state.get("history", []),
+        }
+    else:
+        next_state = {"history": state.get("history", [])}
+    await _reply(ctx, salon["id"], chat.to, next_state, chat, body)
 
 
 async def _customer_has_selected_salon(ctx, msg: Message, salon: dict, linked: bool) -> bool:
@@ -159,7 +236,9 @@ async def _customer_has_selected_salon(ctx, msg: Message, salon: dict, linked: b
         "SELECT count(*) FROM salons WHERE active AND (wa_phone_number_id=$1 OR tg_bot_id=$1)",
         msg.phone_number_id,
     )
-    return int(count or 0) == 1
+    # A dedicated WhatsApp business number identifies its tenant. The shared
+    # Telegram bot does not, even while only one business is registered.
+    return int(count or 0) == 1 and not msg.sender.startswith("tg:")
 
 
 async def _owned_channel_salons(ctx, sender: str, phone_number_id: str, selector: str | None = None) -> list[dict]:
@@ -170,6 +249,35 @@ async def _owned_channel_salons(ctx, sender: str, phone_number_id: str, selector
         sender, phone_number_id, selector,
     )
     return [dict(row) for row in rows]
+
+
+async def _platform_owner_action_tap(ctx, msg: Message) -> bool:
+    """Route a platform owner's business-action button to its owned salon before the platform hub."""
+    match = PLATFORM_OWNER_ACTION_TAP.fullmatch(msg.reply_id or "")
+    if msg.kind != "interactive" or not match:
+        return False
+    action, _, object_id = match.groups()
+    if action == "availability":
+        row = await ctx.pool.fetchrow(
+            "SELECT s.id::text, s.name, s.slug, s.wa_phone_number_id, s.wa_access_token, s.timezone, "
+            "s.open_hours, s.deposit_kes, s.owner_wa_id, s.tg_bot_id "
+            "FROM bookings b JOIN salons s ON s.id=b.salon_id "
+            "WHERE b.id=$1::uuid AND s.owner_wa_id=$2 AND (s.wa_phone_number_id=$3 OR s.tg_bot_id=$3)",
+            object_id, msg.sender, msg.phone_number_id,
+        )
+    else:
+        row = await ctx.pool.fetchrow(
+            "SELECT s.id::text, s.name, s.slug, s.wa_phone_number_id, s.wa_access_token, s.timezone, "
+            "s.open_hours, s.deposit_kes, s.owner_wa_id, s.tg_bot_id "
+            "FROM payments p JOIN bookings b ON b.id=p.booking_id JOIN salons s ON s.id=b.salon_id "
+            "WHERE p.id=$1::uuid AND s.owner_wa_id=$2 AND (s.wa_phone_number_id=$3 OR s.tg_bot_id=$3)",
+            object_id, msg.sender, msg.phone_number_id,
+        )
+    if row is None:
+        return False
+    salon = dict(row)
+    await outbound.set_conversation_salon(ctx, salon["id"])
+    return await owner.handle_tap(ctx, salon, msg.sender, msg.reply_id)
 
 
 _REGISTRATION_HYPOTHETICAL = re.compile(
@@ -275,9 +383,9 @@ async def _salon_row(ctx, salon_id: str) -> dict | None:
 
 
 async def _resolve_salon(ctx, msg: Message, salon: dict) -> tuple[dict, bool]:
-    """One bot number can serve many salons. A /start deep link names the salon and is remembered;
-    otherwise a remembered link wins over the default salon on this number. Returns the salon and
-    whether this message linked to it (an invite tap, which then lands as a greeting)."""
+    """A /start deep link names and remembers the salon. A live remembered binding may also route
+    the sender. The initial salon row is only a routing candidate; shared-bot customers still need
+    an explicit link or binding before entering its customer flow."""
     text = (msg.text or "")
     arg = text[len("/start"):].strip() if text.startswith("/start") else ""
     linked = False
@@ -312,7 +420,7 @@ async def _identity(ctx, msg: Message, salon: dict, linked: bool, chat: Chat) ->
     if target is None:
         n = await ctx.pool.fetchval(
             "SELECT count(*) FROM salons WHERE (wa_phone_number_id=$1 OR tg_bot_id=$1) AND active", msg.phone_number_id)
-        if n == 1:
+        if n == 1 and not msg.sender.startswith("tg:"):
             target = salon
     if target is None:
         await chat.text(t(lang, "main_help" if helping else "main_identity"))
@@ -326,17 +434,21 @@ async def _identity(ctx, msg: Message, salon: dict, linked: bool, chat: Chat) ->
 async def _neutral_route(ctx, msg: Message, salon: dict, linked: bool, chat: Chat) -> tuple[dict | None, bool]:
     """The shared bot belongs to no business: a customer link or a remembered binding
     routes to exactly one salon, and nothing else ever sees another salon's data.
-    One salon on this number serves directly; an owner with one salon on this number
-    lands there; anyone else names or picks their business first."""
+    A dedicated WhatsApp business number identifies its salon. On shared channels,
+    only an invite link or existing binding selects a business. Verified owners still
+    route to their own business by account identity."""
     if linked:
         return salon, True
     bound_id = await binding.bound_salon(ctx.pool, msg.sender)
-    if bound_id is not None:
+    if bound_id == salon["id"]:
         return salon, False
-    rows = await ctx.pool.fetch(
-        "SELECT id::text, name, slug FROM salons WHERE (wa_phone_number_id=$1 OR tg_bot_id=$1) AND active ORDER BY created_at, id",
-        msg.phone_number_id)
-    if len(rows) <= 1:
+    count = await ctx.pool.fetchval(
+        "SELECT count(*) FROM salons WHERE (wa_phone_number_id=$1 OR tg_bot_id=$1) AND active",
+        msg.phone_number_id,
+    )
+    # A dedicated WhatsApp business number provides the tenant context. A shared
+    # Telegram bot does not, even while only one business is registered.
+    if int(count or 0) == 1 and not msg.sender.startswith("tg:"):
         return salon, False
     owned = [r for r in await ctx.pool.fetch(
         "SELECT id::text FROM salons WHERE owner_wa_id=$1 AND (wa_phone_number_id=$2 OR tg_bot_id=$2) AND active",
@@ -344,85 +456,11 @@ async def _neutral_route(ctx, msg: Message, salon: dict, linked: bool, chat: Cha
     if len(owned) == 1:
         target = await _salon_row(ctx, owned[0]["id"])
         return (target or salon), False
-    text = (msg.text or "").strip()
-    lang = smalltalk.language(text, "en")
-    seen_st = await peek_state(ctx, salon["id"], msg.sender)
-    offer = seen_st.get("picker_offer")
-    offer = offer if isinstance(offer, dict) else {}
-    if offer.get("id") is not None and text.lower() in _PICKER_YES:
-        target = await _salon_row(ctx, offer["id"])
-        if target is not None:
-            slug = offer.get("slug") or await binding.ensure_slug(ctx.pool, target["id"], target["name"])
-            await binding.bind_sender(ctx.pool, msg.sender, slug)
-            await _save(ctx, salon["id"], msg.sender,
-                        {k: v for k, v in seen_st.items() if k != "picker_offer"})
-            return target, True
-    match = _match_business(rows, text)
-    if match is not None:
-        slug = match["slug"] or await binding.ensure_slug(ctx.pool, match["id"], match["name"])
-        await binding.bind_sender(ctx.pool, msg.sender, slug)
-        target = await _salon_row(ctx, match["id"])
-        return (target or salon), True
-    fuzzy = _fuzzy_business(rows, text)
-    if fuzzy is not None:
-        await _save(ctx, salon["id"], msg.sender,
-                    {**seen_st, "picker_offer": {"id": fuzzy["id"], "slug": fuzzy.get("slug")}})
-        await chat.text(t(lang, "ob_pick_confirm", name=fuzzy["name"]))
-        return None, False
-    if msg.kind in ("audio", "image") or smalltalk.asks_identity(text) or smalltalk.asks_help(text):
-        # Generic identity and help questions belong to RemboAI itself. Do not
-        # expose a list of salons just because they share this channel number.
-        await _unallocated(ctx, msg)
-        return None, False
-    from .channels import invites
-    channel = invites.channel_of(msg.sender)
-    from .channels.telegram import bot_username as _bot_username
-    username = await _bot_username(getattr(ctx, "wa", None)) if channel == "tg" else None
-    number = getattr(ctx.settings, "central_whatsapp_number", "") if channel == "wa" else ""
-    seen = int(seen_st.get("picker_sends") or 0)
-    if seen >= 2:
-        await guard.strike(ctx.pool, msg.sender, "picker_spam")
-        await chat.text(t(lang, "ob_pick_again"))
-        return None, False
-    await _save(ctx, salon["id"], msg.sender,
-                {k: v for k, v in seen_st.items() if k != "picker_offer" and k != "picker_sends"} | {"picker_sends": seen + 1})
-    lines = []
-    for i, r in enumerate(rows, 1):
-        slug = r["slug"] or await binding.ensure_slug(ctx.pool, r["id"], r["name"])
-        lines.append(t(lang, "ob_pick_item", n=i, name=r["name"],
-                       link=invites.invite_for(channel, slug, username=username, number=number)))
-    await chat.text(t(lang, "ob_pick_salon", lines="\n".join(lines)))
+    # Never infer a customer's business from a sole-tenant default or a typed
+    # business name. The owner must share the invite link; that link carries the
+    # business slug and binds this sender before customer tools or records are used.
+    await _unallocated(ctx, msg)
     return None, False
-
-
-def _match_business(rows: list, text: str) -> dict | None:
-    """A typed business choice: its number, slug, or exact name. Close is not enough to bind on."""
-    clean = (text or "").strip().lower()
-    if not clean:
-        return None
-    if clean.isdigit() and 1 <= int(clean) <= len(rows):
-        return dict(rows[int(clean) - 1])
-    for r in rows:
-        if (r["slug"] or "").lower() == clean:
-            return dict(r)
-    for r in rows:
-        if r["name"].lower() == clean:
-            return dict(r)
-    return None
-
-
-def _fuzzy_business(rows: list, text: str) -> dict | None:
-    """A near-miss on a business name: offered for confirmation, never bound on directly."""
-    import difflib as _difflib
-    clean = (text or "").strip().lower()
-    if not clean:
-        return None
-    lowered = {r["name"].lower(): r for r in rows}
-    close = _difflib.get_close_matches(clean, list(lowered), n=1, cutoff=0.8)
-    return dict(lowered[close[0]]) if close else None
-
-
-_PICKER_YES = {"yes", "yeah", "yep", "ndiyo", "ndio", "sawa", "ok"}
 
 
 async def _unallocated(ctx, msg: Message) -> None:
@@ -513,6 +551,8 @@ async def _handle(ctx, msg: Message) -> None:
     platform_owner_route = False
 
     if platform_sender:
+        if await _platform_owner_action_tap(ctx, msg):
+            return
         platform_audio = msg.kind == "audio"
         if platform_audio:
             session = await onboarding_chat.load_session(ctx.pool, msg.sender)
@@ -605,9 +645,11 @@ async def _handle(ctx, msg: Message) -> None:
 
     if isinstance(salon["open_hours"], str):
         salon["open_hours"] = json.loads(salon["open_hours"])
-    await outbound.set_conversation_salon(ctx, salon["id"])
     chat = Chat(ctx, salon, msg.sender)
     owner_mode = owner.is_owner(salon, msg.sender)
+    salon_context_selected = owner_mode or await _customer_has_selected_salon(ctx, msg, salon, linked)
+    if salon_context_selected:
+        await outbound.set_conversation_salon(ctx, salon["id"])
     if owner_mode and msg.kind == "audio":
         lang = "en"
         if not msg.media_id or ctx.voice is None or not ctx.voice.enabled:
@@ -688,7 +730,24 @@ async def _handle(ctx, msg: Message) -> None:
     if platform_owner_route and registration_start:
         await outbound.send_plain(ctx, msg.sender, platform.help_text(smalltalk.language(msg.text or "", "en")))
         return
-    salon_context_selected = owner_mode or await _customer_has_selected_salon(ctx, msg, salon, linked)
+    if (not owner_mode and salon_context_selected and msg.kind == "audio"
+            and await guard.is_handoff(ctx.pool, salon["id"], msg.sender)):
+        lang = await ctx.pool.fetchval(
+            "SELECT lang FROM clients WHERE salon_id=$1::uuid AND wa_id=$2", salon["id"], msg.sender
+        ) or "en"
+        if msg.media_id and ctx.voice is not None and ctx.voice.enabled:
+            await _voice_typing(ctx, msg.sender)
+            heard = await _hear(ctx, msg, lang, outbound.salon_token(ctx, salon), salon["id"])
+            if heard:
+                text = guard.clean(heard)
+                if text:
+                    await outbound.update_inbound_text(ctx, text)
+                    msg = dataclasses.replace(msg, kind="text", text=text, media_id=None, reply_id=None)
+    if (not owner_mode and salon_context_selected and msg.kind == "text"
+            and (sensitive_hit := guard.classify(msg.text or ""))
+            and sensitive_hit[0] == "emergency"):
+        await _handle_sensitive_text(ctx, salon, msg, chat, msg.text or "")
+        return
     if salon_context_selected and await _handoff_before_onboarding(ctx, salon, msg.sender, chat):
         return
     if (not owner_mode and salon_context_selected and msg.kind == "text" and
@@ -735,6 +794,7 @@ async def _handle(ctx, msg: Message) -> None:
     salon, arrival = await _neutral_route(ctx, msg, salon, linked, chat)
     if salon is None:
         return
+    await outbound.set_conversation_salon(ctx, salon["id"])
     if arrival:
         msg = dataclasses.replace(msg, kind="text", text="hi", reply_id=None)
     chat = Chat(ctx, salon, msg.sender)
@@ -840,16 +900,25 @@ async def _handle(ctx, msg: Message) -> None:
                 await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, "till_photo_unreadable", salon=salon["name"]))
             else:
                 await _till_claim(ctx, salon, client, st, chat, lang, "", extracted=guess)
+                await _trace_vision_request(ctx, msg, salon, guess, "vision_payment_claim_unverified", grounded=None)
             return
     if msg.kind == "image" and msg.media_id and ctx.vision is not None and ctx.vision.enabled:
         services = await _catalog(ctx, salon["id"])
-        service = await _see(ctx, msg, services, outbound.salon_token(ctx, salon))
+        service, vision_guess = await _see(ctx, msg, services, outbound.salon_token(ctx, salon))
         if service is None:
-            await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, "photo_unclear", menu=menu(services)))
+            body = t(lang, "photo_unclear", menu=menu(services))
+            if vision_guess is not None:
+                await _trace_vision_request(ctx, msg, salon, vision_guess, "vision_photo_unmatched", grounded=True,
+                                            final_text=body)
+            await _reply(ctx, salon["id"], msg.sender, st, chat, body)
             return
         st = {"state": "asking", "service_name": service["name"], "date": None, "window": None, "time": None, "history": st.get("history", [])}
         await _save(ctx, salon["id"], msg.sender, st)
-        await _reply(ctx, salon["id"], msg.sender, st, chat, t(lang, "photo_match", service=service["name"], price=service["price_kes"], mins=service["duration_min"]))
+        body = t(lang, "photo_match", service=service["name"], price=service["price_kes"], mins=service["duration_min"])
+        if vision_guess is not None:
+            await _trace_vision_request(ctx, msg, salon, vision_guess, "vision_photo_match", grounded=True,
+                                        final_text=body, state_after=st)
+        await _reply(ctx, salon["id"], msg.sender, st, chat, body)
         if not msg.text:
             return
         msg = dataclasses.replace(msg, kind="text", reply_id=None)
@@ -881,13 +950,12 @@ async def _handle(ctx, msg: Message) -> None:
     if msg.reply_id and msg.reply_id.startswith("still-"):
         if await handle_still_tap(ctx, salon, client, st, chat, lang, tz, msg.reply_id):
             return
-    if st.get("state") == "awaiting_feedback" and (msg.text or "").strip() and not msg.reply_id and not msg.media_id:
-        quick = rule_extract(msg.text, now.date(), services)
-        if quick.intent == "other":
-            await ctx.pool.execute("UPDATE visit_checks SET feedback=$2, answered_at=now() WHERE booking_id=$1::uuid",
-                                   st["visit_booking"], msg.text.strip()[:500])
-            cleared_feedback = {"history": st.get("history", [])}
-            await _reply(ctx, salon["id"], msg.sender, cleared_feedback, chat, t(lang, "visit_feedback_thanks"))
+    if st.get("state") in ("awaiting_feedback", "awaiting_feedback_detail"):
+        if _visit_feedback_expired(st):
+            st = {"history": st.get("history", [])}
+            await _save(ctx, salon["id"], msg.sender, st)
+        elif (msg.text or "").strip() and not msg.reply_id and not msg.media_id:
+            await _record_visit_feedback(ctx, salon, client, st, chat, lang, msg.text)
             return
     if st.get("state") == "held" and tap_id:
         svc_name = next((s["name"] for s in services if s["id"] == st.get("service_id")), st.get("service_name") or "your booking")
@@ -1060,16 +1128,39 @@ async def _hear(ctx, msg: Message, lang: str, token: str, salon_id: str | None =
     return heard.text if heard else None
 
 
-async def _see(ctx, msg: Message, services: list[dict], token: str) -> dict | None:
+async def _see(ctx, msg: Message, services: list[dict], token: str) -> tuple[dict | None, object | None]:
     """Photo -> one of this salon's services, or None. The model suggests; the menu decides."""
     got = await ctx.wa.download_media(token, msg.media_id, max_bytes=4_000_000)
     if got is None:
-        return None
+        return None, None
     guess = await ctx.vision.match(got[0], got[1], [s["name"] for s in services], msg.text)
-    if guess is None or guess.confidence < 0.5:
-        return None
+    if guess is None:
+        return None, None
     log.info("photo matched to a service via %s in %d ms (confidence %.2f)", guess.model, guess.ms, guess.confidence)
-    return match_service(guess.service, services)
+    return (match_service(guess.service, services) if guess.confidence >= 0.5 else None), guess
+
+
+async def _trace_vision_request(ctx, msg: Message, salon: dict, guess, outcome: str, *, grounded: bool | None,
+                               final_text: str | None = None, state_after: dict | None = None) -> None:
+    """Attach a vision call to the same protected trace as the photo and customer-facing result."""
+    mid = outbound.current_message_id()
+    if not mid:
+        return
+    if final_text is None:
+        row = await ctx.pool.fetchrow(
+            "SELECT body FROM conversation_trace_replies WHERE message_id=$1 ORDER BY sequence DESC LIMIT 1", mid)
+        final_text = row["body"] if row is not None else None
+    from .agent import _trace
+    request = {
+        "task": "photo_understanding", "backend": guess.backend, "model_id": guess.model,
+        "endpoint": guess.endpoint, "request_id": guess.request_id or None, "latency_ms": guess.ms,
+    }
+    await _trace(
+        ctx, mid=mid, salon=salon, sender=mask(msg.sender), user_text=msg.text or "[photo]",
+        steps=[], final_text=final_text, buttons=None, state_after=state_after, outcome=outcome,
+        grounded=grounded, problems=[], model=(guess.backend, guess.model), calls=1, ms=guess.ms,
+        model_requests=[request],
+    )
 
 
 async def _payment_screenshot(ctx, msg: Message, token: str, expected_provider: str):

@@ -338,6 +338,9 @@ def test_daraja_down_keeps_the_slot_and_says_how_to_retry():
 
 def test_claim_parsing_reads_amount_and_code_but_trusts_nothing():
     assert payments.parse_claim("200 QAB1CD2EF3") == (200, "QAB1CD2EF3", False)
+    assert payments.parse_claim("50 QBA1GD3EG2") == (50, "QBA1GD3EG2", False)
+    assert payments.parse_claim("KSH50.00 sent. M-PESA Ref: QBA1GD3EG2") == (50, "QBA1GD3EG2", False)
+    assert payments.parse_claim("QAB200CD3EF") == (None, "QAB200CD3EF", False)
     sms = "Confirmed. Ksh200.00 sent to Zuri Cuts on 12/2/26 at 3:00 PM. M-PESA Ref: qab1cd2ef3."
     assert payments.parse_claim(sms) == (200, "QAB1CD2EF3", False)
     assert payments.parse_claim("KSH200 sent. M-PESA Ref: QAB1CD2EF3") == (200, "QAB1CD2EF3", False)
@@ -385,6 +388,25 @@ def test_manual_airtel_payment_uses_provider_specific_reference_and_confirmation
         assert (payment["provider"], payment["status"]) == ("airtel_money", "paid")
         assert "Airtel Money payment" in out.bodies(A)[-1]
         assert "Airtel Money" in out.bodies(OWNER)[-1]
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
+def test_manual_claim_accepts_a_two_digit_deposit_and_preserves_reference_digits():
+    async def run():
+        pool, out, salon = await build(DSN)
+        await manual_salon(pool, salon)
+        await pool.execute("UPDATE salons SET deposit_kes=50 WHERE id=$1::uuid", salon)
+        async with client() as c:
+            await to_pay(c, out, pool, mid="small-deposit")
+            await post(c, payload(A, "50 QBA1GD3EG2", mid="small-deposit-claim"))
+        payment = await pool.fetchrow("SELECT status, amount_kes, mpesa_receipt FROM payments")
+        assert (payment["status"], payment["amount_kes"], payment["mpesa_receipt"]) == (
+            "pending", 50, "QBA1GD3EG2")
+        assert "Please wait and do not pay again" in out.bodies(A)[-1]
+        assert "QBA1GD3EG2" in out.bodies(OWNER)[-1]
+        assert await pool.fetchval("SELECT hold_expires_at > now() + interval '20 minutes' FROM bookings")
         await pool.close()
     asyncio.run(run())
 

@@ -8,12 +8,18 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from app.ai.llm import Extractor, _BREAKER, _failure_kind, rule_extract, strip_reasoning
+from app.ai.llm import Extractor, _BREAKER, _failure_kind, rule_extract, safe_chat_endpoint, strip_reasoning
 
 DSN = os.environ.get("TEST_DATABASE_URL")
 needs_db = pytest.mark.skipif(not DSN, reason="needs TEST_DATABASE_URL")
 
 SERVICES = [{"name": "Fade", "aliases": []}]
+
+
+def test_model_endpoint_evidence_never_includes_credentials_or_query_parameters():
+    assert safe_chat_endpoint("https://judge:secret@api.meta.ai/v1?token=hidden#debug") == (
+        "https://api.meta.ai/v1/chat/completions"
+    )
 
 
 def settings(**over):
@@ -131,5 +137,7 @@ def test_model_info_names_the_active_backend():
             r = await c.get("/model-info", headers={"x-ops-key": "test-ops-key"})
             assert r.json()["backend"] == "baseten"
             assert r.json()["model"] == "muse-spark-1.3"
+            assert r.json()["endpoint"] == "https://primary.test/v1/chat/completions"
+            assert "k" not in r.json()["endpoint"]
         await pool.close()
     asyncio.run(run())

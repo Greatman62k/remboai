@@ -1,6 +1,7 @@
 """Photo matching: a hairstyle picture becomes one of this business's services, chosen by code from the model's suggestion."""
 import asyncio
 import base64
+import json
 import os
 
 import pytest
@@ -85,6 +86,12 @@ def test_a_photo_becomes_a_service_and_the_booking_carries_on_from_there():
             [v] = out.vision
             assert v["image"] == "data:image/jpeg;base64," + base64.b64encode(b"OggS-fake-voice-note").decode()
             assert '"Fade"' in v["prompt"] and '"Silk press"' in v["prompt"] and "never identify" in v["prompt"]
+            trace = await pool.fetchrow("SELECT outcome, model_requests FROM agent_turns WHERE message_id='p1'")
+            requests = trace["model_requests"] if isinstance(trace["model_requests"], list) else json.loads(trace["model_requests"])
+            assert trace["outcome"] == "vision_photo_match"
+            assert requests[0]["model_id"] == "muse-spark-1.3"
+            assert requests[0]["endpoint"] == "https://primary.test/v1/chat/completions"
+            assert requests[0]["request_id"] == "chatcmpl-vision-1"
             await post(c, payload(A, "kesho mchana", mid="t1"))
             assert "earliest" in out.bodies(A)[-1].lower() and "Fade" in out.bodies(A)[-1]
         await pool.close()

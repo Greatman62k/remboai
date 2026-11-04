@@ -26,8 +26,9 @@ log = logging.getLogger("rembo.agent.bare")
 _LEXICON = lexicon.load()
 _PRODUCT_TERMS = _LEXICON.pattern(*(lexicon.STRONG + lexicon.SPECIFIC))
 _PRODUCT_REPLY = re.compile(
-    r"\b(?:remboai|salons?|barbers?hop|barber shop|kinyozi|saluni|bookings?|appointments?|miadi|"
-    r"registration|register|sajili|kusajili|invite link)\b", re.I)
+    r"\b(?:remboai|salons?|barbers?|barbers?hop|shop|business|biashara|kinyozi|saluni|"
+    r"bookings?|appointments?|miadi|setup|registration|register|sajili|kusajili|"
+    r"customer|mteja|invite link|deposit|payment)\b", re.I)
 _BOOKING_FOLLOWUPS = _LEXICON.pattern("booking_followups")
 
 
@@ -164,11 +165,13 @@ async def turn(ctx, msg, prior_state: dict, history: list[dict]) -> bool:
     if blocked:
         await guard.strike(ctx.pool, msg.sender, "bare_agent_injection")
     rate_limited = False
-    if not blocked and ctx.redis is not None:
+    if not blocked and not scope_redirect and ctx.redis is not None:
         rate_limited = not await RateLimiter(ctx.redis, ctx.settings).llm_allowed(
             scope, kind="bare", limit=limit
         )
-    allowed = not blocked and not rate_limited
+    # Unknown and unrelated topics get a fixed safe redirect before the model.
+    # The model only receives requests that passed this configured scope gate.
+    allowed = not blocked and not scope_redirect and not rate_limited
     if allowed:
         messages.append({"role": "user", "content": text[:500]})
 
@@ -192,13 +195,28 @@ async def turn(ctx, msg, prior_state: dict, history: list[dict]) -> bool:
             model_error = True
             log.exception("bare assistant failed; using the configured model failure reply")
 
-    proposed = _clean(run.lead) if run and run.lead else ""
+    raw_proposed = run.lead if run and run.lead else ""
+    proposed = _clean(raw_proposed)
     social_reply = bool(smalltalk.opener(proposed) or smalltalk.thanks(proposed))
-    unsafe_reply = bool(proposed and (
-        matches_any(configured["unsafe_reply_patterns"], proposed)
-        or (scope_redirect and not _PRODUCT_REPLY.search(proposed) and not social_reply)
+    identity_question = matches_any(configured["identity_question_patterns"], text)
+    identity_claim = matches_any(configured["identity_claim_patterns"], raw_proposed)
+    identity_unsafe = identity_claim or (
+        identity_question and not matches_any(configured["identity_safe_reply_patterns"], raw_proposed)
+    )
+    business_selection_unsafe = bool(raw_proposed and matches_any(
+        configured["business_selection_reply_patterns"], raw_proposed
     ))
-    if blocked or unsafe_reply:
+    syntax_unsafe = bool(raw_proposed and (
+        matches_any(configured["unsafe_reply_patterns"], raw_proposed)
+        or matches_any(configured["out_of_scope_patterns"], raw_proposed)
+    ))
+    scope_unsafe = bool(proposed and not _PRODUCT_REPLY.search(proposed) and not social_reply)
+    unsafe_reply = syntax_unsafe or scope_unsafe or identity_unsafe or business_selection_unsafe
+    if identity_unsafe and identity_question:
+        reply_key = "identity_unverified_reply"
+    elif business_selection_unsafe:
+        reply_key = "business_link_required_reply"
+    elif blocked or scope_redirect or unsafe_reply:
         reply_key = "out_of_scope_reply"
     elif rate_limited:
         reply_key = "rate_limited_reply"
@@ -221,9 +239,13 @@ async def turn(ctx, msg, prior_state: dict, history: list[dict]) -> bool:
     await save_stranger(ctx, msg.sender, after)
     if blocked:
         outcome = "bare_guardrail"
-    elif unsafe_reply:
+    elif identity_unsafe:
+        outcome = "bare_identity_guardrail"
+    elif business_selection_unsafe:
+        outcome = "bare_business_selection_guardrail"
+    elif syntax_unsafe:
         outcome = "bare_output_guardrail"
-    elif scope_redirect:
+    elif scope_unsafe:
         outcome = "bare_scope_redirect"
     elif rate_limited:
         outcome = "bare_rate_limited"
@@ -233,13 +255,16 @@ async def turn(ctx, msg, prior_state: dict, history: list[dict]) -> bool:
         outcome = "bare_agent"
     elif run and run.problems:
         outcome = "bare_grounding_fallback"
+    elif scope_redirect:
+        outcome = "bare_scope_redirect"
     else:
         outcome = "bare_fallback"
-    problems = ["bare_output_guardrail: out-of-scope answer or code was suppressed"] if unsafe_reply else []
+    problems = ["bare_output_guardrail: unsafe reply was suppressed"] if unsafe_reply else []
     await _trace(ctx, mid=mid, salon={"id": None}, sender=mask(msg.sender), user_text=text,
                  steps=run.steps if run else [], final_text=body, buttons=None, state_after=after,
                  outcome=outcome, grounded=False if unsafe_reply or (run and run.problems) else (True if not reply_key and run else None),
                  problems=problems or (run.problems if run else []), model=run.first_model if run else None,
-                 calls=run.calls if run else 0, ms=run.ms if run else 0)
+                 calls=run.calls if run else 0, ms=run.ms if run else 0,
+                 model_requests=run.model_requests if run else [])
     await outbound.send_plain(ctx, msg.sender, body)
     return True

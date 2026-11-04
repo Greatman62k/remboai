@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 736" role="img" aria-labelledby="t d">
+  <title id="t">Life of one message</title>
+  <desc id="d">Every message passes the same guarded path: a verified webhook, a durable queue in Postgres, a stale-message check for Telegram, abuse screening and limits, the Muse Spark agent loop with code-validated tools, a grounding check on the reply, and a de-duplicated send.</desc>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Helvetica, Arial, sans-serif; text-anchor: middle; }
+    .t { font-weight: 700; }
+    .s { font-weight: 600; }
+    .m { font-weight: 600; fill: #fff; text-anchor: start; }
+    .h { font-weight: 700; fill: #fff; text-anchor: start; }
+    .d { font-weight: 500; fill: #c9ccd6; text-anchor: start; }
+    .k { fill: #000; }
+    .w { fill: #fff; }
+    .ln { stroke: #fff; stroke-width: 3; fill: none; }
+  </style>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerUnits="userSpaceOnUse" markerWidth="13" markerHeight="13" orient="auto"><path d="M0 0L10 5L0 10z" fill="#fff"/></marker>
+  </defs>
+  <rect width="900" height="736" rx="16" fill="#000"/>
+    <text class="h" x="24" y="34" style="font-size:20px;">Life of one message</text>
+  <rect x="24" y="58" width="260" height="54" rx="27" fill="#fff"/>
+  <text class="t k" x="154.0" y="91.0" style="font-size:17px">Telegram or WhatsApp</text>
+  <text class="d" x="312" y="90" style="font-size:14.5px;">A text, voice note or photo from the customer</text>
+  <path class="ln" d="M154 112V142" marker-end="url(#a)"/>
+  <rect x="24" y="142" width="260" height="54" rx="10" fill="#fff"/>
+  <text class="t k" x="154.0" y="175.0" style="font-size:17px">Webhook</text>
+  <text class="d" x="312" y="174" style="font-size:14.5px;">Secret or signature verified before the body is read</text>
+  <path class="ln" d="M154 196V226" marker-end="url(#a)"/>
+  <rect x="24" y="226" width="260" height="54" rx="10" fill="#FF7A00"/>
+  <text class="t w" x="154.0" y="249.0" style="font-size:17px">Durable queue</text>
+  <text class="s w" x="154.0" y="269.0" style="font-size:14px">Postgres</text>
+  <text class="d" x="312" y="258" style="font-size:14.5px;">Kept in order per sender, retried, leases fenced to one worker</text>
+  <path class="ln" d="M154 280V310" marker-end="url(#a)"/>
+  <rect x="24" y="310" width="260" height="54" rx="10" fill="#fff"/>
+  <text class="t k" x="154.0" y="343.0" style="font-size:17px">Stale check</text>
+  <text class="d" x="312" y="342" style="font-size:14.5px;">Telegram message over 30 minutes old: one resend notice, not acted on</text>
+  <path class="ln" d="M154 364V394" marker-end="url(#a)"/>
+  <rect x="24" y="394" width="260" height="54" rx="10" fill="#fff"/>
+  <text class="t k" x="154.0" y="427.0" style="font-size:17px">Abuse screen and limits</text>
+  <text class="d" x="312" y="426" style="font-size:14.5px;">Text normalised, per-sender rate limits, strike-based blocking</text>
+  <path class="ln" d="M154 448V478" marker-end="url(#a)"/>
+  <rect x="24" y="478" width="260" height="54" rx="10" fill="#0057FF"/>
+  <text class="t w" x="154.0" y="501.0" style="font-size:17px">Muse Spark agent loop</text>
+  <text class="s w" x="154.0" y="521.0" style="font-size:14px">Meta model</text>
+  <text class="d" x="312" y="510" style="font-size:14.5px;">Decides each step; every tool call is validated and run by code</text>
+  <path class="ln" d="M154 532V562" marker-end="url(#a)"/>
+  <rect x="24" y="562" width="260" height="54" rx="10" fill="#fff"/>
+  <text class="t k" x="154.0" y="595.0" style="font-size:17px">Grounding check</text>
+  <text class="d" x="312" y="594" style="font-size:14.5px;">Prices, times, links and 'paid' must be backed by facts or tools</text>
+  <path class="ln" d="M154 616V646" marker-end="url(#a)"/>
+  <rect x="24" y="646" width="260" height="54" rx="27" fill="#00A651"/>
+  <text class="t w" x="154.0" y="679.0" style="font-size:17px">Send once</text>
+  <text class="d" x="312" y="678" style="font-size:14.5px;">A retried message resends the stored reply, never asks the model twice</text>
+</svg>

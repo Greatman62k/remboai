@@ -9,8 +9,7 @@ import re
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-from app import binding, owner
-from app.channels import invites
+from app import owner
 from app.contact import display_contact
 from app.messages import t
 
@@ -144,15 +143,9 @@ class AdminToolbox:
         return {"summary": summary}
 
     async def t_invite_link(self, _a: dict) -> dict:
-        if not re.search(r"\b(?:invite|invitation|mwaliko|share)\b", self.user_text, re.I):
+        if not re.search(r"\b(?:invite|invitation|mwaliko|share|qr|msimbo)\b", self.user_text, re.I):
             return {"error": "the owner did not ask for an invite link"}
-        slug = await binding.ensure_slug(self.ctx.pool, self.salon["id"], self.salon["name"])
-        channel = invites.channel_of(self.to)
-        from app.channels.telegram import bot_username
-
-        username = await bot_username(getattr(self.ctx, "wa", None)) if channel == "tg" else None
-        number = getattr(self.ctx.settings, "central_whatsapp_number", "") if channel == "wa" else ""
-        link = invites.invite_for(channel, slug, username=username, number=number)
+        link = await owner.invite_link(self.ctx, self.salon, self.to)
         self.facts.required_literals.add(link)
         return {"invite_link": link}
 

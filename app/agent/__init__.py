@@ -23,7 +23,7 @@ from app.channels import outbound
 from app.channels.whatsapp import mask
 from app.ratelimit import RateLimiter
 
-from .client import AgentModel, AgentUnavailable
+from .client import AgentModel, AgentUnavailable, request_evidence
 from .grounding import MAX_REPLY, check
 from .policy import PolicyError, load_policy, with_tool_descriptions
 from app.messages import ensure_help_hint
@@ -67,16 +67,17 @@ async def _resend(ctx, salon: dict, chat, row) -> None:
         await chat.text(row["final_text"])
 
 
-async def _trace(ctx, *, mid, salon, sender, user_text, steps, final_text, buttons, state_after, outcome, grounded, problems, model, calls, ms) -> None:
+async def _trace(ctx, *, mid, salon, sender, user_text, steps, final_text, buttons, state_after, outcome, grounded, problems, model, calls, ms, model_requests=None) -> None:
     try:
         await ctx.pool.execute(
-            "INSERT INTO agent_turns (message_id, salon_id, sender, user_text, steps, final_text, buttons, state_after, outcome, grounded, problems, backend, model, model_calls, ms) "
-            "VALUES ($1,$2::uuid,$3,$4,$5::jsonb,$6,$7::jsonb,$8::jsonb,$9,$10,$11::jsonb,$12,$13,$14,$15) "
+            "INSERT INTO agent_turns (message_id, salon_id, sender, user_text, steps, final_text, buttons, state_after, outcome, grounded, problems, backend, model, model_calls, ms, model_requests) "
+            "VALUES ($1,$2::uuid,$3,$4,$5::jsonb,$6,$7::jsonb,$8::jsonb,$9,$10,$11::jsonb,$12,$13,$14,$15,$16::jsonb) "
             "ON CONFLICT (message_id) DO UPDATE SET steps=EXCLUDED.steps, final_text=EXCLUDED.final_text, buttons=EXCLUDED.buttons, "
-            "state_after=EXCLUDED.state_after, outcome=EXCLUDED.outcome, grounded=EXCLUDED.grounded, problems=EXCLUDED.problems, model_calls=EXCLUDED.model_calls, ms=EXCLUDED.ms",
+            "state_after=EXCLUDED.state_after, outcome=EXCLUDED.outcome, grounded=EXCLUDED.grounded, problems=EXCLUDED.problems, model_calls=EXCLUDED.model_calls, ms=EXCLUDED.ms, model_requests=EXCLUDED.model_requests",
             mid, salon["id"], sender, user_text[:500], json.dumps(steps, ensure_ascii=False, default=str), final_text,
             json.dumps(buttons) if buttons else None, json.dumps(state_after, ensure_ascii=False, default=str) if state_after else None,
-            outcome, grounded, json.dumps(problems), model[0] if model else None, model[1] if model else None, calls, ms)
+            outcome, grounded, json.dumps(problems), model[0] if model else None, model[1] if model else None, calls, ms,
+            json.dumps(model_requests or [], ensure_ascii=False, default=str))
     except Exception:
         log.exception("could not write the agent trace")
 
@@ -122,6 +123,7 @@ class Run:
     first_model: tuple[str, str] | None = None
     calls: int = 0
     ms: int = 0
+    model_requests: list[dict] = field(default_factory=list)
 
 
 async def drive(ctx, system: str, messages: list[dict], toolbox, tools: list[dict], repair_prompt: str) -> Run:
@@ -138,6 +140,7 @@ async def drive(ctx, system: str, messages: list[dict], toolbox, tools: list[dic
                 break
             step = await model.step(system, messages, tools)
             run.first_model = run.first_model or (step.backend, step.model)
+            run.model_requests.append(request_evidence(step))
             if not step.calls:
                 final_text = step.text
                 break
@@ -241,7 +244,7 @@ async def turn(ctx, salon: dict, client: dict, st: dict, services: list[dict], t
     if not outcomes and not run.lead:
         await _trace(ctx, mid=mid, salon=salon, sender=mask(chat.to), user_text=text, steps=run.steps, final_text=None, buttons=None, state_after=None,
                      outcome="unavailable" if run.unavailable else "keyword_flow", grounded=False if run.problems else None, problems=run.problems,
-                     model=run.first_model, calls=run.calls, ms=run.ms)
+                     model=run.first_model, calls=run.calls, ms=run.ms, model_requests=run.model_requests)
         return False
     body, buttons = _compose(outcomes, run.lead)
     if not body:
@@ -251,7 +254,8 @@ async def turn(ctx, salon: dict, client: dict, st: dict, services: list[dict], t
     stamp = datetime.now(ZoneInfo("UTC")).isoformat()
     after = {**toolbox.st, "history": (toolbox.base_history + [{"role": "assistant", "text": body, "ts": stamp}])[-guard.MAX_HISTORY * 2:]}
     await _trace(ctx, mid=mid, salon=salon, sender=mask(chat.to), user_text=text, steps=run.steps, final_text=body, buttons=buttons, state_after=after,
-                 outcome="agent" if run.lead else "templates", grounded=not run.problems, problems=run.problems, model=run.first_model, calls=run.calls, ms=run.ms)
+                 outcome="agent" if run.lead else "templates", grounded=not run.problems, problems=run.problems,
+                 model=run.first_model, calls=run.calls, ms=run.ms, model_requests=run.model_requests)
     if buttons:
         await bf._reply_buttons(ctx, salon["id"], chat.to, toolbox.st, chat, body, buttons)
     else:
@@ -324,12 +328,13 @@ async def owner_turn(ctx, salon: dict, to: str, text: str, tz: ZoneInfo, now: da
     if not body:
         await _trace(ctx, mid=mid, salon=salon, sender="owner", user_text=text, steps=run.steps, final_text=None, buttons=None, state_after=None,
                      outcome="unavailable" if run.unavailable else "keyword_flow", grounded=False if run.problems else None, problems=run.problems,
-                     model=run.first_model, calls=run.calls, ms=run.ms)
+                     model=run.first_model, calls=run.calls, ms=run.ms, model_requests=run.model_requests)
         return False
     if first_reply:
         body = ensure_help_hint(body, lang)
     await _trace(ctx, mid=mid, salon=salon, sender="owner", user_text=text, steps=run.steps, final_text=body, buttons=None, state_after=None,
-                 outcome="agent" if run.lead else "templates", grounded=not run.problems, problems=run.problems, model=run.first_model, calls=run.calls, ms=run.ms)
+                 outcome="agent" if run.lead else "templates", grounded=not run.problems, problems=run.problems,
+                 model=run.first_model, calls=run.calls, ms=run.ms, model_requests=run.model_requests)
     new_hist = [*history[-4:], {"role": "user", "content": text[:300]}, {"role": "assistant", "content": body[:500]}]
     history_at = datetime.now(ZoneInfo("UTC")).isoformat()
     await ctx.pool.execute(
