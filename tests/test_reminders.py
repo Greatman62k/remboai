@@ -288,21 +288,86 @@ async def test_a_finished_visit_is_checked_once_and_a_yes_earns_feedback():
     staff = await pool.fetchval("SELECT id::text FROM staff")
     svc = await pool.fetchval("SELECT id::text FROM services WHERE name='Fade'")
     a = await pool.fetchval("INSERT INTO clients (salon_id, wa_id, lang) VALUES ($1::uuid,'254711000001','en') RETURNING id::text", salon)
-    ended = datetime.now(NBO) - timedelta(hours=1)
+    ends_at = datetime.now(NBO) + timedelta(minutes=5)
     booking = await pool.fetchval(
         "INSERT INTO bookings (salon_id, staff_id, service_id, client_id, starts_at, ends_at, status) VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,'confirmed') RETURNING id::text",
-        salon, staff, svc, a, ended - timedelta(minutes=45), ended)
+        salon, staff, svc, a, ends_at - timedelta(minutes=30), ends_at)
+    # The customer is not asked before the 30-minute service is scheduled to finish.
+    assert await ask_about_visits(pool, ctx) == 0
+    ended = datetime.now(NBO) - timedelta(minutes=5)
+    await pool.execute("UPDATE bookings SET starts_at=$2, ends_at=$3 WHERE id=$1::uuid",
+                       booking, ended - timedelta(minutes=30), ended)
+    # Once its scheduled end has passed, the next sweep asks without a 30-minute grace period.
     assert await ask_about_visits(pool, ctx) == 1
     assert "attended" in out.bodies("254711000001")[-1]
     assert await ask_about_visits(pool, ctx) == 0
     assert len(out.bodies("254711000001")) == 1
     async with client() as c:
         await post(c, payload("254711000001", reply_id=f"visit-yes:{booking}", mid="v1"))
-        assert "How was the service" in out.bodies("254711000001")[-1]
+        assert "How did it go" in out.bodies("254711000001")[-1]
         await post(c, payload("254711000001", "5, Brian was great", mid="v2"))
-        assert "Thank you for the feedback" in out.bodies("254711000001")[-1]
+        assert "Thank you for the lovely feedback" in out.bodies("254711000001")[-1]
     row = await pool.fetchrow("SELECT attended, feedback FROM visit_checks")
     assert (row["attended"], row["feedback"]) == (True, "5, Brian was great")
+    await pool.close()
+
+@pytest.mark.asyncio
+async def test_model_handles_positive_invitation_and_negative_feedback_with_owner_alerts():
+    import json
+    import os
+    dsn = os.environ.get("TEST_DATABASE_URL")
+    if not dsn:
+        pytest.skip("needs TEST_DATABASE_URL")
+    from tests.harness import build, client, payload, post
+    pool, out, salon = await build(dsn, agent_mode="on")
+    owner = "254799000009"
+    await pool.execute("UPDATE salons SET owner_wa_id=$2 WHERE id=$1::uuid", salon, owner)
+    staff = await pool.fetchval("SELECT id::text FROM staff")
+    svc = await pool.fetchval("SELECT id::text FROM services WHERE name='Fade'")
+    customer = "254711000009"
+    cid = await pool.fetchval(
+        "INSERT INTO clients (salon_id, wa_id, name, lang) VALUES ($1::uuid,$2,'Amina','en') RETURNING id::text",
+        salon, customer)
+    starts = datetime.now(NBO) - timedelta(hours=2)
+    booking = await pool.fetchval(
+        "INSERT INTO bookings (salon_id, staff_id, service_id, client_id, starts_at, ends_at, status) "
+        "VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,'confirmed') RETURNING id::text",
+        salon, staff, svc, cid, starts, starts + timedelta(minutes=45))
+    await pool.execute(
+        "INSERT INTO visit_checks (booking_id, salon_id, client_id) VALUES ($1::uuid,$2::uuid,$3::uuid)",
+        booking, salon, cid)
+    await pool.execute(
+        "INSERT INTO conversations (salon_id, wa_id, state) VALUES ($1::uuid,$2,$3::jsonb)",
+        salon, customer, json.dumps({"history": [{"role": "assistant", "text": "Were you attended?"}]}))
+
+    def scripted_reply(body):
+        stage = json.loads(body["messages"][-1]["content"])["stage"]
+        replies = {
+            "WELCOME": "SENTIMENT: POSITIVE\nREPLY: Thank you for visiting Zuri Cuts for your Fade. We would love to welcome you back. How did it go?",
+            "FEEDBACK": "SENTIMENT: NEGATIVE\nREPLY: I'm sorry the experience was disappointing. Could you tell us what went wrong? I've shared your feedback with the owner, and we'll use it to improve.",
+            "DETAILS": "SENTIMENT: NEGATIVE\nREPLY: I'm sorry that happened. Thank you for explaining. I've shared the details with the owner, and we'll use your feedback to improve.",
+        }
+        return "reply", replies[stage]
+
+    out.agent = scripted_reply
+    async with client() as c:
+        await post(c, payload(customer, reply_id=f"visit-yes:{booking}", mid="vf-yes"))
+        assert "How did it go?" in out.bodies(customer)[-1]
+        await post(c, payload(customer, "The barber was rude and the cut looked uneven.", mid="vf-negative"))
+        assert "Could you tell us what went wrong?" in out.bodies(customer)[-1]
+        await post(c, payload(customer, "The wait was too long.", mid="vf-detail"))
+        assert "use your feedback to improve" in out.bodies(customer)[-1]
+
+    owner_messages = out.bodies(owner)
+    assert len(owner_messages) == 2
+    assert "The barber was rude and the cut looked uneven." in owner_messages[0]
+    assert "The wait was too long." in owner_messages[1]
+    saved_feedback = await pool.fetchval("SELECT feedback FROM visit_checks WHERE booking_id=$1::uuid", booking)
+    assert saved_feedback == "The barber was rude and the cut looked uneven.\nThe wait was too long."
+    saved_state = await pool.fetchval("SELECT state FROM conversations WHERE salon_id=$1::uuid AND wa_id=$2", salon, customer)
+    assert "state" not in saved_state
+    assert len(out.agent_requests) == 3
+    assert all("tools" not in request for request in out.agent_requests)
     await pool.close()
 
 @pytest.mark.asyncio
@@ -328,7 +393,7 @@ async def test_a_missed_visit_alerts_the_owner_and_offers_a_way_back():
     async with client() as c:
         n_owner = len(out.to("254799999999"))
         await post(c, payload("254711000002", reply_id=f"visit-no:{booking}", mid="w1"))
-        assert "owner has been told" in out.bodies("254711000002")[-1]
+        assert "shared your feedback with the owner" in out.bodies("254711000002")[-1]
         assert "NOT attended" in out.bodies("254799999999")[-1] and len(out.to("254799999999")) == n_owner + 1
         n_b = len(out.to("254711000001"))
         await post(c, payload("254711000001", reply_id=f"visit-no:{booking}", mid="w2"))

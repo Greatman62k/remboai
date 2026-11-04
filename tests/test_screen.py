@@ -6,7 +6,7 @@ from datetime import date
 import pytest
 
 from app.screen import relevant, route
-from tests.harness import build, client, open_day, payload, post, post_tg, tg_update
+from tests.harness import bind_telegram_customer, build, client, open_day, payload, post, post_tg, tg_update
 
 DSN = os.environ.get("TEST_DATABASE_URL")
 needs_db = pytest.mark.skipif(not DSN, reason="needs TEST_DATABASE_URL")
@@ -86,6 +86,7 @@ def test_a_follow_up_answer_in_the_middle_of_a_booking_is_not_screened():
 def test_the_screen_applies_on_telegram_too():
     async def run():
         pool, out, salon = await build(DSN)
+        await bind_telegram_customer(pool, 5001)
         async with client() as c:
             await post_tg(c, tg_update(1, 5001, "what's the weather in Nairobi"))
         assert out.calls == [] and "booking assistant" in out.tg_bodies("5001")[0].lower()

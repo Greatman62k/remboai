@@ -21,12 +21,12 @@
   <rect width="520" height="612" rx="16" fill="#000"/>
 
   <!-- Channels -->
-  <rect x="24" y="24" width="228" height="60" rx="10" fill="#25D366"/>
+  <rect x="24" y="24" width="228" height="60" rx="30" fill="#25D366"/>
   <text class="t k" x="138" y="51">WhatsApp</text>
-  <text class="s k" x="138" y="71">One central number</text>
-  <rect x="268" y="24" width="228" height="60" rx="10" fill="#26A5E4"/>
+  <text class="s k" x="138" y="71">Built, awaiting verification</text>
+  <rect x="268" y="24" width="228" height="60" rx="30" fill="#26A5E4"/>
   <text class="t k" x="382" y="51">Telegram</text>
-  <text class="s k" x="382" y="71">One bot for every salon</text>
+  <text class="s k" x="382" y="71">Live: one bot, every salon</text>
   <path class="wa" d="M138 84V124" marker-start="url(#w)" marker-end="url(#w)"/>
   <path class="tg" d="M382 84V124" marker-start="url(#e)" marker-end="url(#e)"/>
 
@@ -34,11 +34,11 @@
   <rect x="24" y="124" width="472" height="152" rx="12" fill="#FF7A00"/>
   <text class="t w" x="260" y="155" style="font-size:19px">RemboAI (FastAPI)</text>
   <g fill="#000">
-    <rect x="36" y="174" width="144" height="40" rx="8"/>
-    <rect x="188" y="174" width="144" height="40" rx="8"/>
-    <rect x="340" y="174" width="144" height="40" rx="8"/>
-    <rect x="112" y="222" width="144" height="40" rx="8"/>
-    <rect x="264" y="222" width="144" height="40" rx="8"/>
+    <rect x="36" y="174" width="144" height="40" rx="20"/>
+    <rect x="188" y="174" width="144" height="40" rx="20"/>
+    <rect x="340" y="174" width="144" height="40" rx="20"/>
+    <rect x="112" y="222" width="144" height="40" rx="20"/>
+    <rect x="264" y="222" width="144" height="40" rx="20"/>
   </g>
   <text class="s w" x="108" y="199">Conversation</text>
   <text class="s w" x="260" y="199">Bookings</text>
@@ -52,23 +52,23 @@
   <path class="ln" d="M260 276V400" marker-end="url(#a)"/>
 
   <!-- State and money -->
-  <rect x="24" y="316" width="212" height="68" rx="10" fill="#fff"/>
+  <rect x="24" y="316" width="212" height="68" rx="34" fill="#fff"/>
   <text class="t k" x="130" y="344">Postgres and Redis</text>
   <text class="s k" x="130" y="366">Slot exclusion constraint</text>
-  <rect x="284" y="316" width="212" height="68" rx="10" fill="#00A651"/>
+  <rect x="284" y="316" width="212" height="68" rx="34" fill="#00A651"/>
   <text class="t k" x="390" y="344">Mobile money</text>
-  <text class="s k" x="390" y="366">M-PESA STK / manual routes</text>
+  <text class="s k" x="390" y="366">STK or manual transfer</text>
 
   <!-- Meta AI -->
   <rect x="24" y="400" width="472" height="188" rx="12" fill="#000" stroke="#0057FF" stroke-width="3"/>
   <text class="s w" x="40" y="426" style="text-anchor:start;font-weight:700">Model and code fallback (speech runs self-hosted)</text>
-  <rect x="36" y="438" width="220" height="64" rx="10" fill="#0057FF"/>
+  <rect x="36" y="438" width="220" height="64" rx="32" fill="#0057FF"/>
   <text class="t w" x="146" y="466">Muse Spark 1.3</text>
-  <text class="s w" x="146" y="488">Decides steps, reads photos</text>
-  <rect x="264" y="438" width="220" height="64" rx="10" fill="#E5101D"/>
+  <text class="s w" x="146" y="488">Steps, photos, receipts</text>
+  <rect x="264" y="438" width="220" height="64" rx="32" fill="#E5101D"/>
   <text class="t w" x="374" y="466">Code fallback</text>
   <text class="s w" x="374" y="488">If no model is usable</text>
-  <rect x="36" y="510" width="448" height="64" rx="10" fill="#0057FF"/>
+  <rect x="36" y="510" width="448" height="64" rx="32" fill="#0057FF"/>
   <text class="t w" x="260" y="538">Omnilingual ASR</text>
   <text class="s w" x="260" y="560">omniASR_LLM_1B_v2</text>
 </svg>

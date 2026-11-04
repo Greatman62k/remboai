@@ -40,8 +40,17 @@ async def account(pool, salon_id: str) -> dict | None:
 _CODE = re.compile(r"\b(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*\d)[A-Z0-9]{6,20}\b")
 _NUMERIC_REFERENCE = re.compile(r"\b\d{8,20}\b")
 _STRICT_ALPHA_REFERENCE = re.compile(r"(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*\d)[A-Z0-9]{6,20}")
-# A KES amount: 3 to 6 digits, never part of a longer digit run (phone and till numbers do not match).
-_AMOUNT = re.compile(r"(?<!\d)(\d{3,6})(?!\d)")
+# Currency-prefixed amounts may be small (for example Ksh50.00); bare amounts must
+# have at least three digits unless they directly precede a transaction reference.
+# Boundaries prevent phone, till and transaction-reference digits being read as money.
+_AMOUNT = re.compile(
+    r"(?<![A-Z0-9])(?:KES|KSH)\s*(\d{1,6})(?!\d)|"
+    r"(?<![A-Z0-9])(\d{3,6})(?![A-Z0-9])"
+)
+# Small deposits need explicit context so short date/time components in a pasted SMS are not treated as amounts.
+_SMALL_AMOUNT = re.compile(
+    r"(?<![A-Z0-9])(\d{1,2})\s+(?=[A-Z0-9]{6,20}\b)"
+)
 
 MANUAL_HOLD = "30 minutes"
 
@@ -73,7 +82,9 @@ def parse_claim(text: str) -> tuple[int | None, str | None, bool]:
     code = reference.group(0) if reference else numeric_reference.group(0) if numeric_reference else None
     if code and mpesa.normalize_msisdn(code):
         code = None
-    found = sorted({int(m.group(1)) for m in _AMOUNT.finditer(upper)})
+    found = {int(value) for m in _AMOUNT.finditer(upper) if (value := m.group(1) or m.group(2))}
+    found.update(int(value) for m in _SMALL_AMOUNT.finditer(upper) if (value := m.group(1) or m.group(2)))
+    found = sorted(found)
     if len(found) > 1:
         return None, code, True
     return (found[0] if found else None), code, False

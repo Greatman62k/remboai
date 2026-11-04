@@ -471,6 +471,9 @@ def test_real_safety_and_legal_messages_are_still_handed_over():
     assert guard.classify("nitaenda polisi kukushtaki")[0] == "legal"
     assert guard.classify("I want to speak to the owner")[0] == "human_request"
     assert guard.classify("I have a lawyer")[0] == "legal"
+    assert guard.classify("Nitajiua") == ("emergency", "sw")
+    assert guard.classify("Nitajiumiza") == ("emergency", "sw")
+    assert guard.classify("Nataka kujiumiza") == ("emergency", "sw")
 
 
 @needs_db

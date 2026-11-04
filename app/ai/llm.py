@@ -11,6 +11,7 @@ import time as clock
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Literal
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from pydantic import BaseModel, ValidationError
@@ -20,6 +21,20 @@ from app.ratelimit import RateLimiter
 from app.timeparse import parse_day, parse_time, parse_window
 
 log = logging.getLogger("rembo.llm")
+
+
+def safe_chat_endpoint(base_url: str) -> str:
+    """Return the model endpoint without credentials, query parameters, or fragments."""
+    parts = urlsplit((base_url or "").strip())
+    hostname = parts.hostname or ""
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    try:
+        port = f":{parts.port}" if parts.port else ""
+    except ValueError:
+        port = ""
+    path = parts.path.rstrip("/") + "/chat/completions"
+    return urlunsplit((parts.scheme, hostname + port, path, "", ""))
 
 Intent = Literal["book", "choose_slot", "cancel", "price_list", "hours", "greeting", "other"]
 

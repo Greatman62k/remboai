@@ -20,3 +20,8 @@ def test_caddy_proxies_ops_metrics_and_model_info_routes():
     caddy = (DEPLOY / "Caddyfile").read_text()
     matcher = next(line for line in caddy.splitlines() if "@app path" in line)
     assert "/metrics" in matcher and "/model-info" in matcher
+
+
+def test_database_backup_uses_production_env_file():
+    backup = (DEPLOY / "backup.sh").read_text()
+    assert '--env-file "${COMPOSE_ENV_FILE:-.env}"' in backup

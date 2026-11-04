@@ -808,6 +808,8 @@ async def _go_live(ctx, pid: str, sender: str, state: dict) -> bool:
     number = getattr(ctx.settings, "central_whatsapp_number", "") if channel == "wa" else ""
     link = invites.invite_for(channel, slug, username=username, number=number)
     await _clear_session(ctx.pool, sender)
+    from .owner import send_qr_sticker
+    await send_qr_sticker(ctx, sender, link, data["salon"])
     await _say(ctx, pid, sender, t(lang, "ob_live", salon=data["salon"], link=link))
     return True
 
@@ -1005,6 +1007,10 @@ async def advance(ctx, sender: str, pid: str, text: str, media: dict | None = No
         if low in YES_WORDS or low.strip(" .,!? ") == "ye":
             state["step"] = "ask_name"
             await _save_session(ctx.pool, sender, state)
+            if getattr(ctx, "agent", None) is not None and getattr(ctx.settings, "agent_mode", "off") == "on":
+                from .onboarding_agent import advance as agent_advance
+                if await agent_advance(ctx, sender, pid, words, state):
+                    return True
             await _say(ctx, pid, sender, t(lang, "ob_ask_name"))
         elif low in NO_WORDS:
             await clear_session(ctx.pool, sender)
@@ -1342,13 +1348,12 @@ async def begin(ctx, sender: str, pid: str, text: str) -> bool:
     is_platform_owner = platform.is_platform(ctx.settings, sender)
     step = "confirm_platform_owner" if is_platform_owner else "ask_name"
     state = {"step": step, "data": {}, "lang": smalltalk.language(text, detect_lang(text)), "stack": [],
-             "help_hint_sent": is_platform_owner or registration_start_only(text)}
+             "help_hint_sent": is_platform_owner}
     await _save_session(ctx.pool, sender, state)
     if is_platform_owner:
         await _say(ctx, pid, sender, t(state["lang"], "ob_platform_owner_confirm"))
         return True
-    if (not registration_start_only(text) and getattr(ctx, "agent", None) is not None
-            and getattr(ctx.settings, "agent_mode", "off") == "on"):
+    if getattr(ctx, "agent", None) is not None and getattr(ctx.settings, "agent_mode", "off") == "on":
         from .onboarding_agent import advance as agent_advance
         if await agent_advance(ctx, sender, pid, text, state):
             return True

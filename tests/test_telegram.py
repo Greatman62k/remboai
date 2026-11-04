@@ -1,12 +1,14 @@
 """Telegram as a second channel: same engine, same rules. Real app and Postgres; Telegram, Safaricom and the model are faked at the HTTP layer."""
 import asyncio
+import json
 import os
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from app.channels.telegram import Channels, parse_update, run_poller
-from tests.harness import CB_SECRET, build, callback, client, open_day, post_tg, tg_update
+from app import binding
+from tests.harness import CB_SECRET, bind_telegram_customer, build, callback, client, open_day, post_tg, tg_update
 
 DSN = os.environ.get("TEST_DATABASE_URL")
 needs_db = pytest.mark.skipif(not DSN, reason="needs TEST_DATABASE_URL")
@@ -73,6 +75,7 @@ def test_stale_telegram_backlog_gets_one_resend_notice_without_processing_old_re
 def test_a_telegram_customer_can_book_through_text_and_buttons():
     async def run():
         pool, out, salon = await build(DSN)
+        await bind_telegram_customer(pool, C1)
         await pool.execute("DELETE FROM salon_payment")
         await pool.execute("UPDATE salons SET deposit_kes=0")
         out.script["fade"] = {"intent": "book", "service": "Fade", "date": open_day().isoformat(), "window": "afternoon"}
@@ -96,6 +99,7 @@ def test_a_telegram_customer_can_book_through_text_and_buttons():
 def test_telegram_manual_till_does_not_ask_the_customer_for_a_phone_number():
     async def run():
         pool, out, salon = await build(DSN)
+        await bind_telegram_customer(pool, C1)
         await pool.execute("UPDATE salons SET owner_wa_id=$1 WHERE id=$2::uuid", f"tg:{OWNER}", salon)
         await pool.execute("UPDATE salon_payment SET manual=true, shortcode=NULL WHERE salon_id=$1::uuid", salon)
         out.script["fade"] = {"intent": "book", "service": "Fade", "date": open_day().isoformat(), "window": "afternoon"}
@@ -114,9 +118,32 @@ def test_telegram_manual_till_does_not_ask_the_customer_for_a_phone_number():
 
 
 @needs_db
+def test_platform_owner_business_owner_can_accept_manual_booking_availability_button():
+    async def run():
+        pool, out, salon = await build(DSN, platform_owner_id=f"tg:{OWNER}")
+        await bind_telegram_customer(pool, C1)
+        await pool.execute("UPDATE salons SET owner_wa_id=$1 WHERE id=$2::uuid", f"tg:{OWNER}", salon)
+        await pool.execute("UPDATE salon_payment SET manual=true, shortcode=NULL WHERE salon_id=$1::uuid", salon)
+        out.script["fade"] = {"intent": "book", "service": "Fade", "date": open_day().isoformat(), "window": "afternoon"}
+        async with client() as c:
+            await post_tg(c, tg_update(1, C1, "fade"))
+            await post_tg(c, tg_update(2, C1, data="slot:0"))
+            availability_id = owner_button(out, "availability:yes:")
+            await post_tg(c, tg_update(3, OWNER, data=availability_id))
+        assert await pool.fetchval("SELECT owner_check_status FROM bookings") == "approved"
+        assert "seven-digit till number: 5012345" in out.tg_bodies(str(C1))[-1]
+        assert "saved" in out.tg_bodies(str(OWNER))[-1].lower()
+        traced = await pool.fetchval("SELECT salon_id::text FROM conversation_trace WHERE message_id='tg:3'")
+        assert traced == salon
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
 def test_a_payment_screenshot_is_only_a_claim_until_the_owner_confirms_it():
     async def run():
         pool, out, salon = await build(DSN)
+        await bind_telegram_customer(pool, C1)
         await pool.execute("UPDATE salons SET owner_wa_id=$1 WHERE id=$2::uuid", f"tg:{OWNER}", salon)
         await pool.execute("UPDATE salon_payment SET manual=true, shortcode=NULL WHERE salon_id=$1::uuid", salon)
         out.payment_vision_answer = {
@@ -157,6 +184,11 @@ def test_a_payment_screenshot_is_only_a_claim_until_the_owner_confirms_it():
             assert "SAMUEL MUSYOKA" in owner_request["text"]
             assert "2026-11-03 10:47" in owner_request["text"]
             assert "UK3L70E32K" in owner_request["text"]
+            vision_trace = await pool.fetchrow("SELECT outcome, model_requests FROM agent_turns WHERE message_id='tg:5'")
+            vision_requests = vision_trace["model_requests"] if isinstance(vision_trace["model_requests"], list) else json.loads(vision_trace["model_requests"])
+            assert vision_trace["outcome"] == "vision_payment_claim_unverified"
+            assert vision_requests[0]["endpoint"] == "https://primary.test/v1/chat/completions"
+            assert vision_requests[0]["request_id"] == "chatcmpl-vision-1"
             yes_id = next(button["callback_data"] for row in owner_request["reply_markup"]["inline_keyboard"]
                           for button in row if button["callback_data"].startswith("till:yes:"))
             waiting_prompt = out.tg_to(str(C1))[-1]
@@ -176,6 +208,7 @@ def test_a_payment_screenshot_is_only_a_claim_until_the_owner_confirms_it():
 def test_payment_screenshot_provider_mismatch_is_rejected_and_amount_mismatch_goes_to_review():
     async def run():
         pool, out, salon = await build(DSN)
+        await bind_telegram_customer(pool, C1)
         await pool.execute("UPDATE salons SET owner_wa_id=$1 WHERE id=$2::uuid", f"tg:{OWNER}", salon)
         await pool.execute("UPDATE salon_payment SET manual=true, shortcode=NULL WHERE salon_id=$1::uuid", salon)
         out.script["fade"] = {"intent": "book", "service": "Fade", "date": open_day().isoformat(), "window": "afternoon"}
@@ -207,6 +240,8 @@ def test_payment_screenshot_provider_mismatch_is_rejected_and_amount_mismatch_go
 def test_the_owner_can_reopen_every_unresolved_manual_claim_from_the_payment_queue():
     async def run():
         pool, out, salon = await build(DSN)
+        await bind_telegram_customer(pool, C1)
+        await bind_telegram_customer(pool, C2)
         await pool.execute("UPDATE salons SET owner_wa_id=$1 WHERE id=$2::uuid", f"tg:{OWNER}", salon)
         await pool.execute("UPDATE salon_payment SET manual=true, shortcode=NULL WHERE salon_id=$1::uuid", salon)
         out.script["fade first"] = {"intent": "book", "service": "Fade", "date": open_day(1).isoformat(), "window": "afternoon"}
@@ -242,6 +277,7 @@ def test_the_owner_can_reopen_every_unresolved_manual_claim_from_the_payment_que
 def test_a_telegram_customer_is_asked_for_an_mpesa_number_then_pays_and_is_confirmed_on_telegram():
     async def run():
         pool, out, salon = await build(DSN)
+        await bind_telegram_customer(pool, C1)
         await pool.execute("UPDATE salons SET owner_wa_id=$1", f"tg:{OWNER}")
         out.script["fade"] = {"intent": "book", "service": "Fade", "date": open_day().isoformat(), "window": "afternoon"}
         async with client() as c:
@@ -265,6 +301,8 @@ def test_a_telegram_customer_is_asked_for_an_mpesa_number_then_pays_and_is_confi
 def test_voice_notes_and_photos_work_over_telegram():
     async def run():
         pool, out, salon = await build(DSN)
+        await bind_telegram_customer(pool, C1)
+        await bind_telegram_customer(pool, C2)
         await pool.execute("DELETE FROM salon_payment")
         await pool.execute("UPDATE salons SET deposit_kes=0")
         out.script["nataka fade kesho mchana"] = {"intent": "book", "service": "Fade", "date": open_day().isoformat(), "window": "afternoon", "language": "sw"}
@@ -303,10 +341,16 @@ def test_id_command_tells_a_telegram_user_their_id_and_a_repeat_update_is_ignore
             await post_tg(c, tg_update(1, OWNER, "/id"))
             await post_tg(c, tg_update(1, OWNER, "/id"))
         bodies = out.tg_bodies(str(OWNER))
-        assert len(bodies) == 1 and "Zuri Cuts" in bodies[0] and "tg:" not in bodies[0]
+        assert len(bodies) == 1 and bodies[0] == f"Your id: tg:{OWNER}"
+        await binding.ensure_slug(pool, salon, "Zuri Cuts")
+        async with client() as c:
+            await post_tg(c, tg_update(2, OWNER, "/start zuri-cuts"))
+            await post_tg(c, tg_update(3, OWNER, "/id"))
+        assert "Zuri Cuts" in out.tg_bodies(str(OWNER))[-1]
+        assert "Your id:" not in out.tg_bodies(str(OWNER))[-1]
         await pool.execute("UPDATE salons SET owner_wa_id=$1", f"tg:{OWNER}")
         async with client() as c:
-            await post_tg(c, tg_update(2, OWNER, "/id"))
+            await post_tg(c, tg_update(4, OWNER, "/id"))
         assert out.tg_bodies(str(OWNER))[-1] == f"Your id: tg:{OWNER}"
         await pool.close()
     asyncio.run(run())
@@ -341,6 +385,7 @@ def test_the_poller_handles_updates_in_order_acknowledges_buttons_and_backs_off_
         from app import main
         from app.inbound import inbound
         pool, out, salon = await build(DSN)
+        await bind_telegram_customer(pool, C1)
         await pool.execute("DELETE FROM salon_payment")
         await pool.execute("UPDATE salons SET deposit_kes=0")
         ctx = main.app.state.ctx

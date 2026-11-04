@@ -25,8 +25,8 @@ SOON_LEAD = timedelta(minutes=30)
 
 
 async def ask_about_visits(pool, ctx) -> int:
-    """After a visit ends, ask once whether the customer was attended. YES thanks them and invites feedback
-    (handled in the conversation); NO alerts the owner at once so they can rebook or cancel with the customer."""
+    """As soon as the scheduled service ends, ask once whether the customer was attended. YES thanks them
+    and invites feedback (handled in the conversation); NO alerts the owner at once."""
     now = datetime.now(NBO)
     rows = await pool.fetch(
         "SELECT b.id::text AS booking, b.salon_id::text AS salon, s.name AS salon_name, s.wa_phone_number_id AS pid, "
@@ -34,7 +34,7 @@ async def ask_about_visits(pool, ctx) -> int:
         "FROM bookings b JOIN salons s ON s.id=b.salon_id JOIN services sv ON sv.id=b.service_id "
         "JOIN clients c ON c.id=b.client_id LEFT JOIN visit_checks v ON v.booking_id=b.id "
         "WHERE b.status='confirmed' AND b.ends_at > $1 AND b.ends_at <= $2 AND v.booking_id IS NULL "
-        "ORDER BY b.ends_at LIMIT 20", now - timedelta(hours=6), now - timedelta(minutes=30))
+        "ORDER BY b.ends_at LIMIT 20", now - timedelta(hours=6), now)
     n = 0
     for r in rows:
         lang = r["lang"] or "en"

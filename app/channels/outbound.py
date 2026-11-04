@@ -164,6 +164,15 @@ async def send_text(ctx, salon: dict, to: str, body: str) -> bool:
     return await _once(ctx, "text", to, body, lambda: ctx.wa.send_text(salon["wa_phone_number_id"], token, to, body))
 
 
+async def send_photo(ctx, to: str, png: bytes, caption: str = "") -> bool:
+    """An image with a caption (the QR door sticker). Same once-only guard as text. False when the channel cannot carry images."""
+    sender = getattr(ctx.wa, "send_photo", None)
+    if sender is None:
+        return False
+    digest_body = caption + "\x00" + hashlib.sha256(png).hexdigest()
+    return await _once(ctx, "photo", to, caption, lambda: sender(to, png, caption), None, digest_body)
+
+
 async def send_plain(ctx, to: str, body: str) -> bool:
     """A message that belongs to no salon (the Telegram bot telling someone their own id): there is no token to choose."""
     return await _once(ctx, "plain", to, body, lambda: ctx.wa.send_text(None, "", to, body))

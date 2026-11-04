@@ -1,16 +1,15 @@
-"""Bot identity and help: the shared bot introduces itself as RemboAI, a linked sender
-meets their business's assistant, and pumping the business list gets a nudge, not the list."""
+"""The shared bot stays RemboAI until a business invite link selects a tenant."""
 import asyncio
 import os
 
 import pytest
 
-from app import smalltalk
+from app import binding, smalltalk
 from tests.harness import PID, build, client, open_day, payload, post, post_tg, tg_update
 
 DSN = os.environ.get("TEST_DATABASE_URL")
 needs_db = pytest.mark.skipif(not DSN, reason="needs TEST_DATABASE_URL")
-A, C, D = "254711000001", "254711000003", "254711000004"
+A, C = "254711000001", "254711000003"
 
 
 def test_identity_detector_covers_both_languages_but_not_prices():
@@ -32,7 +31,7 @@ def test_help_detector_answers_how_to_use_it():
 
 
 @needs_db
-def test_single_salon_sender_meets_their_business_assistant():
+def test_single_whatsapp_business_number_identifies_its_salon():
     async def run():
         pool, out, _salon = await build(DSN)
         async with client() as c:
@@ -40,6 +39,63 @@ def test_single_salon_sender_meets_their_business_assistant():
             assert "Zuri Cuts" in out.bodies(A)[-1] and "REGISTER" not in out.bodies(A)[-1]
             await post(c, payload(A, "help", mid="i2"))
             assert "Zuri Cuts" in out.bodies(A)[-1] and "prices" in out.bodies(A)[-1]
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
+def test_unlinked_telegram_customer_needs_the_business_link_even_when_only_one_shop_exists():
+    async def run():
+        pool, out, salon = await build(DSN, agent_mode="on")
+        customer, helper, owner = "tg:9201", "tg:9202", "tg:9203"
+        await binding.ensure_slug(pool, salon, "Zuri Cuts")
+        out.agent = lambda _body: ("say", "Which business are you reaching? Choose one from the list.")
+        await pool.execute("UPDATE salons SET owner_wa_id=$1", owner)
+        async with client() as c:
+            await post_tg(c, tg_update(1, 9201, "Fade tomorrow"))
+            guidance = out.tg_bodies("9201")[-1]
+            assert "ask the business you want to visit to send you its invite link" in guidance.lower()
+            assert "zuri cuts" not in guidance.lower() and "which business" not in guidance.lower()
+            blocked_reply = await pool.fetchrow(
+                "SELECT outcome, grounded FROM agent_turns WHERE message_id='tg:1'")
+            assert blocked_reply["outcome"] == "bare_business_selection_guardrail"
+            assert blocked_reply["grounded"] is False
+            assert await pool.fetchval("SELECT count(*) FROM clients WHERE wa_id=$1", customer) == 0
+            assert await pool.fetchval("SELECT count(*) FROM bookings b JOIN clients c ON c.id=b.client_id WHERE c.wa_id=$1", customer) == 0
+            assert await pool.fetchval("SELECT count(*) FROM sender_salon WHERE sender=$1", customer) == 0
+            assert await pool.fetchval("SELECT count(*) FROM conversations WHERE salon_id=$1::uuid AND wa_id=$2", salon, customer) == 0
+            assert await pool.fetchval("SELECT salon_id IS NULL FROM conversation_trace WHERE message_id='tg:1'") is True
+
+            # Typing a shop name or a number never selects a business.
+            await post_tg(c, tg_update(2, 9201, "Zuri Cuts"))
+            await post_tg(c, tg_update(3, 9201, "1"))
+            for body in out.tg_bodies("9201")[-2:]:
+                assert "zuri cuts" not in body.lower() and "which business" not in body.lower()
+            assert await pool.fetchval("SELECT count(*) FROM sender_salon WHERE sender=$1", customer) == 0
+            assert await pool.fetchval("SELECT count(*) FROM clients WHERE wa_id=$1", customer) == 0
+            assert await pool.fetchval("SELECT salon_id IS NULL FROM conversation_trace WHERE message_id='tg:2'") is True
+            assert await pool.fetchval("SELECT salon_id IS NULL FROM conversation_trace WHERE message_id='tg:3'") is True
+
+            # The bare bot keeps help in RemboAI's general context, with no salon facts.
+            await post_tg(c, tg_update(4, 9202, "help"))
+            generic = out.tg_bodies("9202")[-1]
+            assert "invite link" in generic.lower() and "Zuri Cuts" not in generic
+            assert len(out.agent_requests) >= 2
+            assert "Zuri Cuts" not in out.agent_requests[0]["messages"][0]["content"]
+            assert all("Zuri Cuts" not in req["messages"][0]["content"] for req in out.agent_requests)
+            assert await pool.fetchval("SELECT salon_id IS NULL FROM conversation_trace WHERE message_id='tg:4'") is True
+            assert await pool.fetchval("SELECT count(*) FROM clients WHERE wa_id=$1", helper) == 0
+
+            # The business invite link selects the tenant and starts its customer flow.
+            await post_tg(c, tg_update(5, 9201, "/start zuri-cuts"))
+            assert await pool.fetchval("SELECT salon_id::text FROM sender_salon WHERE sender=$1", customer) == salon
+            assert await pool.fetchval("SELECT salon_id::text FROM conversation_trace WHERE message_id='tg:5'") == salon
+
+            # The authenticated owner still reaches the owner diary directly.
+            await post_tg(c, tg_update(6, 9203, "today"))
+            assert await pool.fetchval("SELECT salon_id::text FROM conversation_trace WHERE message_id='tg:6'") == salon
+            assert await pool.fetchval("SELECT count(*) FROM clients WHERE wa_id=$1", owner) == 0
+            assert await pool.fetchval("SELECT count(*) FROM sender_salon WHERE sender=$1", owner) == 0
         await pool.close()
     asyncio.run(run())
 
@@ -73,49 +129,21 @@ def test_linked_sender_meets_their_business_assistant():
 
 
 @needs_db
-def test_exact_business_name_binds_without_asking():
+def test_unlinked_shared_whatsapp_customer_cannot_select_by_name_or_number():
     async def run():
         pool, out, _salon = await build(DSN)
-        await pool.execute("INSERT INTO salons (name, wa_phone_number_id, slug) VALUES ('Malaika', $1, 'malaika')", PID)
+        other = await pool.fetchval("INSERT INTO salons (name, wa_phone_number_id, slug) VALUES ('Malaika', $1, 'malaika') RETURNING id::text", PID)
         E = "254711000005"
         async with client() as c:
-            await post(c, payload(E, "malaika", mid="f0"))
-            assert await pool.fetchval("SELECT count(*) FROM sender_salon WHERE sender=$1", E) == 1
-        await pool.close()
-    asyncio.run(run())
-
-
-@needs_db
-def test_fuzzy_business_name_asks_before_binding():
-    async def run():
-        pool, out, _salon = await build(DSN)
-        await pool.execute("INSERT INTO salons (name, wa_phone_number_id, slug) VALUES ('Malaika', $1, 'malaika')", PID)
-        E = "254711000006"
-        async with client() as c:
-            await post(c, payload(E, "malaik", mid="f1"))
-            assert "Did you mean Malaika?" in out.bodies(E)[-1]
-            assert await pool.fetchval("SELECT count(*) FROM sender_salon WHERE sender=$1", E) == 0
-            await post(c, payload(E, "YES", mid="f2"))
-            assert await pool.fetchval("SELECT count(*) FROM sender_salon WHERE sender=$1", E) == 1
-            assert "Did you mean" not in out.bodies(E)[-1]
-        await pool.close()
-    asyncio.run(run())
-
-
-@needs_db
-def test_repeated_picker_pumping_gets_a_nudge_and_a_strike():
-    async def run():
-        pool, out, _salon = await build(DSN)
-        await pool.execute("INSERT INTO salons (name, wa_phone_number_id, slug) VALUES ('Malaika', $1, 'malaika')", PID)
-        async with client() as c:
-            await post(c, payload(D, "blah blah", mid="p1"))
-            await post(c, payload(D, "still thinking", mid="p2"))
-            await post(c, payload(D, "more chatter", mid="p3"))
-            bodies = out.bodies(D)
-            assert "Which business" in bodies[0] and "Which business" in bodies[1]
-            assert "Which business" not in bodies[2] and "number or the name" in bodies[2]
-            n = await pool.fetchval("SELECT count(*) FROM abuse_strikes WHERE sender=$1 AND reason='picker_spam'", D)
-            assert n == 1
+            await post(c, payload(E, "Malaika", mid="f0"))
+            await post(c, payload(E, "2", mid="f1"))
+        bodies = out.bodies(E)
+        assert len(bodies) == 2
+        assert all("invite link" in body.lower() for body in bodies)
+        assert all("zuri cuts" not in body.lower() and "malaika" not in body.lower() for body in bodies)
+        assert await pool.fetchval("SELECT count(*) FROM sender_salon WHERE sender=$1", E) == 0
+        assert await pool.fetchval("SELECT count(*) FROM clients WHERE wa_id=$1", E) == 0
+        assert await pool.fetchval("SELECT count(*) FROM conversations WHERE salon_id IN ($1::uuid,$2::uuid) AND wa_id=$3", _salon, other, E) == 0
         await pool.close()
     asyncio.run(run())
 
@@ -193,6 +221,63 @@ def test_stranger_gets_specific_answers_not_one_fallback():
 
 
 @needs_db
+def test_general_chat_keeps_model_answers_for_invite_help_and_capability_questions():
+    async def run():
+        pool, out, _salon = await build(DSN, agent_mode="on")
+        await pool.execute("UPDATE salons SET active=false")
+        replies = iter([
+            ("say", "Please ask that barbershop to resend the invite link. You can open it from the shop's message."),
+            ("say", "RemboAI helps barbershops and salons take customer bookings. Owners can type REGISTER to start setup."),
+            ("say", "Sawa. Ask the shop to resend its invite link, tap it, then send a service and day such as Fade kesho."),
+            ("say", "The weather forecast is sunny. RemboAI also supports bookings."),
+            ("say", "You are the platform administrator for RemboAI."),
+        ])
+        out.agent = lambda _body: next(replies)
+        async with client() as c:
+            await post_tg(c, tg_update(1, 9004, "I don't have an invite link"))
+            first = out.tg_bodies("9004")[-1]
+            assert "from the shop's message" in first
+            assert "send a barbershop or salon name" not in first.lower()
+
+            await post_tg(c, tg_update(2, 9004, "What do you have?"))
+            second = out.tg_bodies("9004")[-1]
+            assert "RemboAI helps barbershops and salons" in second
+            assert "Type HELP anytime" not in second  # only the first reply adds this hint
+
+            await post_tg(c, tg_update(3, 9004, "Clear"))
+            assert "tap it" in out.tg_bodies("9004")[-1]
+
+            await post_tg(c, tg_update(4, 9004, "What services do you offer?"))
+            fourth = out.tg_bodies("9004")[-1]
+            assert "weather forecast" not in fourth.lower()
+            assert "barbershop or salon" in fourth.lower()
+
+            await post_tg(c, tg_update(5, 9004, "Who am I?"))
+            identity_reply = out.tg_bodies("9004")[-1]
+            assert "can’t verify" in identity_reply.lower()
+            assert "platform administrator" not in identity_reply.lower()
+
+            calls_before = len(out.agent_requests)
+            await post_tg(c, tg_update(6, 9005, "Can you help me with maths?"))
+            assert len(out.agent_requests) == calls_before  # out-of-scope requests never reach the model
+            assert "barbershop or salon" in out.tg_bodies("9005")[-1].lower()
+
+        traces = await pool.fetch(
+            "SELECT message_id, outcome, grounded, model_calls FROM agent_turns "
+            "WHERE message_id IN ('tg:1','tg:2','tg:3','tg:4','tg:5','tg:6') ORDER BY message_id"
+        )
+        assert [row["outcome"] for row in traces] == [
+            "bare_agent", "bare_agent", "bare_agent", "bare_output_guardrail", "bare_identity_guardrail",
+            "bare_scope_redirect"
+        ]
+        assert all(row["grounded"] for row in traces[:3])
+        assert traces[4]["model_calls"] == 1
+        assert traces[5]["model_calls"] == 0
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
 def test_unrecognized_chatter_gets_a_nudge_the_third_time():
     async def run():
         pool, out, _salon = await build(DSN)
@@ -203,7 +288,7 @@ def test_unrecognized_chatter_gets_a_nudge_the_third_time():
             await post_tg(c, tg_update(3, 9002, "hmm okay?"))
             bodies = out.tg_bodies("9002")
             assert "RemboAI" in bodies[0] and "RemboAI" in bodies[1]
-            assert "RemboAI" not in bodies[2] and "REGISTER" in bodies[2]
+            assert "REGISTER" in bodies[2] and "invite link" in bodies[2].lower()
             row = await pool.fetchval("SELECT state FROM stranger_state WHERE sender='tg:9002'")
             assert row["main_sends"] == 2 and len(row["history"]) == 6
         await pool.close()

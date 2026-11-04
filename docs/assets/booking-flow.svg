@@ -21,20 +21,20 @@
   <path class="life" d="M285 56V570"/>
   <path class="life" d="M485 56V570"/>
 
-  <rect x="25" y="16" width="120" height="40" rx="9" fill="#fff"/>
+  <rect x="25" y="16" width="120" height="40" rx="20" fill="#fff"/>
   <text class="h" x="85" y="42" fill="#000">Customer</text>
-  <rect x="225" y="16" width="120" height="40" rx="9" fill="#FF7A00"/>
+  <rect x="225" y="16" width="120" height="40" rx="20" fill="#FF7A00"/>
   <text class="h" x="285" y="42" fill="#fff">RemboAI</text>
-  <rect x="425" y="16" width="120" height="40" rx="9" fill="#00A651"/>
+  <rect x="425" y="16" width="120" height="40" rx="20" fill="#00A651"/>
   <text class="h" x="485" y="42" fill="#000">M-Pesa</text>
 
   <text class="m" x="185" y="90">nataka fade kesho</text>
   <path class="ln" d="M85 100H285" marker-end="url(#a)"/>
 
-  <rect x="140" y="116" width="290" height="52" rx="10" fill="#0057FF"/>
+  <rect x="130" y="116" width="310" height="52" rx="26" fill="#0057FF"/>
   <text class="n" x="285" y="137" fill="#fff">Voice note: omniASR_LLM_1B_v2</text>
   <text class="n" x="285" y="157" fill="#fff">Muse Spark reads it, picks the step</text>
-  <rect x="140" y="178" width="290" height="52" rx="10" fill="#FF7A00"/>
+  <rect x="130" y="178" width="310" height="52" rx="26" fill="#FF7A00"/>
   <text class="nb" x="285" y="199" fill="#fff">Hold the slot</text>
   <text class="n" x="285" y="219" fill="#fff">advisory lock + exclusion constraint</text>
 
@@ -44,11 +44,11 @@
   <text class="m" x="185" y="302">M-Pesa phone number</text>
   <path class="ln" d="M85 312H285" marker-end="url(#a)"/>
 
-  <text class="m" x="385" y="346">STK push to salon's till</text>
+  <text class="m" x="385" y="346">STK push (Daraja sandbox)</text>
   <path class="gl" d="M285 356H485" marker-end="url(#g)"/>
 
   <!-- PIN step lives on the customer's own lane so no arrow crosses RemboAI's line -->
-  <rect x="10" y="372" width="150" height="52" rx="10" fill="#00A651"/>
+  <rect x="10" y="372" width="150" height="52" rx="26" fill="#00A651"/>
   <text class="nb" x="85" y="393" fill="#000">PIN prompt</text>
   <text class="n" x="85" y="413" fill="#000">Enters their PIN</text>
 
@@ -58,7 +58,7 @@
   <text class="m" x="185" y="478">Confirmed + receipt</text>
   <path class="ln" d="M285 488H85" marker-end="url(#a)"/>
 
-  <rect x="140" y="508" width="290" height="52" rx="10" fill="#fff"/>
+  <rect x="130" y="508" width="310" height="52" rx="26" fill="#fff"/>
   <text class="n" x="285" y="529" fill="#000">Owner notified of the deposit</text>
   <text class="n" x="285" y="549" fill="#000">24h / 2h + 30m ETA</text>
 </svg>

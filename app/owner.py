@@ -32,7 +32,7 @@ CANCEL = re.compile(r"^\s*(cancel|ghairi)\s+#?(\d{1,2})\W*$", re.I)
 CANCEL_WHO = re.compile(r"^\s*(cancel|ghairi)\s+(\+?[\d][\d\s\-]{5,18})\W*$", re.I)
 MOVE = re.compile(r"^\s*(move|hamisha|sogeza)\s+(\S+)\s+(.+)$", re.I | re.S)
 LATE = re.compile(r"^\s*(late|chelewa)\s+(.+?)\s+(\d{1,3})\s*$", re.I | re.S)
-INVITE = re.compile(r"^\s*(invite|mwaliko|share)\W*$", re.I)
+INVITE = re.compile(r"^\s*(invite|mwaliko|share|qr(?:\s*code)?|msimbo(?:\s*qr)?)\W*$", re.I)
 KEEP = re.compile(r"^\s*(keep|endelea)\W*$", re.I)
 DELETE_REQUEST = re.compile(
     r"\b(?:(?:delete|remove|terminate|close|shut down|deactivate|cancel|futa|ondoa|sitisha)\s+"
@@ -204,6 +204,33 @@ async def _say(ctx, salon: dict, to: str, body: str) -> None:
     await outbound.send_text(ctx, salon, to, body)
 
 
+async def send_qr_sticker(ctx, to: str, link: str, shop: str) -> None:
+    """The printable QR door sticker for an invite link, sent as an image. Telegram only for now (WhatsApp needs a media
+    upload that is not built); best effort, because the link in the text message already works on its own."""
+    from .channels import invites as _invites
+    if _invites.channel_of(to) != "tg" or not link.startswith("https://"):
+        return
+    try:
+        await outbound.send_photo(ctx, to, _invites.sticker_png(link, shop), f"Scan to book at {shop}")
+    except Exception:
+        log.warning("could not send the QR sticker", exc_info=True)
+
+
+async def invite_link(ctx, salon: dict, to: str) -> str:
+    """The owner's customer invite link. On Telegram the printable QR door sticker is sent first, as an image;
+    on WhatsApp (no image upload yet) the link alone is returned, and it carries the same slug."""
+    from . import binding as _binding
+    from .channels import invites as _invites
+    slug = await _binding.ensure_slug(ctx.pool, salon["id"], salon["name"])
+    channel = _invites.channel_of(to)
+    from .channels.telegram import bot_username as _bot_username
+    username = await _bot_username(getattr(ctx, "wa", None)) if channel == "tg" else None
+    number = getattr(ctx.settings, "central_whatsapp_number", "") if channel == "wa" else ""
+    link = _invites.invite_for(channel, slug, username=username, number=number)
+    await send_qr_sticker(ctx, to, link, salon["name"])
+    return link
+
+
 async def _bookings(ctx, salon: dict, day: date, tz: ZoneInfo) -> list[dict]:
     start = datetime.combine(day, time(0), tz)
     rows = await ctx.pool.fetch(
@@ -274,14 +301,7 @@ async def handle(ctx, salon: dict, to: str, text: str, tz: ZoneInfo, now: dateti
         await _deposit(ctx, salon, to, m[2], lang)
         return True
     if INVITE.match(text):
-        from . import binding as _binding
-        from .channels import invites as _invites
-        slug = await _binding.ensure_slug(ctx.pool, salon["id"], salon["name"])
-        channel = _invites.channel_of(to)
-        from .channels.telegram import bot_username as _bot_username
-        username = await _bot_username(getattr(ctx, "wa", None)) if channel == "tg" else None
-        number = getattr(ctx.settings, "central_whatsapp_number", "") if channel == "wa" else ""
-        await say(t(lang, "owner_invite", link=_invites.invite_for(channel, slug, username=username, number=number)))
+        await say(t(lang, "owner_invite", link=await invite_link(ctx, salon, to)))
         return True
     if SUMMARY.match(text):
         await say(await summary_text(ctx, salon, tz, now, lang))

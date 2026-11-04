@@ -68,6 +68,11 @@ def test_http_libraries_do_not_log_request_urls():
     assert logging.getLogger("httpx").level >= logging.WARNING and logging.getLogger("httpcore").level >= logging.WARNING
 
 
+def test_swahili_self_harm_language_is_classified_as_an_emergency():
+    for text in ("Nitajiua", "Nitajiumiza", "Nataka kujiumiza", "Nataka kufa"):
+        assert guard.classify(text) == ("emergency", "sw"), text
+
+
 @needs_db
 def test_an_injection_attempt_never_reaches_the_model_and_repeat_offenders_are_ignored():
     async def run():
@@ -83,6 +88,60 @@ def test_an_injection_attempt_never_reaches_the_model_and_repeat_offenders_are_i
         assert len(out.bodies(A)) == 3 and len(out.bodies(B)) >= 1
         await pool.close()
     asyncio.run(run())
+
+
+@needs_db
+@pytest.mark.asyncio
+async def test_emergency_message_bypasses_open_handoff_and_escalates_it():
+    pool, out, salon = await build(DSN)
+    owner = "254711000009"
+    await pool.execute("UPDATE salons SET owner_wa_id=$2 WHERE id=$1::uuid", salon, owner)
+    client_id = await pool.fetchval(
+        "INSERT INTO clients (salon_id, wa_id) VALUES ($1::uuid,$2) RETURNING id::text", salon, A)
+    await pool.execute(
+        "INSERT INTO handoffs (salon_id, client_id, category, message) VALUES ($1::uuid,$2::uuid,'payment_dispute','payment issue')",
+        salon, client_id,
+    )
+
+    async with client() as c:
+        response = await post(c, payload(A, "Nitajiua", mid="crisis-during-handoff"))
+
+    assert response.status_code == 200
+    assert "999" in out.bodies(A)[-1] and "112" in out.bodies(A)[-1]
+    handoff = await pool.fetchrow("SELECT category, message FROM handoffs WHERE client_id=$1::uuid AND status='open'", client_id)
+    assert handoff["category"] == "emergency" and handoff["message"] == "Nitajiua"
+    assert any("Needs a human (emergency)" in body for body in out.bodies(owner))
+    await pool.close()
+
+
+@needs_db
+@pytest.mark.asyncio
+async def test_spoken_emergency_is_transcribed_during_an_open_handoff():
+    pool, out, salon = await build(DSN)
+    owner = "254711000009"
+    await pool.execute("UPDATE salons SET owner_wa_id=$2 WHERE id=$1::uuid", salon, owner)
+    client_id = await pool.fetchval(
+        "INSERT INTO clients (salon_id, wa_id) VALUES ($1::uuid,$2) RETURNING id::text", salon, A)
+    await pool.execute(
+        "INSERT INTO handoffs (salon_id, client_id, category, message) VALUES ($1::uuid,$2::uuid,'payment_dispute','payment issue')",
+        salon, client_id,
+    )
+    out.asr_text = "Nitajiua"
+    body = payload(A, "", mid="crisis-voice-during-handoff")
+    body["entry"][0]["changes"][0]["value"]["messages"][0] = {
+        "from": A, "id": "crisis-voice-during-handoff", "type": "audio",
+        "audio": {"id": "VOICE_CRISIS", "mime_type": "audio/ogg; codecs=opus", "voice": True},
+    }
+
+    async with client() as c:
+        response = await post(c, body)
+
+    assert response.status_code == 200
+    assert out.asr
+    assert "999" in out.bodies(A)[-1] and "112" in out.bodies(A)[-1]
+    handoff = await pool.fetchrow("SELECT category, message FROM handoffs WHERE client_id=$1::uuid AND status='open'", client_id)
+    assert handoff["category"] == "emergency" and handoff["message"] == "Nitajiua"
+    await pool.close()
 
 
 @needs_db

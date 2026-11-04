@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 
 from app import guard
 from app.agent import drive, enabled, policy as agent_policy
-from app.agent.client import AgentUnavailable
+from app.agent.client import AgentUnavailable, request_evidence
 from app.agent.grounding import Facts, _times, check
 from app.channels import outbound
 from app.channels.whatsapp import mask
@@ -85,6 +85,25 @@ TOOLS = [
 ]
 
 _NUMBER = re.compile(r"\d[\d,]*")
+_WORD_NUMBER_TOKENS = re.compile(r"[a-z]+|\d[\d,]*", re.I)
+_SPOKEN_VALUES = {
+    "zero": 0, "sifuri": 0,
+    "one": 1, "moja": 1, "two": 2, "mbili": 2, "three": 3, "tatu": 3,
+    "four": 4, "nne": 4, "five": 5, "tano": 5, "six": 6, "mvili": 2,
+    "seven": 7, "saba": 7, "eight": 8, "nane": 8, "nine": 9, "tisa": 9,
+    "ten": 10, "kumi": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
+    "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17,
+    "eighteen": 18, "nineteen": 19,
+    "twenty": 20, "ishirini": 20, "thirty": 30, "thelathini": 30,
+    "forty": 40, "arobaini": 40, "fifty": 50, "hamsini": 50,
+    "sixty": 60, "sitini": 60, "seventy": 70, "sabini": 70,
+    "eighty": 80, "themanini": 80, "ninety": 90, "tisini": 90,
+}
+_AMOUNT_FILLERS = {
+    "a", "an", "the", "for", "at", "is", "are", "i", "we",
+    "charge", "charges", "cost", "costs", "price", "priced", "only", "just", "each",
+    "kwa", "ya", "bei", "gharama", "kes", "ksh", "shilling", "shillings", "shilingi",
+}
 _DURATION = re.compile(r"\b(\d+)\s*(hours?|hrs?|h|minutes?|mins?|m)\b", re.I)
 _TYPE = {
     "1": "kinyozi", "barber": "kinyozi", "barber shop": "kinyozi", "barbershop": "kinyozi", "kinyozi": "kinyozi",
@@ -115,6 +134,116 @@ def _numbers(text: str) -> set[int]:
     return {int(n.replace(",", "")) for n in _NUMBER.findall(text or "")}
 
 
+def _spoken_amount(text: str, subject: str | None = None) -> int | None:
+    """Read one clearly spoken English or Swahili amount, optionally after removing a service name."""
+    tokens = [token.casefold() for token in _WORD_NUMBER_TOKENS.findall(text or "")]
+    if subject:
+        name = [token.casefold() for token in _WORD_NUMBER_TOKENS.findall(subject)]
+        if not name:
+            return None
+        kept = []
+        index = 0
+        found = False
+        while index < len(tokens):
+            if tokens[index:index + len(name)] == name:
+                index += len(name)
+                found = True
+            else:
+                kept.append(tokens[index])
+                index += 1
+        if not found:
+            return None
+        tokens = kept
+    # In Swahili, the multiplier follows the scale ("mia moja" = 100).
+    swahili_multipliers = {"moja", "mbili", "mvili", "tatu", "nne", "tano", "sita", "saba", "nane", "tisa", "kumi"}
+    for index in range(len(tokens) - 1):
+        if tokens[index] in {"mia", "elfu"} and tokens[index + 1] in swahili_multipliers:
+            tokens[index], tokens[index + 1] = tokens[index + 1], tokens[index]
+    tokens = [token for token in tokens if token not in _AMOUNT_FILLERS]
+    if not tokens:
+        return None
+
+    total = group = 0
+    last = None
+    had_number = False
+    for token in tokens:
+        if token in {"and", "na"}:
+            if last in (None, "connector"):
+                return None
+            last = "connector"
+            continue
+        if token in {"hundred", "mia"}:
+            if last in ("unit", "tens"):
+                base = group
+            elif last in (None, "thousand"):
+                base = 1
+            else:
+                return None
+            if base > 99:
+                return None
+            group = base * 100
+            last = "hundred"
+            had_number = True
+            continue
+        if token in {"thousand", "elfu"}:
+            if last in ("unit", "tens", "hundred"):
+                base = group
+            elif last is None:
+                base = 1
+            else:
+                return None
+            total += base * 1000
+            group = 0
+            last = "thousand"
+            had_number = True
+            continue
+
+        if token.isdigit() or re.fullmatch(r"\d[\d,]*", token):
+            try:
+                value = int(token.replace(",", ""))
+            except ValueError:
+                return None
+            if last not in (None, "thousand"):
+                return None
+            group += value
+            last = "unit"
+            had_number = True
+            continue
+
+        value = _SPOKEN_VALUES.get(token)
+        if value is None:
+            return None
+        if value >= 20:
+            if last not in (None, "hundred", "thousand", "connector"):
+                return None
+            group += value
+            last = "tens"
+        elif last == "tens" and 0 < value < 10:
+            group += value
+            last = "unit"
+        elif last == "connector" and (group >= 10 or total > 0) and value < 20:
+            group += value
+            last = "unit"
+        elif last in (None, "hundred", "thousand"):
+            group += value
+            last = "unit"
+        else:
+            return None
+        had_number = True
+
+    amount = total + group
+    return amount if had_number and 0 <= amount <= ob.MAX_PRICE else None
+
+
+def _price_is_evidenced(price: int | None, evidence: str, service_name: str) -> bool:
+    return price is not None and (price in _numbers(evidence) or price == _spoken_amount(evidence, service_name))
+
+
+def _standalone_spoken_amount(text: str) -> int | None:
+    """Parse a price-only answer while registration is explicitly waiting for that price."""
+    return _spoken_amount(text)
+
+
 def _duration_is_evidenced(minutes: int, text: str) -> bool:
     parsed = ob.parse_service_line(text)
     if parsed and parsed["explicit"] and parsed["minutes"] == minutes:
@@ -141,6 +270,8 @@ def _state_summary(state: dict) -> str:
             for s in data.get("services", [])
         ],
         "service_count": len(data.get("services", [])),
+        "pending_service_name": (state.get("pending_service") or {}).get("name")
+        if isinstance(state.get("pending_service"), dict) else None,
         "opening_hours": {"opens": data.get("open"), "closes": data.get("close")},
         "deposit_kes": data.get("deposit"),
         "payment_method": data.get("payment_method"),
@@ -201,6 +332,9 @@ def _prompt(state: dict, lang: str, policy: dict) -> str:
         f'This is the first reply in this registration chat. End with this short sentence: "{ob.t(lang, "help_hint")}"'
         if first_reply else "The owner has already received the help invitation; do not repeat it unless relevant."
     )
+    step_instruction = registration["step_instructions"].get(step, "Follow the current registration step.")
+    if step == "ask_prices" and isinstance(state.get("pending_service"), dict):
+        step_instruction += " A service name is already recorded without a validated price. Ask only for that service's price; do not ask for its name again."
     return f"""{registration['identity']}
 {registration['purpose']}
 {"\n".join(policy["prompt_wrapper"])}
@@ -209,7 +343,7 @@ First-reply guidance: {first_reply_rule}
 Current validated registration details (JSON):
 {summary}
 Current step: {step}
-Instruction for this step: {registration['step_instructions'].get(step, 'Follow the current registration step.')}
+Instruction for this step: {step_instruction}
 Configured registration policy (JSON):
 {json.dumps(instructions, ensure_ascii=False, indent=2)}
 """
@@ -347,15 +481,22 @@ class RegistrationToolbox:
                         self.rejected.append("owners")
 
         service_items = args.get("services")
+        lines = []
+        original_names = {
+            s["name"].casefold() for s in data.get("services", [])
+            if isinstance(s, dict) and isinstance(s.get("name"), str)
+        }
+        added_without_duration: set[str] = set()
+        pending_candidates: list[dict] = []
+        pending_service = state.get("pending_service")
+        pending_name = pending_service.get("name") if isinstance(pending_service, dict) else None
+        pending_resolved = False
         if service_items is not None:
             if not isinstance(service_items, list):
                 self.rejected.append("services")
             elif len(service_items) > ob.MAX_SERVICES:
                 self.rejected.append("services")
             else:
-                lines = []
-                original_names = {s["name"].casefold() for s in data.get("services", []) if isinstance(s, dict) and isinstance(s.get("name"), str)}
-                added_without_duration: set[str] = set()
                 for item in service_items:
                     if not isinstance(item, dict):
                         self.rejected.append("services")
@@ -365,39 +506,64 @@ class RegistrationToolbox:
                     price = _int(item.get("price_kes"))
                     duration = item.get("duration_minutes")
                     has_duration = duration is not None
-                    valid = (
+                    name_valid = (
                         _has_evidence(self.text, evidence)
                         and isinstance(service_name, str)
                         and ob.MIN_NAME <= len(service_name.strip()) <= ob.MAX_NAME
                         and _compact(service_name) in _compact(evidence)
-                        and price is not None
-                        and price in _numbers(evidence)
                     )
+                    spoken_price = _spoken_amount(evidence, service_name) if name_valid else None
+                    if spoken_price is not None:
+                        # Independently parse a complete spoken amount from the exact quoted evidence.
+                        price = spoken_price
+                    price_evidenced = name_valid and _price_is_evidenced(price, evidence or "", service_name)
+                    valid = name_valid and price_evidenced
                     if has_duration:
                         valid = valid and _int(duration) is not None and 5 <= duration <= 480 and _duration_is_evidenced(duration, evidence or "")
                     if not valid:
                         self.rejected.append("services")
+                        if name_valid and not price_evidenced:
+                            normalized_name = " ".join(service_name.split()).strip()
+                            pending_candidates.append({"name": normalized_name, "evidence": evidence.strip()})
                         continue
                     suffix = f" {duration}" if has_duration else ""
                     lines.append(f"{service_name.strip()}: {price}{suffix}")
+                    if pending_name and service_name.casefold() == pending_name.casefold():
+                        pending_resolved = True
                     if not has_duration and service_name.casefold() not in original_names:
                         added_without_duration.add(service_name.casefold())
-                if lines:
-                    candidate = copy.deepcopy(data)
-                    _updated, _added, bad = ob.apply_corrections(candidate, "\n".join(lines))
-                    if bad or len(candidate.get("services", [])) > ob.MAX_SERVICES:
-                        self.rejected.append("services")
-                    else:
-                        data["services"] = candidate["services"]
-                        self.facts.prices.update(int(s["price"]) for s in candidate["services"] if isinstance(s.get("price"), int))
-                        if not self._was_final:
-                            state["services_confirmed"] = False
-                        if added_without_duration:
-                            state["duration_defaults_accepted"] = False
-                            if self._was_final:
-                                state["services_confirmed"] = True
-                        self.accepted.append("services")
-                        self.changed = True
+
+        if pending_name and prior_step == "ask_prices" and not pending_resolved:
+            reply_price = _standalone_spoken_amount(self.text)
+            if reply_price is not None and ob.MIN_PRICE <= reply_price <= ob.MAX_PRICE:
+                lines.append(f"{pending_name}: {reply_price}")
+                added_without_duration.add(pending_name.casefold())
+                pending_resolved = True
+
+        if lines:
+            candidate = copy.deepcopy(data)
+            _updated, _added, bad = ob.apply_corrections(candidate, "\n".join(lines))
+            if bad or len(candidate.get("services", [])) > ob.MAX_SERVICES:
+                self.rejected.append("services")
+            else:
+                data["services"] = candidate["services"]
+                self.facts.prices.update(int(s["price"]) for s in candidate["services"] if isinstance(s.get("price"), int))
+                if not self._was_final:
+                    state["services_confirmed"] = False
+                if added_without_duration:
+                    state["duration_defaults_accepted"] = False
+                    if self._was_final:
+                        state["services_confirmed"] = True
+                self.accepted.append("services")
+                self.changed = True
+                if pending_resolved:
+                    state.pop("pending_service", None)
+
+        if pending_candidates:
+            distinct = {item["name"].casefold(): item for item in pending_candidates}
+            if len(distinct) == 1 and (not pending_name or next(iter(distinct)).casefold() == pending_name.casefold()):
+                state["pending_service"] = next(iter(distinct.values()))
+                self.changed = True
 
         duration_quotes = args.get("durations_evidence")
         if duration_quotes is not None:
@@ -526,6 +692,9 @@ class RegistrationToolbox:
             return
         if previous == "confirm_name" and state.get("step") == "ask_name" and not data.get("salon"):
             return
+        if isinstance(state.get("pending_service"), dict):
+            state["step"] = "ask_prices"
+            return
         if self._was_final and ob.registration_complete(state):
             state["step"] = "confirm_all"
             return
@@ -568,16 +737,17 @@ def _history(state: dict, text: str) -> list[dict]:
     return messages[-11:]
 
 
-async def _trace(ctx, *, mid, sender, text, steps, final_text, state_after, outcome, grounded, problems, model, calls, ms):
+async def _trace(ctx, *, mid, sender, text, steps, final_text, state_after, outcome, grounded, problems, model, calls, ms, model_requests=None):
     try:
         await ctx.pool.execute(
-            "INSERT INTO agent_turns (message_id, salon_id, sender, user_text, steps, final_text, state_after, outcome, grounded, problems, backend, model, model_calls, ms) "
-            "VALUES ($1,NULL,$2,$3,$4::jsonb,$5,$6::jsonb,$7,$8,$9::jsonb,$10,$11,$12,$13) "
+            "INSERT INTO agent_turns (message_id, salon_id, sender, user_text, steps, final_text, state_after, outcome, grounded, problems, backend, model, model_calls, ms, model_requests) "
+            "VALUES ($1,NULL,$2,$3,$4::jsonb,$5,$6::jsonb,$7,$8,$9::jsonb,$10,$11,$12,$13,$14::jsonb) "
             "ON CONFLICT (message_id) DO UPDATE SET steps=EXCLUDED.steps, final_text=EXCLUDED.final_text, state_after=EXCLUDED.state_after, "
-            "outcome=EXCLUDED.outcome, grounded=EXCLUDED.grounded, problems=EXCLUDED.problems, model_calls=EXCLUDED.model_calls, ms=EXCLUDED.ms",
+            "outcome=EXCLUDED.outcome, grounded=EXCLUDED.grounded, problems=EXCLUDED.problems, model_calls=EXCLUDED.model_calls, ms=EXCLUDED.ms, model_requests=EXCLUDED.model_requests",
             mid, mask(sender), (text or "")[:500], json.dumps(steps, ensure_ascii=False, default=str), final_text,
             json.dumps(state_after, ensure_ascii=False, default=str) if state_after else None, outcome, grounded,
             json.dumps(problems), model[0] if model else None, model[1] if model else None, calls, ms,
+            json.dumps(model_requests or [], ensure_ascii=False, default=str),
         )
     except Exception:
         log.exception("could not write the registration agent trace")
@@ -626,7 +796,8 @@ async def _answer_help(ctx, sender: str, pid: str, words: str, state: dict, mid)
     await _trace(ctx, mid=mid, sender=sender, text=words, steps=[{
         "kind": "help_explanation", "accepted": True, "backend": step.backend, "model": step.model, "ms": step.ms,
     }], final_text=body, state_after=state, outcome="registration_help", grounded=True,
-       problems=[], model=(step.backend, step.model), calls=1, ms=step.ms)
+       problems=[], model=(step.backend, step.model), calls=1, ms=step.ms,
+       model_requests=[request_evidence(step)])
     await ob._say(ctx, pid, sender, body)
     return True
 
@@ -707,7 +878,7 @@ async def advance(ctx, sender: str, pid: str, text: str, state: dict) -> bool:
         await _trace(ctx, mid=mid, sender=sender, text=words, steps=run.steps, final_text=None, state_after=state,
                      outcome=outcome, grounded=False if run.problems else None,
                      problems=run.problems or toolbox.rejected, model=run.first_model,
-                     calls=run.calls, ms=run.ms)
+                     calls=run.calls, ms=run.ms, model_requests=run.model_requests)
         return False
 
     body = run.lead
@@ -726,6 +897,7 @@ async def advance(ctx, sender: str, pid: str, text: str, state: dict) -> bool:
                 repair_problems = _agent_reply_problems(candidate, facts, toolbox.accepted, policy, state.get("step"))
                 run.calls += 1
                 run.ms += repaired.ms
+                run.model_requests.append(request_evidence(repaired))
                 run.steps.append({"kind": "grounding_repair", "accepted": bool(candidate) and not repair_problems,
                                   "rejected_for": problems, "repair_rejected_for": repair_problems,
                                   "backend": repaired.backend, "model": repaired.model, "ms": repaired.ms})
@@ -773,7 +945,8 @@ async def advance(ctx, sender: str, pid: str, text: str, state: dict) -> bool:
     await ob._save_session(ctx.pool, sender, state)
     await _trace(ctx, mid=mid, sender=sender, text=words, steps=run.steps, final_text=body, state_after=state,
                  outcome="registration_agent" if grounded else "registration_template", grounded=grounded,
-                 problems=problems, model=run.first_model, calls=run.calls, ms=run.ms)
+                 problems=problems, model=run.first_model, calls=run.calls, ms=run.ms,
+                 model_requests=run.model_requests)
     await ob._say(ctx, pid, sender, body)
     log.info("registration agent turn: %d model calls, %s, %d ms", run.calls,
              "model reply" if grounded else "validated template", run.ms)

@@ -51,6 +51,20 @@ class Telegram:
             log.error("DELIVERY FAILED to %s on Telegram", mask(chat))
         return ok
 
+    async def send_photo(self, chat: str, png: bytes, caption: str = "") -> bool:
+        """Upload an image (the QR sticker). Multipart, so it cannot go through call(); one attempt, because a
+        retried upload after a lost reply could deliver the photo twice."""
+        try:
+            r = await self.http.post(f"{API}/bot{self.token}/sendPhoto", data={"chat_id": chat, "caption": caption[:1024]},
+                                     files={"photo": ("invite.png", png, "image/png")}, timeout=20.0)
+            ok = bool(r.json().get("ok"))
+        except (httpx.HTTPError, ValueError) as e:
+            log.warning("telegram sendPhoto failed: %s", e.__class__.__name__)
+            return False
+        if not ok:
+            log.error("DELIVERY FAILED to %s on Telegram (photo)", mask(chat))
+        return ok
+
     async def send_buttons(self, chat: str, body: str, buttons: list[tuple[str, str]]) -> bool:
         markup = {"inline_keyboard": [[{"text": title[:64], "callback_data": cid[:64]}] for cid, title in buttons]}
         ok = await self.call("sendMessage", {"chat_id": chat, "text": body[:4096], "reply_markup": markup}) is not None
@@ -164,6 +178,13 @@ class Channels:
         if to.startswith("tg:"):
             return await self.tg.send_buttons(to[3:], body, buttons) if self.tg else False
         return await self.wa.send_buttons(phone_number_id, token, to, body, buttons)
+
+    async def send_photo(self, to: str, png: bytes, caption: str = "") -> bool:
+        """Images go out on Telegram only. WhatsApp needs a media upload first, which is not built; callers
+        fall back to the link, which carries the same slug."""
+        if to.startswith("tg:") and self.tg:
+            return await self.tg.send_photo(to[3:], png, caption)
+        return False
 
     async def send_template(self, phone_number_id, token: str, to: str, template: str, lang: str, body_params: list[str]) -> bool:
         """WhatsApp message templates (the only thing WhatsApp lets a business send outside the 24-hour window). Telegram has no

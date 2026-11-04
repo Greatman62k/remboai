@@ -50,3 +50,44 @@ def qr_png(link: str) -> bytes:
     buf = io.BytesIO()
     qrcode.make(link).save(buf, format="PNG")
     return buf.getvalue()
+
+
+def sticker_png(link: str, title: str = "", subtitle: str = "Scan to book") -> bytes:
+    """The printable door sticker: the QR code with the shop name above it and a short
+    instruction below, on a white card with a quiet margin so phones scan it from a distance."""
+    import io
+
+    import qrcode
+    from PIL import Image, ImageDraw, ImageFont
+
+    qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=14, border=2)
+    qr.add_data(link)
+    qr.make(fit=True)
+    code = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+    pad, head, foot = 48, (120 if title else 48), 110
+    card = Image.new("RGB", (code.width + 2 * pad, code.height + head + foot), "white")
+    card.paste(code, (pad, head))
+    draw = ImageDraw.Draw(card)
+
+    def font(size: int):
+        for name in ("DejaVuSans-Bold.ttf", "Arial Bold.ttf", "arialbd.ttf"):
+            try:
+                return ImageFont.truetype(name, size)
+            except OSError:
+                continue
+        return ImageFont.load_default(size)
+
+    def centred(text: str, y: int, size: int, fill) -> None:
+        f = font(size)
+        while size > 14 and draw.textlength(text, font=f) > card.width - 2 * pad:
+            size -= 2
+            f = font(size)
+        draw.text(((card.width - draw.textlength(text, font=f)) / 2, y), text, font=f, fill=fill)
+
+    if title:
+        centred(title[:40], 36, 44, (10, 10, 12))
+    centred(subtitle, head + code.height + 8, 40, (255, 122, 0))
+    centred("Booking by RemboAI", head + code.height + 62, 22, (90, 90, 96))
+    buf = io.BytesIO()
+    card.save(buf, format="PNG")
+    return buf.getvalue()

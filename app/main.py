@@ -251,8 +251,11 @@ async def model_info(request: Request, x_ops_key: str | None = Header(default=No
     ctx = request.app.state.ctx
     await _check_ops_key(ctx, x_ops_key, request)
     s = ctx.settings
+    from .ai.llm import safe_chat_endpoint
     return {"backend": getattr(s, "llm_backend", "primary"), "model": s.llm_model,
+            "endpoint": safe_chat_endpoint(s.llm_base_url),
             "fallback_backend": getattr(s, "llm_fallback_backend", "") or None, "fallback_model": s.llm_fallback_model or None,
+            "fallback_endpoint": safe_chat_endpoint(s.llm_fallback_base_url) if s.llm_fallback_base_url else None,
             "quantization": getattr(s, "llm_quantization", "") or None, "host": getattr(s, "llm_host", "") or None,
             "agent_mode": getattr(s, "agent_mode", "off"), "agent_protocol": getattr(s, "agent_protocol", "auto")}
 
@@ -371,13 +374,13 @@ async def agent_trace(request: Request, limit: int = 20, x_ops_key: str | None =
     """The last agent turns: what the customer wrote, which tools the model called, what code answered, and what was sent."""
     await _check_ops_key(request.app.state.ctx, x_ops_key, request)
     rows = await request.app.state.pool.fetch(
-        "SELECT created_at, sender, user_text, steps, final_text, outcome, grounded, problems, backend, model, model_calls, ms "
+        "SELECT created_at, sender, user_text, steps, final_text, outcome, grounded, problems, backend, model, model_calls, ms, model_requests "
         "FROM agent_turns ORDER BY id DESC LIMIT $1", max(1, min(int(limit), 100)))
     def _j(v):
         return v if isinstance(v, (list, dict)) or v is None else json.loads(v)
     return [{"at": r["created_at"].isoformat(), "customer": r["sender"], "said": r["user_text"], "tools": _j(r["steps"]), "sent": r["final_text"],
              "outcome": r["outcome"], "grounded": r["grounded"], "rejected_for": _j(r["problems"]), "backend": r["backend"], "model": r["model"],
-             "model_calls": r["model_calls"], "ms": r["ms"]} for r in rows]
+             "model_calls": r["model_calls"], "ms": r["ms"], "model_requests": _j(r["model_requests"])} for r in rows]
 
 
 @app.get("/ops/conversation-trace")
@@ -389,13 +392,13 @@ async def conversation_trace(request: Request, limit: int = 50, thread: str | No
     if thread:
         rows = await request.app.state.pool.fetch(
             "SELECT c.message_id, c.thread, c.channel, c.message_kind, c.salon_id::text AS salon_id, c.user_text, c.created_at, "
-            "a.steps, a.final_text, a.outcome, a.grounded, a.problems, a.backend, a.model, a.model_calls, a.ms, a.user_text AS agent_user_text "
+            "a.steps, a.final_text, a.outcome, a.grounded, a.problems, a.backend, a.model, a.model_calls, a.ms, a.model_requests, a.user_text AS agent_user_text "
             "FROM conversation_trace c LEFT JOIN agent_turns a ON a.message_id=c.message_id "
             "WHERE c.thread=$2 ORDER BY c.created_at DESC LIMIT $1", limit, thread)
     else:
         rows = await request.app.state.pool.fetch(
             "SELECT c.message_id, c.thread, c.channel, c.message_kind, c.salon_id::text AS salon_id, c.user_text, c.created_at, "
-            "a.steps, a.final_text, a.outcome, a.grounded, a.problems, a.backend, a.model, a.model_calls, a.ms, a.user_text AS agent_user_text "
+            "a.steps, a.final_text, a.outcome, a.grounded, a.problems, a.backend, a.model, a.model_calls, a.ms, a.model_requests, a.user_text AS agent_user_text "
             "FROM conversation_trace c LEFT JOIN agent_turns a ON a.message_id=c.message_id "
             "ORDER BY c.created_at DESC LIMIT $1", limit)
     ids = [r["message_id"] for r in rows]
@@ -421,7 +424,8 @@ async def conversation_trace(request: Request, limit: int = 50, thread: str | No
             "said": r["agent_user_text"] or r["user_text"], "replies": by_turn.get(r["message_id"], []),
             "agent": ({"outcome": r["outcome"], "grounded": r["grounded"], "rejected_for": _j(r["problems"]),
                        "backend": r["backend"], "model": r["model"], "model_calls": r["model_calls"],
-                       "ms": r["ms"], "steps": _j(r["steps"]), "proposed_reply": r["final_text"]}
+                       "ms": r["ms"], "steps": _j(r["steps"]), "model_requests": _j(r["model_requests"]),
+                       "proposed_reply": r["final_text"]}
                       if has_agent else None),
         })
     return {"items": items}

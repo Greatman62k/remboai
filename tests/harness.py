@@ -2,6 +2,7 @@
 import hashlib
 import hmac
 import json
+import re
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -80,7 +81,7 @@ class Outside:
             return httpx.Response(200, json={"messages": [{"id": "x"}]})
         if req.url.path.endswith("/chat/completions") and self.agent is not None and any(
             k in json.loads(req.content)["messages"][0]["content"]
-            for k in ("booking receptionist", "diary assistant", "salon registration assistant", "business registration assistant", "platform administrator assistant")
+            for k in ("booking receptionist", "diary assistant", "visit feedback assistant", "salon registration assistant", "business registration assistant", "platform administrator assistant", "product assistant")
         ):
             body = json.loads(req.content)
             self.calls.append(host)
@@ -98,7 +99,8 @@ class Outside:
                     msg = {"role": "assistant", "content": action[1]}
             else:
                 msg = {"role": "assistant", "content": json.dumps({"tool": action[1], "args": action[2]} if action[0] == "tool" else {"reply": action[1]})}
-            return httpx.Response(200, json={"choices": [{"message": msg}], "usage": {"prompt_tokens": 100, "completion_tokens": 20}})
+            return httpx.Response(200, json={"id": f"chatcmpl-agent-{len(self.agent_requests)}", "model": body["model"],
+                                             "choices": [{"message": msg}], "usage": {"prompt_tokens": 100, "completion_tokens": 20}})
         if req.url.path.endswith("/chat/completions") and isinstance(json.loads(req.content)["messages"][-1]["content"], list):
             body = json.loads(req.content)
             image = next(p for p in body["messages"][-1]["content"] if p["type"] == "image_url")["image_url"]["url"]
@@ -107,7 +109,8 @@ class Outside:
             if host in self.down:
                 return httpx.Response(503)
             answer = self.payment_vision_answer if "payment screenshot" in prompt.lower() or "payment_screenshot" in prompt.lower() else self.vision_answer
-            return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(answer)}}]})
+            return httpx.Response(200, json={"id": f"chatcmpl-vision-{len(self.vision)}", "model": body["model"],
+                                             "choices": [{"message": {"content": json.dumps(answer)}}]})
         if req.url.path.endswith("/chat/completions"):
             self.calls.append(host)
             if host in self.down:
@@ -115,7 +118,8 @@ class Outside:
             body = json.loads(req.content)
             text = body["messages"][-1]["content"].split('Message: "', 1)[1].rsplit('"', 1)[0].lower()
             ans = self.script.get(text, {"intent": "other"})
-            return httpx.Response(200, json={"choices": [{"message": {"content": "```json\n" + json.dumps(ans) + "\n```"}}]})
+            return httpx.Response(200, json={"id": f"chatcmpl-extract-{len(self.calls)}", "model": body["model"],
+                                             "choices": [{"message": {"content": "```json\n" + json.dumps(ans) + "\n```"}}]})
         if host == "sandbox.safaricom.co.ke":
             return self.daraja(req)
         return httpx.Response(404)
@@ -124,7 +128,15 @@ class Outside:
         if req.url.path.startswith("/file/bot"):
             return httpx.Response(200, content=b"TG-FILE-BYTES")
         method = req.url.path.rsplit("/", 1)[1]
-        body = json.loads(req.content or b"{}")
+        if req.headers.get("content-type", "").startswith("multipart/"):
+            # an upload (sendPhoto): record the text fields and the size of the file
+            raw = req.content
+            fields = dict(re.findall(rb'name="(\w+)"\r\n\r\n(.*?)\r\n--', raw, re.S))
+            body = {k.decode(): v.decode() for k, v in fields.items()}
+            body["photo_bytes"] = len(raw)
+            body["photo_png"] = b"\x89PNG\r\n\x1a\n" in raw
+        else:
+            body = json.loads(req.content or b"{}")
         self.tg.append({"method": method, **body})
         if method == "getUpdates":
             if not self.tg_updates:
@@ -140,6 +152,9 @@ class Outside:
 
     def tg_to(self, chat: str) -> list[dict]:
         return [m for m in self.tg if m["method"] == "sendMessage" and str(m["chat_id"]) == chat]
+
+    def tg_photos(self, chat: str) -> list[dict]:
+        return [m for m in self.tg if m["method"] == "sendPhoto" and str(m["chat_id"]) == chat]
 
     def tg_bodies(self, chat: str) -> list[str]:
         return [m["text"] for m in self.tg_to(chat)]
@@ -241,6 +256,30 @@ async def build(dsn: str, till: bool = True, **over):
         from app.agent import AgentModel
         app.state.ctx.agent = AgentModel(http, settings, None, llm.endpoints, pool)
     return pool, out, salon
+
+
+async def bind_telegram_customer(pool, chat: int | str, salon_id: str | None = None) -> str:
+    """Set up a Telegram customer fixture that already selected a business.
+
+    Tests for the public, unlinked bot must not call this helper. They exercise
+    the invite-link requirement instead.
+    """
+    from app import binding
+
+    if salon_id is None:
+        row = await pool.fetchrow("SELECT id::text, name FROM salons WHERE active ORDER BY created_at, id LIMIT 1")
+    else:
+        row = await pool.fetchrow("SELECT id::text, name FROM salons WHERE id=$1::uuid AND active", salon_id)
+    if row is None:
+        raise AssertionError("no active salon for Telegram customer fixture")
+    slug = await binding.ensure_slug(pool, row["id"], row["name"])
+    sender = str(chat)
+    if not sender.startswith("tg:"):
+        sender = f"tg:{sender}"
+    linked = await binding.bind_sender(pool, sender, slug)
+    if linked != row["id"]:
+        raise AssertionError("could not bind Telegram customer fixture")
+    return row["id"]
 
 
 def tg_update(uid: int, chat: int, text: str | None = None, data: str | None = None, **extra) -> dict:

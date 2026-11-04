@@ -20,7 +20,7 @@
   <text class="s k" x="149" y="33">Message (text, voice note or photo)</text>
   <path class="ln" d="M60 44V70" marker-end="url(#a)"/>
 
-  <rect x="24" y="70" width="250" height="56" rx="10" fill="#0057FF"/>
+  <rect x="24" y="70" width="250" height="56" rx="28" fill="#0057FF"/>
   <text class="t w" x="149" y="95">Muse Spark 1.3</text>
   <text class="s w" x="149" y="115">Decides each next step</text>
 
@@ -29,42 +29,42 @@
   <path class="ln" d="M240 164V126" marker-end="url(#a)"/>
   <text class="r" x="228" y="150">result</text>
 
-  <rect x="24" y="164" width="250" height="56" rx="10" fill="#FF7A00"/>
+  <rect x="24" y="164" width="250" height="56" rx="28" fill="#FF7A00"/>
   <text class="t w" x="149" y="189">Booking tools</text>
   <text class="s w" x="149" y="209">Code checks and runs each call</text>
 
   <path class="ln" d="M60 220V258" marker-end="url(#a)"/>
   <text class="m" x="72" y="244">draft reply</text>
 
-  <rect x="24" y="258" width="250" height="56" rx="10" fill="#fff"/>
+  <rect x="24" y="258" width="250" height="56" rx="28" fill="#fff"/>
   <text class="t k" x="149" y="283">Grounding check</text>
   <text class="s k" x="149" y="303">Times, prices, links, payments</text>
 
   <path class="ln" d="M60 314V352" marker-end="url(#a)"/>
   <text class="m" x="72" y="338">passes, or code rewrites it</text>
 
-  <rect x="24" y="352" width="250" height="56" rx="10" fill="#00A651"/>
+  <rect x="24" y="352" width="250" height="56" rx="28" fill="#00A651"/>
   <text class="t w" x="149" y="377">Send</text>
   <text class="s w" x="149" y="397">Grounded model reply sent</text>
 
-  <path class="ln" d="M274 98H318" marker-end="url(#a)"/>
-  <rect x="318" y="70" width="178" height="56" rx="10" fill="#E5101D"/>
-  <text class="t w" x="407" y="95">Muse Spark Open</text>
-  <text class="s w" x="407" y="115">Optional secondary</text>
+  <path class="ln" d="M274 98H306" marker-end="url(#a)" stroke-dasharray="5 5"/>
+  <rect x="306" y="70" width="190" height="56" rx="28" fill="none" stroke="#fff" stroke-width="2.5" stroke-dasharray="6 5"/>
+  <text class="t w" x="401" y="95" style="font-size:15px">Second model host</text>
+  <text class="s w" x="401" y="115" style="font-size:13px">Optional, not configured</text>
 
-  <path class="ln" d="M407 126V164" marker-end="url(#a)"/>
-  <rect x="318" y="164" width="178" height="56" rx="10" fill="#FF7A00"/>
-  <text class="t w" x="407" y="189">Code fallback</text>
-  <text class="s w" x="407" y="209">No usable model or budget</text>
+  <path class="ln" d="M401 126V164" marker-end="url(#a)"/>
+  <rect x="306" y="164" width="190" height="56" rx="28" fill="#E5101D"/>
+  <text class="t w" x="401" y="189">Code fallback</text>
+  <text class="s w" x="401" y="209" style="font-size:13px">No usable model or budget</text>
 
-  <rect x="318" y="258" width="178" height="150" rx="12" fill="#fff"/>
-  <text class="k" x="407" y="288" style="font-size:20px;font-weight:700">Code decides</text>
-  <text class="s k" x="407" y="318">The model never sets a</text>
-  <text class="s k" x="407" y="338">price, marks a payment</text>
-  <text class="s k" x="407" y="358">paid, or books a slot it</text>
-  <text class="s k" x="407" y="378">has not offered.</text>
+  <rect x="306" y="258" width="190" height="150" rx="12" fill="#fff"/>
+  <text class="k" x="401" y="288" style="font-size:20px;font-weight:700">Code decides</text>
+  <text class="s k" x="401" y="318">The model never sets a</text>
+  <text class="s k" x="401" y="338">price, marks a payment</text>
+  <text class="s k" x="401" y="358">paid, or books a slot it</text>
+  <text class="s k" x="401" y="378">has not offered.</text>
 
   <rect x="24" y="428" width="472" height="56" rx="12" fill="#000" stroke="#fff" stroke-width="2"/>
   <text class="s w" x="260" y="451">Per-salon daily allowances and a circuit breaker:</text>
-  <text class="s w" x="260" y="471">Primary model → optional secondary → deterministic code fallback.</text>
+  <text class="s w" x="260" y="471">Muse Spark 1.3 → deterministic code fallback.</text>
 </svg>

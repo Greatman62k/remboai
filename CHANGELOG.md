@@ -1,6 +1,24 @@
 # Changelog
 
 This file records engineering milestones; dated entries are historical project notes.
+## Engineering follow-up
+471 tests pass against Postgres and Redis; the repository has 40 database migrations.
+
+- Model traces now record the sanitized endpoint, provider request ID, model ID, and latency for text and vision requests.
+- Tightened shared Telegram routing so customers must enter a shop through its invite link or an existing binding. Typed and approximate shop names cannot select another business; owner action buttons are checked against the owning account and channel.
+- Added model-guided post-service feedback, including a follow-up for negative feedback and an owner notification, with feedback retained on the visit record.
+- Expanded registration and assistant guardrails and added regression coverage for shop identity, manual-payment claims, model evidence, and customer feedback.
+- Updated the agent, payment, architecture, and message-lifecycle documentation and diagrams to match the implementation.
+
+## Nov 4 (engineering follow-up)
+451 tests, all passing.
+
+- QR door sticker built into the bot. When a shop goes live, and whenever the owner sends `invite` or `qr`, Telegram sends a printable sticker (shop name, QR code, "Scan to book") together with the invite link. The sticker is made in `app/channels/invites.py` (`sticker_png`) and sent once-only through the normal outbound guard; WhatsApp gets the link until image upload is built. `scripts/invite_qr.py` still works for printing offline.
+
+- New diagrams: life of one message, how a reply is checked (`grounding-checker.svg`), and the manual-payment lifecycle. The existing diagrams were redrawn with rounded shapes, and the architecture and agent-flow diagrams now say plainly that only Muse Spark 1.3 is configured and that WhatsApp is awaiting verification.
+- Limitations and next steps section added; Privacy states where customer messages go; README counts corrected (451 tests, 39 migrations).
+- Site: "Under the hood" section with the Meta models and the measured result, FAQ entries for model outage, data and open source, the sample-chat buttons and empty pricing buttons now link to the Telegram bot, and unbuilt multi-branch features are marked as planned.
+
 ## Nov 3 (manual payment destinations)
 
 - Salon registration now requires a payment destination when the owner sets a nonzero deposit. Owners choose a seven-digit M-PESA till or a phone destination explicitly identified as Pochi la Biashara, direct M-PESA Send Money, or Airtel Money.
@@ -37,7 +55,7 @@ This file records engineering milestones; dated entries are historical project n
 - **Grounding checker**: a reply with a price, time, link, phone number, payment claim, confirmation or deposit waiver the model was not given is rejected, repaired once, then replaced by code-written templates built from the same tool results. Holds, payment steps and cancellations are always worded by code.
 - **Owner assistant**: plain-words questions about bookings and deposits, and owner-requested cancellations, through `bookings_on`, `deposits`, `cancel_booking`.
 - **Fails soft**: model down, breaker open or budget spent falls back to the keyword flow; a retried message resends the stored reply (`agent_turns`, migration 028) instead of asking the model again.
-- **Proof**: `/ops/agent-trace`, `python scripts/probe_tools.py` (does this host do tool calling), `python scripts/agent_eval.py` (model vs keyword rules on 33 messages the rules were not tuned for; rules alone score 19/33), `docs/AGENT.md`, doctor agent lines.
+- **Proof**: `/ops/agent-trace`, `python scripts/probe_tools.py` (does this host do tool calling), `python scripts/agent_eval.py` (model vs keyword rules on 33 messages the rules were not tuned for; rules alone get 25/33 right actions and 19/33 with the right details), `docs/AGENT.md`, doctor agent lines.
 - Mid-conversation follow-ups with no salon words ("ok Brian then") are no longer screened out when agent mode is on.
 - Telegram typing indicator while the model thinks; `_cancel` can target one booking.
 

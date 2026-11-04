@@ -7,7 +7,8 @@ import os
 import pytest
 
 from app.agent.grounding import Facts, check
-from tests.harness import CB_SECRET, NBO, build, callback, client, open_day, post_tg, tg_update
+from app.main import app
+from tests.harness import CB_SECRET, NBO, bind_telegram_customer, build, callback, client, open_day, post_tg, tg_update
 
 DSN = os.environ.get("TEST_DATABASE_URL")
 needs_db = pytest.mark.skipif(not DSN, reason="needs TEST_DATABASE_URL")
@@ -29,6 +30,8 @@ def find(window="afternoon", **extra):
 
 
 async def say(c, uid, text, chat=C1):
+    if chat != OWNER:
+        await bind_telegram_customer(app.state.pool, chat)
     await post_tg(c, tg_update(uid, chat, text))
 
 
@@ -353,6 +356,12 @@ def test_the_ops_trace_shows_what_the_model_did():
             body = (await c.get("/ops/agent-trace", headers={"x-ops-key": key})).json()
         assert body[0]["said"] == "fade tomorrow afternoon" and body[0]["tools"][0]["tool"] == "find_slots"
         assert body[0]["outcome"] == "agent" and body[0]["grounded"] is True and body[0]["customer"] != "tg:5001"
+        requests = body[0]["model_requests"]
+        request = requests[0]
+        assert request["model_id"] == "muse-spark-1.3"
+        assert request["endpoint"] == "https://primary.test/v1/chat/completions"
+        assert request["request_id"] == "chatcmpl-agent-1"
+        assert requests[-1]["request_id"] == "chatcmpl-agent-2"
         await pool.close()
     asyncio.run(run())
 
@@ -410,6 +419,8 @@ def test_owner_summary_and_invite_use_model_tools_while_payment_review_stays_cod
             invite_trace = await pool.fetchrow("SELECT outcome, grounded, steps FROM agent_turns ORDER BY id DESC LIMIT 1")
             assert invite_trace["outcome"] == "agent" and invite_trace["grounded"] is True
             assert [step["tool"] for step in _j(invite_trace["steps"])] == ["invite_link"]
+            # the printable QR sticker arrives as an image, and its upload carries the owner's chat id
+            assert len(out.tg_photos(str(OWNER))) == 1 and out.tg_photos(str(OWNER))[0]["photo_png"]
 
             calls_before_payment_review = len(out.agent_requests)
             await say(c, 3, "pending payments", chat=OWNER)
@@ -422,6 +433,10 @@ def test_owner_summary_and_invite_use_model_tools_while_payment_review_stays_cod
             assert (await pool.fetchval("SELECT outcome FROM agent_turns ORDER BY id DESC LIMIT 1")) == "unavailable"
             await say(c, 5, "invite", chat=OWNER)
             assert "https://t.me/rembo_test_bot?start=zuri-cuts" in last(out, OWNER)["text"]
+            # with the model down, the code path sends the same sticker
+            assert len(out.tg_photos(str(OWNER))) == 2
+            await say(c, 6, "qr", chat=OWNER)
+            assert len(out.tg_photos(str(OWNER))) == 3
         await pool.close()
     asyncio.run(run())
 

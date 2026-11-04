@@ -210,6 +210,28 @@ def test_platform_owner_can_register_own_salon_after_confirming_ownership():
 
 
 @needs_db
+def test_platform_owner_confirmation_uses_model_for_first_registration_question():
+    async def run():
+        from app import onboarding_chat
+        pool, out, _salon = await build(DSN, platform_owner_id=P, agent_mode="on", till=False)
+        out.agent = lambda _body: ("say", "What name should customers know this business by?")
+        async with client() as c:
+            await post_tg(c, tg_update(1, 9001, "I want to register a business"))
+            assert "owned by the same account" in out.tg_bodies("9001")[-1]
+            assert out.agent_requests == []  # the ownership disclosure and consent stay code-controlled
+            await post_tg(c, tg_update(2, 9001, "Yes"))
+            assert "What name should customers know this business by?" in out.tg_bodies("9001")[-1]
+        trace = await pool.fetchrow(
+            "SELECT outcome, model_calls FROM agent_turns WHERE message_id=$1", "tg:2")
+        assert trace["outcome"] == "registration_agent" and trace["model_calls"] == 1
+        state = await onboarding_chat.load_session(pool, P)
+        assert state["step"] == "ask_name" and not state["data"]
+        assert await pool.fetchval("SELECT count(*) FROM salons") == 1
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
 def test_platform_assistant_uses_read_only_tools_for_natural_questions():
     async def run():
         pool, out, salon = await build(DSN, platform_owner_id=P, agent_mode="on", till=False)

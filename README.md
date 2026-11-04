@@ -6,13 +6,14 @@
 RemboAI is a chat-based receptionist for Kenyan barbershops and salons, powered by Meta's Muse Spark. Customers book in English, Swahili or Sheng, by text or voice note. The model understands the request; guarded code checks the diary and payment state before anything is confirmed.
 
 ![Python 3.13](https://img.shields.io/badge/python-3.13-blue)
-![Tests](https://img.shields.io/badge/tests-436_passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-471_passing-brightgreen)
 ![Postgres](https://img.shields.io/badge/postgres-exclusion_constraints-336791)
 ![Payments](https://img.shields.io/badge/payments-M--PESA_%7C_Airtel_Money-00a651)
 ![Meta AI](https://img.shields.io/badge/Meta-Muse_Spark_%C2%B7_Omnilingual_ASR-0866ff)
 ![Licence MIT](https://img.shields.io/badge/licence-MIT-lightgrey)
 
 **[Live website](https://remboai.duckdns.org)** ·
+
 [Try it on Telegram](https://t.me/Remboai1_bot) ·
 [The story](#why-i-built-this) ·
 [Meta AI at the core](#meta-ai-at-the-core) ·
@@ -21,12 +22,6 @@ RemboAI is a chat-based receptionist for Kenyan barbershops and salons, powered 
 [Run it](#run-it)
 
 </div>
-
-> [!NOTE]
-> **Where things stand, honestly.** Telegram is live and is the channel to try. The WhatsApp channel is built and tested end to end in this repository; this account is waiting for Meta business verification before WhatsApp can go live. Messenger is a possible next channel, not part of this demo. Daraja STK runs against the **sandbox**; automatic STK in production needs Safaricom's Go Live approval for each shop. During setup, an owner chooses a manual M-PESA till, Pochi la Biashara number, direct Send Money number, or Airtel Money number. Manual payments go directly to that shop destination and the owner checks each claim. Nothing in the demo is faked: the booking engine, model calls and payment flow are the same code intended for production.
-
-> [!NOTE]
----
 
 ## Why I built this
 
@@ -60,7 +55,7 @@ Both sides of the chair lose today. Customers walk away from a crowded shop, and
 - **The owner's phone is the whole back office.** Registration, the diary, cancellations, away-days, deposits and a daily summary all run over chat. No dashboard, no laptop, no training.
 - **Money goes where it should.** Owners choose an M-PESA till, Pochi la Biashara, direct Send Money, or Airtel Money destination. Daraja STK can also send an M-PESA prompt where configured. Manual transfers go to the shop, and the owner confirms each claim. RemboAI never holds the money.
 - **Their language.** English, Swahili and Sheng, typed or spoken, mixed in one sentence if that's how the customer talks.
-- **One bot, any number of shops.** Invite links and QR stickers carry each shop's slug, and an owner can register in a few minutes of chat.
+- **One bot, any number of shops.** Invite links and QR stickers carry each shop's slug, and an owner can register in a few minutes of chat. The bot sends the printable QR sticker with the link when the shop goes live.
 
 | Without RemboAI | With RemboAI |
 |---|---|
@@ -88,12 +83,28 @@ Both sides of the chair lose today. Customers walk away from a crowded shop, and
 
 | Meta model | Used for | What it can't do |
 |---|---|---|
-| **Muse Spark 1.3** (Meta Model API) | The customer receptionist: understands English, Swahili and Sheng, asks for what's missing, searches real slots and acts through six tools | Set prices, mark a payment as paid, pick a slot it was never offered, or see another customer's booking |
-| **Muse Spark 1.3** | The owner assistant ("who's booked Saturday?", "how much in deposits this week?", "cancel #3") through five validated tools, including model-led daily summaries and invite links | Touch anything outside the owner's own salon |
-| **Muse Spark 1.3** | Registration: owners describe their salon in free text and the model pulls out the fields | Create a salon. Every extracted value must be backed by evidence in the owner's own message and pass the existing parsers; only code creates the salon, after an explicit final yes |
-| **Muse Spark 1.3** (vision) | Matches a hairstyle photo to the salon's own service list, or reads the amount, reference, date/time, and recipient name from a payment screenshot | Set a price or duration, or verify that money arrived. A receipt image creates an unverified claim only; the owner checks the account and confirms it |
-| **Muse Spark Open** (possible optional secondary model, via Baseten) | Could be enabled later with `LLM_FALLBACK_*`; no secondary model is configured in the current deployment | RemboAI does not host its weights. Today, deterministic code fallback handles turns when the primary model is unavailable or unusable |
-| **Omnilingual ASR** `omniASR_LLM_1B_v2` (Meta open-source speech, 1600+ languages, Apache 2.0) | Voice notes to text, self-hosted on a Modal GPU behind proxy auth | Store audio. Only the transcript enters the conversation |
+| **Muse Spark 1.3**, model ID `muse-spark-1.3` | Meta Model API at `https://api.meta.ai/v1`; receptionist, owner and admin agents, registration, hairstyle matching, and payment screenshot extraction | It cannot directly change records or settle payments. Code validates tools, facts, and image fields; only the owner confirms a manual payment. [Meta API reference](https://dev.meta.ai/docs/protocols/chat-completions) |
+| **Omnilingual ASR**, model ID `omniASR_LLM_1B_v2` | Meta open-source checkpoint run on RemboAI's Modal GPU endpoint; transcribes voice notes to text | It does not generate replies or retain the audio. Only the transcript enters the conversation. [Meta model repository](https://github.com/facebookresearch/omnilingual-asr) |
+
+The current deployment has no secondary model. If Muse Spark is unavailable or its reply fails validation, deterministic code handles the turn. The optional Muse Spark Open example is a Meta open-weight model hosted by a provider; its weights are not part of this repository.
+
+### Architecture and operational verification
+**The customer interface is Telegram, not a PWA.** The public website is static marketing content. On a phone, use Telegram's camera attachment to send a hairstyle photo or a manual-payment receipt to the live bot.
+
+For a hairstyle photo, Telegram delivers the image to the FastAPI app. The app fetches it in memory and sends it to Meta Model API's `POST /v1/chat/completions` using `muse-spark-1.3`. The model returns a candidate service; code matches that name against the business menu and supplies the stored price and duration. For a payment screenshot, the same model extracts receipt fields. Code checks the configured provider and expected deposit, then creates an **unverified claim** for the owner. The owner alone confirms payment. Images are discarded after processing.
+
+The demo deployment serves the static site and Dockerized FastAPI, PostgreSQL, and Redis on an Oracle Cloud VM behind Caddy HTTPS. Telegram is the live chat transport. Voice transcription runs separately on RemboAI's Modal GPU endpoint. WhatsApp and Safaricom Daraja are third-party integrations; Daraja STK is in sandbox for the demo.
+
+Protected logs are JSON endpoints rather than an in-app logs screen. After sending a live photo, open `/ops/conversation-trace` to see the customer-facing output beside `agent.model_requests`, including backend, model ID, endpoint, response/request ID, and latency. `/ops/agent-trace` shows text-agent tool calls. Both require `X-Ops-Key` and retain records for the configured period. The protected `/model-info` endpoint shows the active model and sanitized endpoint. For example, with `DOMAIN` and `OPS_API_KEY` set in the operator's shell:
+
+```bash
+curl -fsS -H "X-Ops-Key: $OPS_API_KEY" "https://$DOMAIN/ops/conversation-trace?limit=10" | python -m json.tool
+curl -fsS -H "X-Ops-Key: $OPS_API_KEY" "https://$DOMAIN/model-info" | python -m json.tool
+```
+
+The Meta Model API key stays in the server's private `.env`; it is never sent to Telegram or the browser and `.env` is not committed. [`.env.example`](.env.example) documents the model settings without a key. the app supports this salon-booking workflow; supporting libraries and services include Python, FastAPI, PostgreSQL, Redis, Docker, Caddy, Telegram Bot API, Modal, and Safaricom Daraja.
+
+To reproduce locally, clone this repository, copy `.env.example` to `.env`, add your own Meta Model API key and Telegram bot token, then run `docker compose up --build -d` and `docker compose exec app python scripts/doctor.py`. The doctor checks the live model configuration and vision extraction using a synthetic receipt. For local verification, exercise the Telegram camera-to-reply flow and inspect its protected conversation trace and model configuration.
 
 ### Model and ASR provider configuration
 The repository provides RemboAI's Modal deployment for the voice inference endpoint. It runs Meta's open-source Omnilingual ASR checkpoint, defaulting to `omniASR_LLM_1B_v2`; the deployed model name is selected by `ASR_MODEL`. The implementation is [`deploy/modal_asr.py`](deploy/modal_asr.py), which loads the checkpoint through `omnilingual-asr` and caches its weights in a Modal volume. See [Meta's model source and model list](https://github.com/facebookresearch/omnilingual-asr) and its [Apache 2.0 license](https://github.com/facebookresearch/omnilingual-asr/blob/main/LICENSE).
@@ -135,6 +146,18 @@ To verify the hosted speech model:
   <img src="docs/assets/architecture.svg" alt="Architecture: WhatsApp and Telegram connect to one FastAPI app backed by Postgres and Redis. The app supports M-PESA STK and owner-verified manual M-PESA or Airtel Money transfers, calls Muse Spark, uses deterministic code fallback when no model can answer, and sends voice notes to a self-hosted Omnilingual ASR model. An optional secondary model endpoint can be configured." width="520">
 </p>
 
+### Life of one message
+
+<p align="center">
+  <img src="docs/assets/message-lifecycle.svg" alt="Life of one message: a verified webhook, a durable Postgres queue, a stale-message check, abuse screening and limits, the Muse Spark agent loop, a grounding check on the reply and a single send." width="640">
+</p>
+
+### How a reply is checked
+
+<p align="center">
+  <img src="docs/assets/grounding-checker.svg" alt="The model draft goes through the grounding check. A passing draft is sent. A failing draft gets one repair attempt, and if it fails again code writes the reply from the tool results. Example: an injected price of 50 is rejected." width="640">
+</p>
+
 ### A booking, end to end
 
 <p align="center">
@@ -151,17 +174,9 @@ After a manual transfer, the customer can send its amount and transaction refere
 
 If a screenshot or message reports an amount that differs from the expected deposit, it enters the same durable owner inbox with both amounts labelled. The owner can accept the amount actually received or decline it after checking the account. Neither a model reading nor a customer-provided reference can settle the claim.
 
-```text
-Customer selects a slot
-  -> database holds it; owner gets a 5-minute Available / Unavailable request
-  -> Available: customer receives manual payment instructions
-  -> customer sends transfer details or screenshot; claim waits for the owner
-  -> owner confirms: booking is confirmed if its hold is still valid
-  -> no owner response for 30 minutes: slot is released, claim stays open
-  -> owner sends “pending payments”: every open claim is rebuilt as an individual decision
-  -> late confirmation: code rechecks the slot under a database lock; if taken or cancelled,
-     the payment enters refund review and the customer is told not to pay again
-```
+<p align="center">
+  <img src="docs/assets/manual-payment.svg" alt="Manual payment lifecycle: the slot is held for five minutes while the owner confirms availability. The customer pays the shop's destination and sends a code or screenshot, which Muse Spark vision reads as an unverified claim. Only the owner's tap confirms. After 30 minutes without an answer the slot is released but the claim stays pending. A late confirmation rechecks the slot and either confirms the booking or sends the payment to refund review." width="560">
+</p>
 
 These deadlines and claim states are stored in Postgres, so more bookings do not overwrite earlier claims and a customer cancelling after sending a claim does not hide it from the owner. The 30-minute limit releases the appointment hold; it does not erase the claim. An owner decline is an explicit resolution. See the [agent and payment design](docs/AGENT.md) for the state transitions and validation boundaries.
 
@@ -187,15 +202,22 @@ Money and calendars are where small businesses get hurt, so those paths are buil
 ## Run it
 
 ```bash
-cp .env.example .env          # fill in your own values, then chmod 600 .env
+if [ ! -e .env ]; then cp .env.example .env; fi
+chmod 600 .env
 docker compose up --build -d  # Postgres + Redis + the app on :8080
 ```
+
+Set `LLM_API_KEY` to a Meta Model API key in `.env`. To chat with the bot locally, create a Telegram bot with [@BotFather](https://t.me/BotFather) and set `TELEGRAM_BOT_TOKEN`; see [Telegram setup](docs/TELEGRAM.md). Docker provides the Python runtime and packages, so no host Python setup is needed.
+
+The container serves the backend API, not a local chat page. Check `http://localhost:8080/health` for `{"ok":true}` and chat through your Telegram bot. The public marketing site is [remboai.duckdns.org](https://remboai.duckdns.org).
+
+Telegram is optional for startup and tests. Without `TELEGRAM_BOT_TOKEN`, this local instance will not receive Telegram messages. To try the hosted conversation without creating a bot, message [@Remboai1_bot](https://t.me/Remboai1_bot).
 
 With no public URL the Telegram bot uses long polling, so a laptop or any small VM is enough. Check the whole set-up (tokens, models, M-Pesa, public URL) and get told what to fix:
 
 ```bash
-docker compose exec app python scripts/doctor.py
-python scripts/probe_tools.py      # does this model host support tool calling?
+docker compose exec -T app python scripts/doctor.py
+docker compose exec -T app python scripts/probe_tools.py  # does this model host support tool calling?
 ```
 
 Doctor also sends a generated, PII-free sample M-PESA receipt through the configured vision model and checks the provider, amount, reference, date/time, and recipient it extracts. It uses only synthetic data, creates no payment, and stores no image. Operators can run the same command to verify live screenshot extraction.
@@ -208,10 +230,13 @@ Production, with a domain and automatic HTTPS: [docs/DEPLOY.md](docs/DEPLOY.md).
 <br>
 
 ```bash
-docker compose -f docker-compose.test.yml -p remboai-test up -d --wait
-docker run --rm --network remboai-test_default -v $PWD:/srv -w /srv --user root \
-  -e TEST_DATABASE_URL=postgresql://rembo_test:rembo_test@test-db:5432/rembo_test \
-  remboai-app python -m pytest -q
+if docker compose -f docker-compose.test.yml -p remboai-tests up --build --abort-on-container-exit --exit-code-from test test; then
+  test_result=0
+else
+  test_result=$?
+fi
+docker compose -f docker-compose.test.yml -p remboai-tests down -v
+test "$test_result" -eq 0
 ```
 
 </details>
@@ -229,7 +254,7 @@ docker run --rm --network remboai-test_default -v $PWD:/srv -w /srv --user root 
 | `app/onboarding_chat.py`, `app/onboarding_agent.py` | Validated salon registration with natural model-guided intake and a deterministic fallback |
 | `app/channels/` | WhatsApp and Telegram wire formats, one sender, invite links and QR stickers; both produce the same message |
 | `app/ai/` | The model gateway (labelled backends, breaker, call log), the extraction fallback, voice notes to text, hairstyle photos to services |
-| `app/conversation.py` | Routing (deep link, binding, business picker) and the conversation |
+| `app/conversation.py` | Routing by invite link or existing binding, and the conversation |
 | `app/availability.py`, `app/bookings.py`, `app/booking_flow.py` | The calendar and the booking engine every path shares |
 | `app/payments.py`, `app/mpesa.py` | Deposits: M-PESA STK, manual M-PESA/Airtel claims, idempotent settlement, refund parking, reconciliation sweeper |
 | `app/waitlist.py`, `app/reminders.py` | Waitlist fill, 24h / 3h / 2h reminders, 30m customer and owner ETA notices |
@@ -245,9 +270,18 @@ docker run --rm --network remboai-test_default -v $PWD:/srv -w /srv --user root 
 
 </details>
 
+## Limitations and next steps
+
+- **Channels.** Telegram is live. WhatsApp is built and tested here but waits on Meta business verification, and its out-of-window reminders need approved Utility templates.
+- **Payments.** Daraja STK runs on the sandbox; production needs Safaricom's Go Live approval for each shop. Manual transfers work today, but they rely on the owner checking the account before tapping confirm.
+- **Evidence is small.** The agent eval is 33 messages and scores only the model's first move. Photo matching and screenshot reading are built and unit-tested but not yet measured on a labelled photo set.
+- **One model host.** Only Muse Spark 1.3 is configured; when it is unavailable the deterministic code flow answers, which is safe but less flexible. A second host can be added with `LLM_FALLBACK_*`.
+- **One small server.** The live demo runs on a single free-tier VM with no high availability.
+- **Next.** WhatsApp go-live, STK Go Live for pilot shops, a larger labelled eval including photos, and a secondary model host.
+
 ## Privacy
 
-Voice notes and photos are processed in memory and never stored (voice by our own speech service, photos by Muse Spark). A payment screenshot is discarded after extraction; only the amount, transaction reference, date/time, recipient name, and unverified-claim status are attached to the payment record. For debugging and for operational inspection, chat text and replies are kept in a protected trace for 14 days by default, with sender identities represented by keyed opaque thread IDs, and the trace is deleted with a salon. A salon with no bookings for 14 days is removed automatically, along with its data.
+Voice notes and photos are processed in memory and never stored (voice by our own speech service, photos by Muse Spark). A payment screenshot is discarded after extraction; only the amount, transaction reference, date/time, recipient name, and unverified-claim status are attached to the payment record. For debugging and for operational inspection, chat text and replies are kept in a protected trace for 14 days by default, with sender identities represented by keyed opaque thread IDs, and the trace is deleted with a salon. A salon with no bookings for 14 days is removed automatically, along with its data. Customer messages are sent to Meta's Model API to be answered.
 
 ## Licence
 

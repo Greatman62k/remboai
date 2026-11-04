@@ -33,7 +33,7 @@ _REPLIES = {
         "deposit": "Deposits are set by the business to secure your slot. I've forwarded your request to the owner who can advise you personally.",
         "complaint": "Thank you for your patience and for letting us know. I've shared your feedback with the business owner who will follow up with you directly and help resolve this.",
         "medical": "I'm sorry to hear about that. For health matters, please seek medical advice promptly if needed. I've alerted the business owner who will contact you shortly to assist.",
-        "emergency": "If this is an emergency, please contact emergency services (999 or 112) immediately. I've also alerted the business owner.",
+        "emergency": "I'm sorry you're feeling this way. If you may be in immediate danger, call Kenya emergency services on 999 or 112 now, and stay with someone you trust. I've also alerted the business owner.",
         "legal": "Thank you for sharing this. I've passed your message to the business owner who will respond directly.",
         "harassment": "We keep conversations respectful and focused on bookings. I've passed your message to the business owner for review.",
         "privacy": "For privacy, I can't share other clients' or staff details. I've forwarded your request to the owner to assist you directly.",
@@ -46,7 +46,7 @@ _REPLIES = {
         "deposit": "Amana huwekwa na biashara kuhakikisha nafasi yako. Nimepeleka ombi lako kwa mmiliki atakayekushauri.",
         "complaint": "Asante kwa kutujulisha na kwa uvumilivu wako. Nimepeleka maoni yako kwa mmiliki wa biashara ambaye atafuatilia moja kwa moja.",
         "medical": "Pole sana. Kwa masuala ya afya, tafadhali tafuta ushauri wa kitaalam haraka ikiwa ni lazima. Nimemjulisha mmiliki wa biashara.",
-        "emergency": "Kama ni dharura, tafadhali piga 999 au 112 mara moja. Nimemjulisha mmiliki wa biashara pia.",
+        "emergency": "Pole kwa unavyohisi. Ikiwa uko katika hatari ya haraka, piga huduma za dharura Kenya kwa 999 au 112 sasa, na ukae na mtu unayemwamini. Nimemjulisha mmiliki wa biashara pia.",
         "legal": "Asante kwa kutujulisha. Nimepeleka ujumbe wako kwa mmiliki wa biashara ambaye atajibu moja kwa moja.",
         "harassment": "Tunaheshimu mazungumzo ya heshima na tunajikita kwenye miadi. Nimepeleka ujumbe wako kwa mmiliki.",
         "privacy": "Kwa usiri, siwezi kushiriki maelezo ya wateja wengine. Nimepeleka ombi lako kwa mmiliki.",
@@ -57,7 +57,7 @@ _REPLIES = {
 
 _SENSITIVE = [
     ("emergency", "en", r"\b(emergency|ambulance|suicide|suicidal|kill myself|want to die|hurt myself|self[- ]harm)\b"),
-    ("emergency", "sw", r"\b(dharura|nataka kufa|najiua|kujiua)\b"),
+    ("emergency", "sw", r"\b(dharura|nataka kufa|nataka kujiumiza|najiua|nitajiua|kujiua|nitajiumiza|kujiumiza)\b"),
     ("legal", "en", r"\b(lawyer|lawsuit|sue you|consumer protection)\b|\breport (you|the (?:salon|shop|business))\b|\bpolice\b(?!\W+(?:station|post|barracks|lines?)\b)|"
                     r"\b(?:report(?:ing)?|call(?:ing)?|tak(?:e|ing))\b(?:\W+\w+){0,3}?\W+(?:to\W+)?(?:the\W+)?police\b"),
     ("legal", "sw", r"\b(wakili|mahakama|nitakushtaki)\b|(?<!kituo cha )\bpolisi\b"),
@@ -112,7 +112,10 @@ async def hand_off(ctx, salon: dict, client: dict, lang: str, category: str, tex
     log = logging.getLogger("rembo.guard")
     try:
         await ctx.pool.execute(
-            "INSERT INTO handoffs (salon_id, client_id, category, message) VALUES ($1::uuid,$2::uuid,$3,$4) ON CONFLICT (client_id) WHERE status = 'open' DO NOTHING",
+            "INSERT INTO handoffs (salon_id, client_id, category, message) VALUES ($1::uuid,$2::uuid,$3,$4) "
+            "ON CONFLICT (client_id) WHERE status = 'open' DO UPDATE SET "
+            "category=CASE WHEN EXCLUDED.category='emergency' THEN EXCLUDED.category ELSE handoffs.category END, "
+            "message=CASE WHEN EXCLUDED.category='emergency' THEN EXCLUDED.message ELSE handoffs.message END",
             salon["id"], client["id"], category, text[:1000],
         )
     except Exception:
