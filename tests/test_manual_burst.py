@@ -130,6 +130,9 @@ def test_only_so_many_availability_questions_reach_the_owner_at_once(monkeypatch
         assert await pool.fetchval("SELECT count(*) FROM bookings WHERE status='held'") == 3, "and took no slot"
         # once the owner answers one, the next customer gets through
         first = await pool.fetchval("SELECT id::text FROM bookings WHERE owner_check_status='pending' ORDER BY created_at LIMIT 1")
+        # The concurrent requests may have left 09:00 occupied. Use a separate
+        # valid slot so this assertion measures the owner queue cap, not slot contention.
+        out.script["book 0"] = {"intent": "book", "service": "fade", "date": day.isoformat(), "time": "17:00"}
         async with client() as c:
             await post(c, payload(owner, reply_id=f"availability:no:{first}", mid="no1"))
             await _pick(c, 0, told[0])
