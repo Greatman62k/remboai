@@ -28,6 +28,10 @@ class OpenHandoffsError(RuntimeError):
     pass
 
 
+class PendingOutboundError(RuntimeError):
+    pass
+
+
 async def delete_salon(pool, salon_id: str) -> dict:
     """Remove a salon and everything that cannot outlive it. Tables with
     ON DELETE CASCADE follow the salon row on their own; bookings and payments
@@ -40,6 +44,9 @@ async def delete_salon(pool, salon_id: str) -> dict:
                 return {"reviews": 0, "callbacks": 0, "payments": 0, "bookings": 0, "salons": 0}
             if await con.fetchval("SELECT 1 FROM handoffs WHERE salon_id=$1::uuid AND status='open' LIMIT 1", salon_id):
                 raise OpenHandoffsError("salon has open handoffs; resolve them before deletion")
+            if await con.fetchval(
+                "SELECT 1 FROM outbound_outbox WHERE salon_id=$1::uuid AND state IN ('queued','sending','submitted','unknown') LIMIT 1", salon_id):
+                raise PendingOutboundError("salon has outbound messages awaiting a definitive outcome")
             out["reviews"] = int((await con.execute(
                 "DELETE FROM payment_reviews WHERE payment_id IN (SELECT id FROM payments WHERE salon_id=$1::uuid)", salon_id)).split()[-1])
             out["callbacks"] = int((await con.execute(
@@ -50,6 +57,9 @@ async def delete_salon(pool, salon_id: str) -> dict:
             await con.execute("DELETE FROM agent_turns WHERE salon_id=$1::uuid", salon_id)
             await con.execute("DELETE FROM conversation_trace WHERE salon_id=$1::uuid", salon_id)
             await con.execute("DELETE FROM reminder_jobs WHERE salon_id=$1::uuid", salon_id)
+            # Outbound audit is RESTRICTed from cascading away with its case; erase
+            # terminal audit rows explicitly as part of this confirmed salon purge.
+            await con.execute("DELETE FROM outbound_outbox WHERE salon_id=$1::uuid", salon_id)
             out["bookings"] = int((await con.execute("DELETE FROM bookings WHERE salon_id=$1::uuid", salon_id)).split()[-1])
             out["salons"] = int((await con.execute("DELETE FROM salons WHERE id=$1::uuid", salon_id)).split()[-1])
     clear_salon_cache()
@@ -131,8 +141,8 @@ async def sweep(ctx) -> dict:
                 try:
                     await delete_salon_and_notify(ctx, salon["id"])
                     done["deleted"].append(salon["id"])
-                except OpenHandoffsError:
-                    log.warning("not deleting salon %s: an owner handoff is still open", salon["id"])
+                except (OpenHandoffsError, PendingOutboundError) as exc:
+                    log.warning("not deleting salon %s: %s", salon["id"], exc)
             continue
         lang = await owner_lang(ctx.pool, salon["id"], salon["owner_wa_id"])
         if age < FINAL_DAYS:
@@ -150,8 +160,8 @@ async def sweep(ctx) -> dict:
         try:
             await delete_salon_and_notify(ctx, salon["id"])
             done["deleted"].append(salon["id"])
-        except OpenHandoffsError:
-            log.warning("not deleting salon %s: an owner handoff is still open", salon["id"])
+        except (OpenHandoffsError, PendingOutboundError) as exc:
+            log.warning("not deleting salon %s: %s", salon["id"], exc)
             continue
         try:
             await outbound.send_plain(ctx, salon["owner_wa_id"], t(lang, "owner_deleted", salon=salon["name"]))

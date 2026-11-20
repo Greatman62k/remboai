@@ -4,6 +4,10 @@ from __future__ import annotations
 import json
 
 
+class CaseHasSendingReply(RuntimeError):
+    """A provider send is in progress and cannot be atomically cancelled."""
+
+
 
 def channel_for(identity: str | None) -> str:
     return "telegram" if (identity or "").startswith("tg:") else "whatsapp"
@@ -85,15 +89,16 @@ async def create_handoff(pool, salon_id: str, client_id: str, customer_identity:
                 raise ValueError("handoff salon and customer do not match")
 
             case_row = await con.fetchrow(
-                "SELECT id::text, salon_id::text, client_id::text, status FROM handoffs "
+                "SELECT id::text, salon_id::text, client_id::text, status, category FROM handoffs "
                 "WHERE salon_id=$1::uuid AND client_id=$2::uuid AND status='open' FOR UPDATE",
                 salon_id, client_id)
             created = case_row is None
             if created:
                 case_row = await con.fetchrow(
                     "INSERT INTO handoffs (salon_id,client_id,category,message) VALUES ($1::uuid,$2::uuid,$3,$4) "
-                    "RETURNING id::text,salon_id::text,client_id::text,status", salon_id, client_id, category, text[:1000])
+                    "RETURNING id::text,salon_id::text,client_id::text,status,category", salon_id, client_id, category, text[:1000])
             case = dict(case_row)
+            effective_category = category if created or category == "emergency" else case.get("category", category)
 
             prior = None
             if source_message_id:
@@ -106,6 +111,11 @@ async def create_handoff(pool, salon_id: str, client_id: str, customer_identity:
                 inbound = await _next_event(
                     con, case, event_type="customer_message", actor_type="customer", visibility="customer_visible",
                     body=text, channel=channel, provider_message_id=source_message_id, bump_version=not created)
+                if not created:
+                    await con.execute(
+                        "UPDATE outbound_outbox SET state='cancelled',last_error_category='stale_case_version',updated_at=now() "
+                        "WHERE handoff_id=$1::uuid AND state='queued' AND approved_case_version<>$2",
+                        case["id"], inbound["case_version"])
                 if created:
                     await _next_event(con, case, event_type="case_opened", actor_type="system", visibility="owner_internal",
                                       body=category, channel=channel)
@@ -114,7 +124,7 @@ async def create_handoff(pool, salon_id: str, client_id: str, customer_identity:
                         con, case, event_type="owner_notification", actor_type="system", visibility="owner_internal",
                         body=owner_notification, channel=channel, related_event_id=inbound["id"])
 
-            state = json.dumps({"state": "handoff", "category": category})
+            state = json.dumps({"state": "handoff", "category": effective_category})
             await con.execute(
                 "INSERT INTO conversations (salon_id,wa_id,state) VALUES ($1::uuid,$2,$3::jsonb) "
                 "ON CONFLICT (salon_id,wa_id) DO UPDATE SET state=EXCLUDED.state,updated_at=now()",
@@ -150,6 +160,10 @@ async def record_customer_message(pool, salon_id: str, customer_identity: str,
             event = await _next_event(
                 con, case, event_type="customer_message", actor_type="customer", visibility="customer_visible",
                 body=text, channel=channel, provider_message_id=provider_message_id, bump_version=True)
+            await con.execute(
+                "UPDATE outbound_outbox SET state='cancelled',last_error_category='stale_case_version',updated_at=now() "
+                "WHERE handoff_id=$1::uuid AND state='queued' AND approved_case_version<>$2",
+                case["id"], event["case_version"])
             return {"handoff_id": case["id"], "event_id": event["id"], "version": event["case_version"], "duplicate": False}
 
 
@@ -208,6 +222,11 @@ async def resolve_handoff(pool, salon_id: str, handoff_id: str, actor_identity: 
             case = dict(case_row)
             if case["status"] != "open":
                 return {"id": case["id"], "status": "resolved", "already_resolved": True}
+            if await con.fetchval("SELECT 1 FROM outbound_outbox WHERE handoff_id=$1::uuid AND state='sending' LIMIT 1", case["id"]):
+                raise CaseHasSendingReply("a customer reply is currently being submitted")
+            await con.execute(
+                "UPDATE outbound_outbox SET state='cancelled',last_error_category='case_resolved',updated_at=now() "
+                "WHERE handoff_id=$1::uuid AND state='queued'", case["id"])
             updated = await con.fetchrow(
                 "UPDATE handoffs SET status='resolved',resolved_at=now(),resolved_by=$2,resolution_reason=$3,version=version+1,event_seq=event_seq+1 "
                 "WHERE id=$1::uuid AND status='open' RETURNING event_seq,version", case["id"], actor_identity, reason)

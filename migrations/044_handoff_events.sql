@@ -49,6 +49,17 @@ CREATE TABLE handoff_events (
         REFERENCES handoff_events (id, handoff_id, salon_id, client_id) ON DELETE CASCADE
 );
 
+-- handoffs.message is written only from the customer's triggering text by the
+-- pre-event guard path. It is safe to expose as one initial customer event;
+-- diagnostic conversation traces are intentionally not imported.
+INSERT INTO handoff_events (handoff_id,salon_id,client_id,sequence,event_type,actor_type,visibility,body,channel,created_at)
+SELECT h.id,h.salon_id,h.client_id,1,'customer_message','customer','customer_visible',h.message,
+       CASE WHEN c.wa_id LIKE 'tg:%' THEN 'telegram' ELSE 'whatsapp' END,h.created_at
+FROM handoffs h JOIN clients c ON c.id=h.client_id AND c.salon_id=h.salon_id
+WHERE h.message IS NOT NULL AND btrim(h.message) <> '';
+UPDATE handoffs h SET event_seq=1 WHERE h.event_seq=0 AND EXISTS (
+    SELECT 1 FROM handoff_events e WHERE e.handoff_id=h.id AND e.sequence=1);
+
 CREATE UNIQUE INDEX handoff_events_provider_message_uniq
     ON handoff_events (salon_id, channel, provider_message_id)
     WHERE provider_message_id IS NOT NULL AND event_type = 'customer_message';

@@ -171,14 +171,18 @@ async def owner_command(ctx, salon: dict, wa_id: str, text: str, send) -> bool:
         target = m.group(1)
         target = target.lower() if target.lower().startswith("tg:") else target.lstrip("+")
 
-    from .handoffs import resolve_handoff
+    from . import handoffs
     target_case = await ctx.pool.fetchrow(
         "SELECT h.id::text FROM handoffs h JOIN clients c ON c.id=h.client_id AND c.salon_id=h.salon_id "
         "WHERE h.salon_id=$1::uuid AND h.status='open' AND c.wa_id=$2 ORDER BY h.created_at LIMIT 1", salon["id"], target)
     if not target_case:
         await send.text(f"There is no open request for {display_contact(target)}.")
         return True
-    resolved = await resolve_handoff(ctx.pool, salon["id"], target_case["id"], wa_id, "owner_resolved_via_telegram")
+    try:
+        resolved = await handoffs.resolve_handoff(ctx.pool, salon["id"], target_case["id"], wa_id, "owner_resolved_via_telegram")
+    except handoffs.CaseHasSendingReply:
+        await send.text("A reply is currently being submitted to that customer. Try RESOLVE again after it finishes.")
+        return True
     if not resolved or resolved.get("already_resolved"):
         await send.text(f"There is no open request for {display_contact(target)}.")
         return True

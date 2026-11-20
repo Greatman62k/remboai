@@ -24,7 +24,7 @@ from .payments import run_sweeper
 from .channels.telegram import Channels, Telegram, parse_update, run_poller
 from .ai.vision import StyleMatcher
 from .ai.voice import Transcriber
-from .channels.whatsapp import Message, WhatsApp, explain, mask, parse_failures, parse_messages, verify_signature
+from .channels.whatsapp import Message, WhatsApp, explain, mask, parse_failures, parse_messages, parse_receipts, verify_signature
 
 from .agent import AgentModel
 from .webhook_jobs import QueueCapacityError, enqueue_jobs, webhook_worker, list_dead_jobs, requeue_dead_job, purge_expired_data
@@ -153,11 +153,13 @@ async def lifespan(app: FastAPI):
         workers.append(asyncio.create_task(webhook_worker(app.state.ctx)))
     retention_task = asyncio.create_task(_retention_loop(app.state.ctx))
     reminder_task = asyncio.create_task(_reminder_loop(app.state.ctx))
+    from .handoff_outbox import worker as handoff_outbox_worker
+    handoff_outbox_task = asyncio.create_task(handoff_outbox_worker(app.state.ctx))
     yield
-    for t in workers + [sweeper, poller, retention_task, reminder_task]:
+    for t in workers + [sweeper, poller, retention_task, reminder_task, handoff_outbox_task]:
         if t:
             t.cancel()
-    await asyncio.gather(*(t for t in workers + [sweeper, poller, retention_task, reminder_task] if t), return_exceptions=True)
+    await asyncio.gather(*(t for t in workers + [sweeper, poller, retention_task, reminder_task, handoff_outbox_task] if t), return_exceptions=True)
     await http.aclose()
     if redis_client is not None:
         try:
@@ -297,6 +299,13 @@ async def receive(request: Request, bg: BackgroundTasks):
         raise HTTPException(400)
     for f in parse_failures(payload):
         log.error("DELIVERY FAILED to %s code=%s %s | %s", mask(f.to), f.code, f.title, explain(f.code))
+    from .handoff_outbox import record_whatsapp_receipt
+    for receipt in parse_receipts(payload):
+        if receipt.status in ("delivered", "read", "failed") and receipt.phone_number_id:
+            try:
+                await record_whatsapp_receipt(request.app.state.pool, receipt.phone_number_id, receipt)
+            except Exception:
+                log.exception("could not record a WhatsApp delivery receipt")
     events = []
     for msg in parse_messages(payload):
         events.append((msg.id, {"id": msg.id, "sender": msg.sender, "phone_number_id": msg.phone_number_id, "kind": msg.kind, "text": msg.text, "media_id": msg.media_id, "name": msg.name, "reply_id": msg.reply_id, "wa_id": msg.sender, "sent_at": msg.sent_at.isoformat() if msg.sent_at else None}))

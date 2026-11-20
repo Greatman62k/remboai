@@ -513,6 +513,8 @@ async def test_a_handoff_really_pauses_the_bot_and_tells_the_owner_who_to_contac
         await post(c, payload(A, "I want to speak to the owner", mid="p1"))
         await _run_job_to_exhaustion(pool, app.state.ctx)
         assert await pool.fetchval("SELECT state->>'state' FROM conversations WHERE wa_id=$1", A) == "handoff"
+        trace_replies = await pool.fetch("SELECT body FROM conversation_trace_replies WHERE message_id='p1'")
+        assert len(trace_replies) == 1 and "Needs a human" not in trace_replies[0]["body"]
         alert = out.bodies(OWNER)[-1]
         assert f"https://wa.me/{A}" in alert and f"resolve {A}" in alert
         await post(c, payload(A, "hi", mid="p2"))

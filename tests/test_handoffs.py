@@ -131,3 +131,24 @@ async def test_salon_deletion_is_blocked_until_open_handoffs_are_resolved():
     assert await pool.fetchval("SELECT count(*) FROM salons WHERE id=$1::uuid", salon_id) == 1
     assert await pool.fetchval("SELECT count(*) FROM handoffs WHERE status='open'") == 1
     await pool.close()
+
+
+@needs_db
+@pytest.mark.asyncio
+async def test_resolved_case_retention_explicitly_removes_its_related_timeline():
+    from app.handoffs import create_handoff, resolve_handoff
+    from app.webhook_jobs import purge_expired_data
+
+    pool, _, salon_id = await build(DSN)
+    await pool.execute("UPDATE salons SET owner_wa_id='254700000008' WHERE id=$1::uuid", salon_id)
+    client = await pool.fetchrow(
+        "INSERT INTO clients (salon_id,wa_id) VALUES ($1::uuid,'254700000009') RETURNING id::text,wa_id", salon_id)
+    case = await create_handoff(pool, salon_id, client["id"], client["wa_id"], "complaint", "Please help",
+                                source_message_id="wamid.retention", owner_notification="Internal notice")
+    await resolve_handoff(pool, salon_id, case["id"], "254700000008", "owner completed review")
+    await pool.execute("UPDATE handoffs SET resolved_at=now()-interval '40 days' WHERE id=$1::uuid", case["id"])
+    assert await pool.fetchval("SELECT count(*) FROM handoff_events WHERE handoff_id=$1::uuid", case["id"]) == 4
+    result = await purge_expired_data(pool, handoff_days=30)
+    assert result["handoffs"] == 1
+    assert await pool.fetchval("SELECT count(*) FROM handoff_events WHERE handoff_id=$1::uuid", case["id"]) == 0
+    await pool.close()

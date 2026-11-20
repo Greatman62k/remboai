@@ -283,10 +283,17 @@ async def purge_expired_data(pool, webhook_days: int = 30, inbound_days: int = 9
     await pool.execute("DELETE FROM agent_turns WHERE created_at < now() - ($1 * interval '1 day')", agent_days)
     p = await pool.fetchval("WITH deleted AS (DELETE FROM platform_agent_sessions WHERE updated_at < now() - ($1 * interval '1 day') RETURNING 1) SELECT count(*) FROM deleted", agent_days)
     t = await pool.fetchval("WITH deleted AS (DELETE FROM conversation_trace WHERE created_at < now() - ($1 * interval '1 day') RETURNING 1) SELECT count(*) FROM deleted", agent_days)
-    h = await pool.fetchval(
-        "WITH deleted AS (DELETE FROM handoffs WHERE status='resolved' "
-        "AND COALESCE(resolved_at, created_at) < now() - ($1 * interval '1 day') RETURNING 1) "
-        "SELECT count(*) FROM deleted", handoff_days)
+    async with pool.acquire() as con:
+        async with con.transaction():
+            await con.execute(
+                "DELETE FROM outbound_outbox WHERE handoff_id IN (SELECT id FROM handoffs WHERE status='resolved' "
+                "AND COALESCE(resolved_at,created_at) < now()-($1 * interval '1 day')) "
+                "AND state IN ('delivered','failed','cancelled')", handoff_days)
+            h = await con.fetchval(
+                "WITH deleted AS (DELETE FROM handoffs h WHERE h.status='resolved' "
+                "AND COALESCE(h.resolved_at,h.created_at) < now()-($1 * interval '1 day') "
+                "AND NOT EXISTS (SELECT 1 FROM outbound_outbox o WHERE o.handoff_id=h.id) RETURNING 1) "
+                "SELECT count(*) FROM deleted", handoff_days)
     cb = await pool.fetchval(
         "WITH deleted AS (DELETE FROM mpesa_callbacks c WHERE c.received_at < now() - ($1 * interval '1 day') "
         "AND NOT EXISTS (SELECT 1 FROM payments p WHERE p.checkout_request_id=c.checkout_request_id AND p.status='pending') RETURNING 1) "

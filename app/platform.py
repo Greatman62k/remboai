@@ -308,6 +308,9 @@ async def handle(ctx, sender: str, text: str) -> bool:
         except lifecycle.OpenHandoffsError:
             await say("This business still has an open request waiting for its owner. Resolve it before deleting the business.")
             return True
+        except lifecycle.PendingOutboundError:
+            await say("This business still has a customer reply awaiting a delivery outcome. Try deleting it again after that is resolved.")
+            return True
         await say(f"Deleted {found[0]['name']}: {counts['bookings']} bookings, {counts['payments']} payments. "
                   f"{counts['notified']} customer(s) told.")
         return True

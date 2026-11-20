@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 
 import httpx
 
+from .results import SendResult
+
 log = logging.getLogger("rembo.wa")
 
 ERROR_HINTS = {
@@ -69,6 +71,15 @@ class Failure:
     title: str
 
 
+@dataclass(frozen=True, slots=True)
+class Receipt:
+    provider_message_id: str
+    phone_number_id: str | None
+    status: str
+    timestamp: datetime | None
+    error_code: str | None = None
+
+
 def _values(payload: dict):
     for entry in payload.get("entry") or []:
         for change in entry.get("changes") or []:
@@ -118,12 +129,31 @@ def parse_failures(payload: dict) -> list[Failure]:
     return out
 
 
+def parse_receipts(payload: dict) -> list[Receipt]:
+    """Parse provider status updates without treating submission as delivery."""
+    out: list[Receipt] = []
+    for value in _values(payload):
+        phone_number_id = (value.get("metadata") or {}).get("phone_number_id")
+        for status in value.get("statuses") or []:
+            message_id, kind = status.get("id"), status.get("status")
+            if not message_id or kind not in ("sent", "delivered", "read", "failed"):
+                continue
+            errors = status.get("errors") or []
+            code = errors[0].get("code") if errors and isinstance(errors[0], dict) else None
+            out.append(Receipt(str(message_id), str(phone_number_id) if phone_number_id else None,
+                               kind, _unix_time(status.get("timestamp")), str(code) if code is not None else None))
+    return out
+
+
 class WhatsApp:
     def __init__(self, http: httpx.AsyncClient, graph_version: str):
         self.http, self.version = http, graph_version
 
     async def send_text(self, phone_number_id: str, token: str, to: str, body: str) -> bool:
         return await self._send(phone_number_id, token, to, {"type": "text", "text": {"body": body[:4096], "preview_url": False}})
+
+    async def send_text_result(self, phone_number_id: str, token: str, to: str, body: str) -> SendResult:
+        return await self._send_result(phone_number_id, token, to, {"type": "text", "text": {"body": body[:4096], "preview_url": False}})
 
     async def send_buttons(self, phone_number_id: str, token: str, to: str, body: str, buttons: list[tuple[str, str]]) -> bool:
         """Up to three quick-reply buttons (id, title); WhatsApp limits a title to 20 characters."""
@@ -152,18 +182,39 @@ class WhatsApp:
         return await self._send(phone_number_id, token, to, {"type": "template", "template": {"name": template, "language": {"code": lang}, "components": comps}})
 
     async def _send(self, phone_number_id: str, token: str, to: str, content: dict) -> bool:
+        result = await self._send_result(phone_number_id, token, to, content)
+        if not result.accepted:
+            log.error("DELIVERY FAILED to %s on WhatsApp", mask(to))
+        return result.accepted
+
+    async def _send_result(self, phone_number_id: str, token: str, to: str, content: dict) -> SendResult:
         url = f"https://graph.facebook.com/{self.version}/{phone_number_id}/messages"
         payload = {"messaging_product": "whatsapp", "to": to, **content}
         try:
             r = await self.http.post(url, json=payload, headers={"Authorization": f"Bearer {token}"})
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as e:
+            log.warning("send to %s failed before connection: %s", mask(to), e.__class__.__name__)
+            return SendResult(False, error_category="connection", retryable=True)
         except httpx.HTTPError as e:
-            log.warning("send to %s failed: %s", mask(to), e.__class__.__name__)
-            return False
-        if r.status_code < 400:
-            return True
+            # A read/write timeout or broken connection can happen after Meta accepted the request.
+            log.warning("send to %s has an ambiguous outcome: %s", mask(to), e.__class__.__name__)
+            return SendResult(False, error_category="transport_ambiguous", ambiguous=True)
         try:
-            err = r.json().get("error") or {}
+            response = r.json()
         except ValueError:
-            err = {}
-        log.error("send to %s FAILED http=%s code=%s | %s", mask(to), r.status_code, err.get("code"), explain(err.get("code")))
-        return False
+            response = {}
+        if 200 <= r.status_code < 300:
+            messages = response.get("messages") if isinstance(response, dict) else None
+            message_id = messages[0].get("id") if isinstance(messages, list) and messages and isinstance(messages[0], dict) else None
+            if isinstance(message_id, str) and message_id:
+                return SendResult(True, provider_message_id=message_id)
+            log.warning("Meta accepted a response without a usable message id for %s", mask(to))
+            return SendResult(False, error_category="invalid_success_response", ambiguous=True)
+        err = response.get("error") or {} if isinstance(response, dict) else {}
+        code = err.get("code")
+        log.error("send to %s FAILED http=%s code=%s | %s", mask(to), r.status_code, code, explain(code))
+        if r.status_code == 429:
+            return SendResult(False, error_category="rate_limited", error_code=str(code) if code is not None else "429", retryable=True)
+        if r.status_code >= 500:
+            return SendResult(False, error_category="provider_ambiguous", error_code=str(code) if code is not None else str(r.status_code), ambiguous=True)
+        return SendResult(False, error_category="provider_rejected", error_code=str(code) if code is not None else str(r.status_code))

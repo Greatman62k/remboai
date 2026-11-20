@@ -9,6 +9,7 @@ import logging
 import httpx
 
 from .whatsapp import Message, _unix_time, mask
+from .results import SendResult
 
 log = logging.getLogger("rembo.telegram")
 API = "https://api.telegram.org"
@@ -46,10 +47,39 @@ class Telegram:
         return body.get("result")
 
     async def send_text(self, chat: str, body: str) -> bool:
-        ok = await self.call("sendMessage", {"chat_id": chat, "text": body[:4096]}) is not None
-        if not ok:
-            log.error("DELIVERY FAILED to %s on Telegram", mask(chat))
-        return ok
+        return (await self.send_text_result(chat, body)).accepted
+
+    async def send_text_result(self, chat: str, body: str) -> SendResult:
+        return await self._send_message(chat, {"chat_id": chat, "text": body[:4096]})
+
+    async def _send_message(self, chat: str, payload: dict) -> SendResult:
+        for attempt in range(3):
+            try:
+                r = await self.http.post(f"{API}/bot{self.token}/sendMessage", json=payload, timeout=10.0)
+                body = r.json()
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as e:
+                if attempt < 2:
+                    await asyncio.sleep(0.5 * (attempt + 1))
+                    continue
+                log.warning("telegram sendMessage failed before connection: %s", e.__class__.__name__)
+                return SendResult(False, error_category="connection", retryable=True)
+            except (httpx.HTTPError, ValueError) as e:
+                log.warning("telegram sendMessage has an ambiguous outcome: %s", e.__class__.__name__)
+                return SendResult(False, error_category="transport_ambiguous", ambiguous=True)
+            if isinstance(body, dict) and body.get("ok") is True:
+                result = body.get("result")
+                message_id = result.get("message_id") if isinstance(result, dict) else None
+                if message_id is not None and str(message_id):
+                    return SendResult(True, provider_message_id=str(message_id))
+                return SendResult(False, error_category="invalid_success_response", ambiguous=True)
+            error_code = body.get("error_code") if isinstance(body, dict) else None
+            description = body.get("description", "") if isinstance(body, dict) else ""
+            if r.status_code >= 500 and not (isinstance(body, dict) and body.get("ok") is False):
+                return SendResult(False, error_category="provider_ambiguous", error_code=str(error_code or r.status_code), ambiguous=True)
+            retryable = r.status_code == 429 or (isinstance(error_code, int) and error_code >= 500)
+            log.warning("telegram sendMessage refused for %s code=%s %s", mask(chat), error_code, str(description)[:160])
+            return SendResult(False, error_category="provider_rejected", error_code=str(error_code or r.status_code), retryable=retryable)
+        return SendResult(False, error_category="connection", retryable=True)
 
     async def send_photo(self, chat: str, png: bytes, caption: str = "") -> bool:
         """Upload an image (the QR sticker). Multipart, so it cannot go through call(); one attempt, because a
@@ -67,7 +97,7 @@ class Telegram:
 
     async def send_buttons(self, chat: str, body: str, buttons: list[tuple[str, str]]) -> bool:
         markup = {"inline_keyboard": [[{"text": title[:64], "callback_data": cid[:64]}] for cid, title in buttons]}
-        ok = await self.call("sendMessage", {"chat_id": chat, "text": body[:4096], "reply_markup": markup}) is not None
+        ok = (await self._send_message(chat, {"chat_id": chat, "text": body[:4096], "reply_markup": markup})).accepted
         if not ok:
             log.error("DELIVERY FAILED to %s on Telegram", mask(chat))
         return ok
@@ -173,6 +203,11 @@ class Channels:
         if to.startswith("tg:"):
             return await self.tg.send_text(to[3:], body) if self.tg else False
         return await self.wa.send_text(phone_number_id, token, to, body)
+
+    async def send_text_result(self, phone_number_id, token: str, to: str, body: str) -> SendResult:
+        if to.startswith("tg:"):
+            return await self.tg.send_text_result(to[3:], body) if self.tg else SendResult(False, error_category="channel_unavailable")
+        return await self.wa.send_text_result(phone_number_id, token, to, body)
 
     async def send_buttons(self, phone_number_id, token: str, to: str, body: str, buttons: list[tuple[str, str]]) -> bool:
         if to.startswith("tg:"):

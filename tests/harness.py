@@ -148,6 +148,8 @@ class Outside:
             return httpx.Response(200, json={"ok": True, "result": {"file_id": body["file_id"], "file_size": self.media_size, "file_path": path}})
         if method == "getMe":
             return httpx.Response(200, json={"ok": True, "result": {"id": 111, "username": "rembo_test_bot"}})
+        if method == "sendMessage":
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": len(self.tg)}})
         return httpx.Response(200, json={"ok": True, "result": True})
 
     def tg_to(self, chat: str) -> list[dict]:
