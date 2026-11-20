@@ -285,6 +285,10 @@ async def purge_expired_data(pool, webhook_days: int = 30, inbound_days: int = 9
     t = await pool.fetchval("WITH deleted AS (DELETE FROM conversation_trace WHERE created_at < now() - ($1 * interval '1 day') RETURNING 1) SELECT count(*) FROM deleted", agent_days)
     async with pool.acquire() as con:
         async with con.transaction():
+            drafts = await con.fetchval(
+                "WITH deleted AS (DELETE FROM handoff_drafts d WHERE d.expires_at < now()-interval '1 day' "
+                "AND NOT EXISTS (SELECT 1 FROM outbound_outbox o WHERE o.draft_id=d.id) RETURNING 1) "
+                "SELECT count(*) FROM deleted")
             await con.execute(
                 "DELETE FROM outbound_outbox WHERE handoff_id IN (SELECT id FROM handoffs WHERE status='resolved' "
                 "AND COALESCE(resolved_at,created_at) < now()-($1 * interval '1 day')) "
@@ -305,5 +309,6 @@ async def purge_expired_data(pool, webhook_days: int = 30, inbound_days: int = 9
             "outbound_log": int(o or 0) if isinstance(o, int) else 0, "conversation_trace": int(t or 0) if isinstance(t, int) else 0,
             "platform_agent_sessions": int(p or 0) if isinstance(p, int) else 0,
             "handoffs": int(h or 0) if isinstance(h, int) else 0,
+            "handoff_drafts": int(drafts or 0) if isinstance(drafts, int) else 0,
             "mpesa_callbacks": int(cb or 0) if isinstance(cb, int) else 0,
             "unmatched_payment_payloads": int(ur or 0) if isinstance(ur, int) else 0}

@@ -22,7 +22,8 @@ class IdempotencyConflict(RuntimeError):
 
 
 async def approve_reply(pool, salon_id: str, handoff_id: str, owner_identity: str,
-                        expected_version: int, text: str, idempotency_key: str) -> dict:
+                        expected_version: int, text: str, idempotency_key: str,
+                        draft_id: str | None = None) -> dict:
     """Atomically store the exact owner-approved text, timeline event, and queued send."""
     if not isinstance(text, str) or not text.strip() or len(text) > 4096:
         raise ValueError("reply must contain 1 to 4096 characters")
@@ -34,11 +35,12 @@ async def approve_reply(pool, salon_id: str, handoff_id: str, owner_identity: st
             await con.execute("SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
                               f"handoff-reply:{salon_id}:{idempotency_key}")
             existing = await con.fetchrow(
-                "SELECT o.id::text,o.handoff_id::text,o.state,o.approved_by,e.body "
+                "SELECT o.id::text,o.handoff_id::text,o.state,o.approved_by,o.draft_id::text,e.body "
                 "FROM outbound_outbox o JOIN handoff_events e ON e.id=o.approved_event_id "
                 "WHERE o.salon_id=$1::uuid AND o.idempotency_key=$2", salon_id, idempotency_key)
             if existing:
-                if (existing["handoff_id"] != handoff_id or existing["approved_by"] != owner_identity or existing["body"] != text):
+                if (existing["handoff_id"] != handoff_id or existing["approved_by"] != owner_identity or
+                        existing["body"] != text or existing["draft_id"] != draft_id):
                     raise IdempotencyConflict("idempotency key was already used for a different reply")
                 return {"id": existing["id"], "handoff_id": existing["handoff_id"], "state": existing["state"], "duplicate": True}
 
@@ -55,6 +57,15 @@ async def approve_reply(pool, salon_id: str, handoff_id: str, owner_identity: st
                 raise StaleCaseVersion("handoff is no longer open")
             if int(case["version"]) != int(expected_version):
                 raise StaleCaseVersion("case changed; refresh its context before approving")
+            if draft_id:
+                draft = await con.fetchrow(
+                    "SELECT based_case_version,requested_by,expires_at,consumed_at FROM handoff_drafts "
+                    "WHERE id=$1::uuid AND handoff_id=$2::uuid AND salon_id=$3::uuid AND client_id=$4::uuid FOR UPDATE",
+                    draft_id, handoff_id, salon_id, case["client_id"])
+                if (draft is None or draft["requested_by"] != owner_identity or draft["consumed_at"] is not None or
+                        draft["expires_at"] <= await con.fetchval("SELECT now()") or
+                        int(draft["based_case_version"]) != int(expected_version)):
+                    raise StaleCaseVersion("draft expired, was already approved, or no longer matches this case")
             channel = "telegram" if case["wa_id"].startswith("tg:") else "whatsapp"
             related = await con.fetchval(
                 "SELECT id::text FROM handoff_events WHERE handoff_id=$1::uuid AND event_type='customer_message' "
@@ -67,11 +78,13 @@ async def approve_reply(pool, salon_id: str, handoff_id: str, owner_identity: st
                 "WHERE handoff_id=$1::uuid AND state='queued' AND approved_case_version<>$2",
                 handoff_id, event["case_version"])
             outbox_id = await con.fetchval(
-                "INSERT INTO outbound_outbox (handoff_id,salon_id,client_id,approved_event_id,channel,recipient,phone_number_id,approved_by,idempotency_key,approved_case_version) "
-                "VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,$7,$8,$9,$10) RETURNING id::text",
+                "INSERT INTO outbound_outbox (handoff_id,salon_id,client_id,approved_event_id,channel,recipient,phone_number_id,approved_by,idempotency_key,approved_case_version,draft_id) "
+                "VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,$7,$8,$9,$10,$11::uuid) RETURNING id::text",
                 handoff_id, salon_id, case["client_id"], event["id"], channel, case["wa_id"],
                 case["wa_phone_number_id"] if channel == "whatsapp" else None, owner_identity,
-                idempotency_key, event["case_version"])
+                idempotency_key, event["case_version"], draft_id)
+            if draft_id:
+                await con.execute("UPDATE handoff_drafts SET consumed_at=now() WHERE id=$1::uuid AND consumed_at IS NULL", draft_id)
             return {"id": outbox_id, "handoff_id": handoff_id, "state": "queued", "duplicate": False,
                     "approved_case_version": event["case_version"], "provider_message_id": None}
 

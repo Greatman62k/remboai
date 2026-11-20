@@ -72,6 +72,9 @@ async def test_customer_messages_are_deduplicated_and_bump_the_open_case_version
     assert "Internal owner alert" not in str(context)
     with pytest.raises(PermissionError):
         await get_handoff_context(pool, salon_id, case["id"], "254700000099")
+    other_salon = await pool.fetchval("INSERT INTO salons (name,wa_phone_number_id) VALUES ('Other','PID-OTHER') RETURNING id::text")
+    await pool.execute("UPDATE salons SET owner_wa_id='254700000099' WHERE id=$1::uuid", other_salon)
+    assert await get_handoff_context(pool, other_salon, case["id"], "254700000099") is None
     await pool.close()
 
 

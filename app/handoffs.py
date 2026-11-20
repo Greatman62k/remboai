@@ -14,7 +14,7 @@ def channel_for(identity: str | None) -> str:
 
 
 async def _verified_owner(con, salon_id: str, owner_identity: str) -> None:
-    row = await con.fetchrow("SELECT owner_wa_id FROM salons WHERE id=$1::uuid FOR KEY SHARE", salon_id)
+    row = await con.fetchrow("SELECT owner_wa_id FROM salons WHERE id=$1::uuid FOR SHARE", salon_id)
     if row is None or not row["owner_wa_id"] or row["owner_wa_id"].strip().lstrip("+") != (owner_identity or "").strip().lstrip("+"):
         raise PermissionError("actor is not the salon owner")
 
@@ -208,7 +208,7 @@ async def resolve_handoff(pool, salon_id: str, handoff_id: str, actor_identity: 
         raise ValueError("owner identity and resolution reason are required")
     async with pool.acquire() as con:
         async with con.transaction():
-            salon = await con.fetchrow("SELECT owner_wa_id FROM salons WHERE id=$1::uuid FOR KEY SHARE", salon_id)
+            salon = await con.fetchrow("SELECT owner_wa_id FROM salons WHERE id=$1::uuid FOR SHARE", salon_id)
             if salon is None:
                 return None
             owner_identity = (salon["owner_wa_id"] or "").strip()
