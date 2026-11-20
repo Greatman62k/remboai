@@ -5,6 +5,7 @@ import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from .names import S_LABEL
 from . import payments, waitlist
 from .messages import t
 from .metrics import reminders_queued, reminders_sent
@@ -29,7 +30,7 @@ async def ask_about_visits(pool, ctx) -> int:
     and invites feedback (handled in the conversation); NO alerts the owner at once."""
     now = datetime.now(NBO)
     rows = await pool.fetch(
-        "SELECT b.id::text AS booking, b.salon_id::text AS salon, s.name AS salon_name, s.wa_phone_number_id AS pid, "
+        "SELECT b.id::text AS booking, b.salon_id::text AS salon, " + S_LABEL + " AS salon_name, s.wa_phone_number_id AS pid, "
         "s.wa_access_token AS token, sv.name AS service, c.wa_id AS phone, c.lang "
         "FROM bookings b JOIN salons s ON s.id=b.salon_id JOIN services sv ON sv.id=b.service_id "
         "JOIN clients c ON c.id=b.client_id LEFT JOIN visit_checks v ON v.booking_id=b.id "
@@ -152,7 +153,7 @@ async def _settle_failure(pool, job_id: str, attempts: int, error: str, starts_a
 
 async def run_reminders(ctx):
     rows = await ctx.pool.fetch(
-        "SELECT r.id::text, r.booking_id::text, r.salon_id::text, r.wa_id, r.template_name, b.starts_at, b.ends_at, s.name AS salon_name, s.wa_phone_number_id, s.wa_access_token, "
+        "SELECT r.id::text, r.booking_id::text, r.salon_id::text, r.wa_id, r.template_name, b.starts_at, b.ends_at, " + S_LABEL + " AS salon_name, s.wa_phone_number_id, s.wa_access_token, "
         "t.body, t.language, t.variables, c.name AS client_name, c.lang, sv.name AS service_name "
         "FROM reminder_jobs r JOIN bookings b ON b.id=r.booking_id JOIN salons s ON s.id=r.salon_id "
         "LEFT JOIN reminder_templates t ON t.salon_id=r.salon_id AND t.name=r.template_name AND t.approved=true "

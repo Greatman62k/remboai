@@ -2123,6 +2123,263 @@
    "sahau developer message"
   ]
  },
+ "next_week": {
+  "en": [
+   "next week",
+   "the following week"
+  ],
+  "sw": [
+   "wiki ijayo",
+   "wiki ya ijayo",
+   "wiki inayokuja"
+  ],
+  "sheng": [
+   "next wiki",
+   "wiki next"
+  ]
+ },
+ "january": {
+  "en": [
+   "january",
+   "jan"
+  ],
+  "sw": [
+   "januari"
+  ],
+  "sheng": []
+ },
+ "february": {
+  "en": [
+   "february",
+   "feb"
+  ],
+  "sw": [
+   "februari"
+  ],
+  "sheng": []
+ },
+ "march": {
+  "en": [
+   "march",
+   "mar"
+  ],
+  "sw": [
+   "machi"
+  ],
+  "sheng": []
+ },
+ "april": {
+  "en": [
+   "april",
+   "apr"
+  ],
+  "sw": [
+   "aprili"
+  ],
+  "sheng": []
+ },
+ "may": {
+  "en": [
+   "may"
+  ],
+  "sw": [
+   "mei"
+  ],
+  "sheng": []
+ },
+ "june": {
+  "en": [
+   "june",
+   "jun"
+  ],
+  "sw": [
+   "juni"
+  ],
+  "sheng": []
+ },
+ "july": {
+  "en": [
+   "july",
+   "jul"
+  ],
+  "sw": [
+   "julai"
+  ],
+  "sheng": []
+ },
+ "august": {
+  "en": [
+   "august",
+   "aug"
+  ],
+  "sw": [
+   "agosti"
+  ],
+  "sheng": []
+ },
+ "september": {
+  "en": [
+   "september",
+   "sept",
+   "sep"
+  ],
+  "sw": [
+   "septemba"
+  ],
+  "sheng": []
+ },
+ "october": {
+  "en": [
+   "october",
+   "oct"
+  ],
+  "sw": [
+   "oktoba"
+  ],
+  "sheng": []
+ },
+ "november": {
+  "en": [
+   "november",
+   "nov"
+  ],
+  "sw": [
+   "novemba"
+  ],
+  "sheng": []
+ },
+ "december": {
+  "en": [
+   "december",
+   "dec"
+  ],
+  "sw": [
+   "desemba"
+  ],
+  "sheng": []
+ },
+ "cancel_now": {
+  "en": [
+   "cancel",
+   "cancel booking",
+   "cancel appointment",
+   "cancel my booking",
+   "cancel my appointment",
+   "remove my appointment",
+   "remove my booking",
+   "delete my appointment",
+   "delete my booking",
+   "scrap my booking",
+   "scrap my appointment"
+  ],
+  "sw": [
+   "ghairi",
+   "kughairi",
+   "naomba kughairi",
+   "nataka kughairi",
+   "ghairi miadi",
+   "kughairi miadi",
+   "futa miadi",
+   "kufuta miadi",
+   "naomba kufuta",
+   "sitaki tena miadi",
+   "sitaki miadi"
+  ],
+  "sheng": [
+   "kancil",
+   "kansel",
+   "khansel",
+   "nimecancel",
+   "nacancel",
+   "nataka kucancel",
+   "nadai kucancel",
+   "nimefuta"
+  ]
+ },
+ "concept_beard": {
+  "en": [
+   "beard*",
+   "goatee",
+   "moustache",
+   "mustache"
+  ],
+  "sw": [
+   "ndevu"
+  ],
+  "sheng": [
+   "ndevu"
+  ]
+ },
+ "concept_kids": {
+  "en": [
+   "kid",
+   "kids",
+   "child",
+   "children",
+   "son",
+   "toddler",
+   "junior"
+  ],
+  "sw": [
+   "mtoto",
+   "watoto",
+   "mwanangu"
+  ],
+  "sheng": [
+   "kido"
+  ]
+ },
+ "concept_braids": {
+  "en": [
+   "braid*",
+   "cornrow*",
+   "box braids"
+  ],
+  "sw": [
+   "suka",
+   "kusuka",
+   "kusukwa",
+   "msuko",
+   "kusukiwa",
+   "nisuke",
+   "nisukwe"
+  ],
+  "sheng": [
+   "konrow",
+   "kornrow",
+   "boox"
+  ]
+ },
+ "pick_first": {
+  "en": [
+   "first",
+   "1st"
+  ],
+  "sw": [
+   "kwanza"
+  ],
+  "sheng": []
+ },
+ "pick_second": {
+  "en": [
+   "second",
+   "2nd"
+  ],
+  "sw": [
+   "pili"
+  ],
+  "sheng": []
+ },
+ "pick_third": {
+  "en": [
+   "third",
+   "3rd"
+  ],
+  "sw": [
+   "tatu"
+  ],
+  "sheng": []
+ },
  "examples": {
   "on_topic": [
    "fade kesho",

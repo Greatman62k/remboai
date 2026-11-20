@@ -9,7 +9,9 @@ from . import lexicon
 _LX = lexicon.load()
 _DAY_NAMES = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 WEEKDAYS = {word: i for i, name in enumerate(_DAY_NAMES) for word in _LX.words(name)}
-_TODAY, _TOMORROW, _DAY_AFTER = (_LX.pattern(c) for c in ("today", "tomorrow", "day_after_tomorrow"))
+_MONTH_NAMES = ("january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december")
+MONTHS = {word: i + 1 for i, name in enumerate(_MONTH_NAMES) for word in _LX.words(name)}
+_TODAY, _TOMORROW, _DAY_AFTER, _NEXT_WEEK = (_LX.pattern(c) for c in ("today", "tomorrow", "day_after_tomorrow", "next_week"))
 _MORNING, _AFTERNOON, _EVENING = (_LX.pattern(c) for c in ("morning", "afternoon", "evening"))
 _AM, _PM = _LX.pattern("morning"), _LX.pattern("afternoon", "evening")
 SW_HOURS = {"moja": 1, "mbili": 2, "tatu": 3, "nne": 4, "tano": 5, "sita": 6, "saba": 7, "nane": 8, "tisa": 9, "kumi": 10, "kumi na moja": 11, "kumi na mbili": 12}
@@ -32,6 +34,48 @@ _DECLINED_TODAY = re.compile(
     rf"|\b(?:{_TODAY_ALT})\W+(?:is\W+)?(?:not\W+possible|no\W+good)\b", re.I)
 
 
+_MONTH_ALT = "|".join(sorted((re.escape(w) for w in MONTHS), key=len, reverse=True)) or r"(?!)"
+_DAY_MONTH = re.compile(rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s*(?:of\s+|ya\s+)?({_MONTH_ALT})\b", re.I)                       # 10 November, 10th of nov, 6 novemba
+_MONTH_DAY = re.compile(rf"\b({_MONTH_ALT})\.?\s*(\d{{1,2}})(?:st|nd|rd|th)?\b(?![:.]\d|\s*(?:am|pm)\b)", re.I)       # November 10
+_ORDINAL_DAY = re.compile(r"\b(\d{1,2})(?:st|nd|rd|th)\b(?!\s*(?:one|slot|option|choice|pick|time|appointment|booking))", re.I)  # the 5th, on 5th
+_TAREHE = re.compile(r"\btarehe\s+(?:ya\s+)?(\d{1,2})\b", re.I)                                                     # tarehe 6
+
+
+def _on(day: int, month: int | None, today: date) -> date | None:
+    """The next date, today or later, with this day of the month (and this month, if one was named). None when no real date fits."""
+    if month is not None:
+        for year in (today.year, today.year + 1):
+            try:
+                d = date(year, month, day)
+            except ValueError:
+                continue
+            if d >= today:
+                return d
+        return None
+    y, m = today.year, today.month
+    for _ in range(3):
+        try:
+            d = date(y, m, day)
+            if d >= today:
+                return d
+        except ValueError:
+            pass
+        m, y = (1, y + 1) if m == 12 else (m + 1, y)
+    return None
+
+
+def _calendar_date(t: str, today: date) -> date | None:
+    """'10 November', 'November 10', 'the 5th', 'tarehe 6', in English or Swahili. A bare number is never a date."""
+    m = _DAY_MONTH.search(t)
+    if m:
+        return _on(int(m[1]), MONTHS.get(m[2].lower()), today)
+    m = _MONTH_DAY.search(t)
+    if m:
+        return _on(int(m[2]), MONTHS.get(m[1].lower()), today)
+    m = _ORDINAL_DAY.search(t) or _TAREHE.search(t)
+    return _on(int(m[1]), None, today) if m else None
+
+
 def parse_day(text: str, today: date) -> date | None:
     t = text.lower()
     if _DAY_AFTER.search(t):
@@ -40,8 +84,13 @@ def parse_day(text: str, today: date) -> date | None:
         return today
     if _TOMORROW.search(t):
         return today + timedelta(days=1)
+    explicit = _calendar_date(t, today)
+    if explicit:
+        return explicit
     for word, wd in WEEKDAYS.items():
         if re.search(rf"\b{re.escape(word)}\b", t):
+            if _NEXT_WEEK.search(t):          # 'Friday next week', 'Jumanne wiki ijayo': that weekday of the coming Monday-to-Sunday week
+                return today + timedelta(days=7 - today.weekday() + wd)
             return today + timedelta(days=(wd - today.weekday()) % 7 or 7)
     m = re.search(r"\b(\d{4})-(\d{2})-(\d{2})\b", t)
     if m:

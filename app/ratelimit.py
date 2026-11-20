@@ -31,15 +31,27 @@ class RateLimiter:
         except Exception:
             return 1
 
-    async def check_sender(self, salon_id: str, wa_id: str) -> str:
+    async def _peek(self, key: str) -> int:
+        if self.redis is None:
+            return 0
+        try:
+            return int(await self.redis.get(key) or 0)
+        except Exception:
+            return 0
+
+    async def check_sender(self, salon_id: str, wa_id: str, factor: int = 1, count: bool = True) -> str:
+        """"ok", "notify" (the first message over the line) or "drop". `factor` raises both ceilings, for a shop owner answering a queue.
+        count=False judges the counters as they stand, without adding this message a second time."""
+        take = self._incr if count else (lambda key, ttl: self._peek(key))
+        burst, daily = self.burst * factor, self.daily * factor
         if self.burst > 0:
-            n = await self._incr(f"rl:b:{salon_id}:{wa_id}", self.window)
-            if n > self.burst:
-                return "notify" if n == self.burst + 1 else "drop"
+            n = await take(f"rl:b:{salon_id}:{wa_id}", self.window)
+            if n > burst:
+                return "notify" if n == burst + 1 else "drop"
         if self.daily > 0:
-            d = await self._incr(f"rl:d:{salon_id}:{wa_id}", 86400)
-            if d > self.daily:
-                return "notify" if d == self.daily + 1 else "drop"
+            d = await take(f"rl:d:{salon_id}:{wa_id}", 86400)
+            if d > daily:
+                return "notify" if d == daily + 1 else "drop"
         return "ok"
 
     async def llm_allowed(self, scope_id: str, kind: str = "llm", limit: int | None = None) -> bool:

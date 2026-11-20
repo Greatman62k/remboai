@@ -15,9 +15,10 @@ from zoneinfo import ZoneInfo
 
 import asyncpg
 
+from .names import S_LABEL
 from . import mpesa
 from .channels import outbound
-from .bookings import expire_holds
+from .bookings import expire_holds, expire_stale_holds
 from .messages import has, t
 from .metrics import bookings_confirmed, payments_total
 from .mpesa import MpesaError, Outcome
@@ -204,7 +205,7 @@ class Settlement:
 
 
 _DETAIL = (
-    "SELECT s.id::text AS salon_id, s.name AS salon_name, s.wa_phone_number_id AS pid, s.wa_access_token AS wa_token, s.owner_wa_id, s.timezone, "
+    "SELECT s.id::text AS salon_id, " + S_LABEL + " AS salon_name, s.wa_phone_number_id AS pid, s.wa_access_token AS wa_token, s.owner_wa_id, s.timezone, "
     "c.wa_id AS client_wa_id, c.name AS client_name, c.lang, sv.name AS service, st.name AS stylist, b.starts_at "
     "FROM bookings b JOIN salons s ON s.id=b.salon_id JOIN clients c ON c.id=b.client_id "
     "JOIN services sv ON sv.id=b.service_id JOIN staff st ON st.id=b.staff_id WHERE b.id=$1::uuid")
@@ -440,8 +441,8 @@ async def record_manual_claim(pool, booking_id: str, salon_id: str, phone: str, 
         booking_id, salon_id, phone, amount, provider, code, ref[:500])
 
 
-async def confirm_manual_claim(pool, pay_id: str) -> tuple[str, str | None]:
-    """The owner's Yes tap. Idempotent: ('confirmed', booking_id) once, ('already', booking_id) after,
+async def confirm_manual_claim(pool, pay_id: str, salon_id: str | None = None) -> tuple[str, str | None]:
+    """The owner's Yes tap. When salon_id is given the claim must belong to that salon. Idempotent: ('confirmed', booking_id) once, ('already', booking_id) after,
     ('stale', None) when the claim or the hold is no longer open."""
     async with pool.acquire() as con:
         async with con.transaction():
@@ -449,7 +450,7 @@ async def confirm_manual_claim(pool, pay_id: str) -> tuple[str, str | None]:
                 "SELECT p.booking_id, p.status, p.method, p.amount_kes, p.mpesa_receipt, "
                 "r.status AS review_status, r.expected_amount, r.received_amount "
                 "FROM payments p LEFT JOIN payment_reviews r ON r.payment_id=p.id "
-                "WHERE p.id=$1::uuid FOR UPDATE OF p", pay_id)
+                "WHERE p.id=$1::uuid AND ($2::uuid IS NULL OR p.salon_id=$2::uuid) FOR UPDATE OF p", pay_id, salon_id)
             if p is None:
                 return "stale", None
             bid = str(p["booking_id"])
@@ -480,6 +481,7 @@ async def confirm_manual_claim(pool, pay_id: str) -> tuple[str, str | None]:
                 return "unavailable", bid
             if b["status"] == "expired":
                 await con.execute("SELECT pg_advisory_xact_lock(hashtext($1))", f"hold:{b['staff_id']}")
+                await expire_stale_holds(con, b["staff_id"])
                 blocked = await con.fetchval(
                     "SELECT 1 FROM bookings WHERE staff_id=$1::uuid AND id<>$2::uuid "
                     "AND status IN ('held','confirmed') AND (status='confirmed' OR hold_expires_at>now()) "
@@ -510,11 +512,12 @@ async def confirm_manual_claim(pool, pay_id: str) -> tuple[str, str | None]:
             return "confirmed", bid
 
 
-async def decline_manual_claim(pool, pay_id: str) -> tuple[str, str | None]:
-    """The owner's No tap. The booking stays held so the customer can send a better claim."""
+async def decline_manual_claim(pool, pay_id: str, salon_id: str | None = None) -> tuple[str, str | None]:
+    """The owner's No tap. When salon_id is given the claim must belong to that salon. The booking stays held so the customer can send a better claim."""
     async with pool.acquire() as con:
         async with con.transaction():
-            p = await con.fetchrow("SELECT booking_id, status, method FROM payments WHERE id=$1::uuid FOR UPDATE", pay_id)
+            p = await con.fetchrow("SELECT booking_id, status, method FROM payments WHERE id=$1::uuid AND ($2::uuid IS NULL OR salon_id=$2::uuid) FOR UPDATE",
+                                   pay_id, salon_id)
             if p is None:
                 return "stale", None
             bid = str(p["booking_id"])
@@ -543,7 +546,7 @@ async def notify_expired_manual_claims(ctx) -> int:
     """Tell customers their 30-minute hold elapsed while retaining the owner's open claim."""
     rows = await ctx.pool.fetch(
         "SELECT p.id::text AS payment_id, "
-        "c.wa_id, c.lang, s.id::text AS salon_id, s.name AS salon_name, s.wa_phone_number_id, s.wa_access_token "
+        "c.wa_id, c.lang, s.id::text AS salon_id, " + S_LABEL + " AS salon_name, s.wa_phone_number_id, s.wa_access_token "
         "FROM payments p JOIN bookings b ON b.id=p.booking_id JOIN clients c ON c.id=b.client_id "
         "JOIN salons s ON s.id=p.salon_id "
         "WHERE p.method='manual' AND p.status IN ('pending','review') AND b.status='expired' "

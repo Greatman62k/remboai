@@ -40,6 +40,7 @@ async def hold_slot(pool: asyncpg.Pool, *, salon_id: str, staff_id: str, service
                         "WHERE source_message_id=$1 AND client_id=$2::uuid AND status IN ('held','confirmed') RETURNING id::text", message_id, client_id, minutes)
                     if mine:
                         return mine
+                await expire_stale_holds(con, staff_id)
                 if await con.fetchval(
                         "SELECT 1 FROM time_off WHERE salon_id=$1::uuid AND (staff_id IS NULL OR staff_id=$2::uuid) "
                         "AND starts_at < $4 AND ends_at > $3 LIMIT 1", salon_id, staff_id, starts_at, ends_at):
@@ -56,13 +57,25 @@ async def release(pool: asyncpg.Pool, booking_id: str) -> None:
     await pool.execute("UPDATE bookings SET status='cancelled' WHERE id=$1::uuid AND status='held'", booking_id)
 
 
+_EXPIRE_SQL = (
+    "UPDATE bookings b SET status='expired' WHERE b.status='held' AND b.hold_expires_at < now() "
+    "AND ($1::uuid IS NULL OR b.staff_id=$1::uuid) "
+    "AND NOT EXISTS (SELECT 1 FROM payments p WHERE p.booking_id=b.id AND p.status='pending' AND p.created_at > now() - interval '5 minutes') "
+    "RETURNING b.id")
+
+
+async def expire_stale_holds(con, staff_id: str | None = None) -> int:
+    """Mark lapsed holds as expired (all of them, or one stylist's). Availability already treats a lapsed hold as free, but the
+    exclusion constraint only lets go of it once its status changes, so anything about to take a slot calls this first.
+    Three statements however many holds lapse, not two more for each one."""
+    ids = [r["id"] for r in await con.fetch(_EXPIRE_SQL, staff_id)]
+    if ids:
+        await con.execute("UPDATE reminder_jobs SET status='cancelled' WHERE booking_id = ANY($1::uuid[]) AND status='pending'", ids)
+        await con.execute("UPDATE payments SET result_desc='booking hold expired; owner verification still pending', updated_at=now() "
+                          "WHERE booking_id = ANY($1::uuid[]) AND status='pending' AND method='manual'", ids)
+    return len(ids)
+
+
 async def expire_holds(pool: asyncpg.Pool) -> int:
-    rows = await pool.fetch(
-        "UPDATE bookings b SET status='expired' WHERE b.status='held' AND b.hold_expires_at < now() "
-        "AND NOT EXISTS (SELECT 1 FROM payments p WHERE p.booking_id=b.id AND p.status='pending' AND p.created_at > now() - interval '5 minutes') "
-        "RETURNING b.id")
-    for r in rows:
-        await pool.execute("UPDATE reminder_jobs SET status='cancelled' WHERE booking_id=$1::uuid AND status='pending'", r["id"])
-        await pool.execute("UPDATE payments SET result_desc='booking hold expired; owner verification still pending', updated_at=now() "
-                           "WHERE booking_id=$1::uuid AND status='pending' AND method='manual'", r["id"])
-    return len(rows)
+    async with pool.acquire() as con:
+        return await expire_stale_holds(con)

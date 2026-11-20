@@ -11,6 +11,7 @@ import re
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
+from .names import LABEL, S_LABEL
 from . import agent, binding, guard, locks, mpesa, onboarding_chat, owner, payments, platform, screen, smalltalk, waitlist
 from .availability import DAY_KEYS
 from .booking_flow import (
@@ -26,6 +27,8 @@ from .booking_flow import (
     cancel_owner_availability_request,
     expire_owner_availability_checks,
     example_for,
+    cancel_or_ask,
+    handle_cancel_tap,
     handle_manual_payment_tap,
     match_service,
     menu,
@@ -174,7 +177,7 @@ async def _record_visit_feedback(ctx, salon: dict, client: dict, state: dict, ch
     booking_id = state.get("visit_booking")
     row = await ctx.pool.fetchrow(
         "SELECT v.feedback, b.starts_at, sv.name AS service, c.wa_id AS phone, c.name AS client_name, "
-        "c.lang, s.owner_wa_id, s.name AS salon_name FROM visit_checks v "
+        "c.lang, s.owner_wa_id, " + S_LABEL + " AS salon_name FROM visit_checks v "
         "JOIN bookings b ON b.id=v.booking_id JOIN services sv ON sv.id=b.service_id "
         "JOIN clients c ON c.id=b.client_id JOIN salons s ON s.id=b.salon_id "
         "WHERE v.booking_id=$1::uuid AND v.salon_id=$2::uuid AND v.client_id=$3::uuid",
@@ -372,7 +375,7 @@ async def _replay_aware_state(ctx, salon_id: str, msg: Message, st: dict) -> dic
 
 async def _salon_row(ctx, salon_id: str) -> dict | None:
     row = await ctx.pool.fetchrow(
-        "SELECT id::text, name, wa_phone_number_id, wa_access_token, timezone, open_hours, deposit_kes, owner_wa_id FROM salons WHERE id=$1::uuid AND active",
+        "SELECT id::text, " + LABEL + " AS name, wa_phone_number_id, wa_access_token, timezone, open_hours, deposit_kes, owner_wa_id FROM salons WHERE id=$1::uuid AND active",
         salon_id)
     if row is None:
         return None
@@ -813,6 +816,11 @@ async def _handle(ctx, msg: Message) -> None:
     client, st = await _load(ctx, salon["id"], msg.sender, msg.name)
     st = await _replay_aware_state(ctx, salon["id"], msg, st)
     lang = client["lang"]
+    if msg.kind == "interactive" and msg.reply_id and msg.reply_id.startswith("cxl:"):
+        tz = ZoneInfo(salon["timezone"])
+        services = await _catalog(ctx, salon["id"])
+        await handle_cancel_tap(ctx, salon, client, st, services, tz, datetime.now(tz), chat, lang, msg.reply_id)
+        return
     if msg.kind == "interactive" and msg.reply_id and msg.reply_id.startswith("manualpay:"):
         tz = ZoneInfo(salon["timezone"])
         services = await _catalog(ctx, salon["id"])
@@ -1089,7 +1097,7 @@ async def _handle(ctx, msg: Message) -> None:
 
     env = (ctx, salon, client, st, services, tz, now, chat, lang)
     if ex.intent == "cancel":
-        await _cancel(*env)
+        await cancel_or_ask(*env)
     elif ex.intent == "price_list":
         note = ""
         acct = await payments.account(ctx.pool, salon["id"])

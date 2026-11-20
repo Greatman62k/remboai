@@ -1,4 +1,5 @@
 import dataclasses
+import time
 import hashlib
 import logging
 from datetime import datetime, timedelta, timezone
@@ -48,37 +49,73 @@ async def _process(ctx, msg: Message) -> None:
         log.warning("ignoring %s: too many abuse signals today", mask(msg.sender))
         return
     redis = getattr(ctx, "redis", None)
+    factor = ctx.settings.owner_rate_factor
     if redis is not None:
         try:
             from .ratelimit import RateLimiter
             limiter = RateLimiter(redis, ctx.settings)
             status = await limiter.check_sender("global", msg.sender)
+            owner = False
+            if status != "ok" and await _is_owner(ctx, msg.sender):
+                owner = True                      # judged against the owner's higher ceiling, on the counters already taken
+                status = await limiter.check_sender("global", msg.sender, factor=factor, count=False)
             if status != "ok":
                 log.warning("rate limit: %s %s", mask(msg.sender), status)
                 if status == "notify":
-                    await guard.strike(ctx.pool, msg.sender, "burst")
+                    if not owner:
+                        await guard.strike(ctx.pool, msg.sender, "burst")
                     await _warn_slow_down(ctx, msg)
                 return
         except Exception:
             pass
         d = await ctx.pool.fetchval("SELECT count(*) FROM inbound_messages WHERE wa_id=$1 AND received_at > now() - interval '24 hours'", msg.sender)
-        if ctx.settings.per_sender_daily_limit and d and d > ctx.settings.per_sender_daily_limit:
+        if await _over_limit(ctx, msg.sender, d, ctx.settings.per_sender_daily_limit):
             log.warning("daily limit: ignoring %s (%d messages in 24 hours)", mask(msg.sender), d)
             return
     else:
         recent = await ctx.pool.fetchval("SELECT count(*) FROM inbound_messages WHERE wa_id=$1 AND received_at > now() - interval '1 minute'", msg.sender)
-        if recent and recent > ctx.settings.rate_limit_per_min:
-            log.warning("rate limit: ignoring %s (%d messages in a minute)", mask(msg.sender), recent)
-            if recent == ctx.settings.rate_limit_per_min + 1:
-                await guard.strike(ctx.pool, msg.sender, "burst")
-                await _warn_slow_down(ctx, msg)
-            return
+        limit = ctx.settings.rate_limit_per_min
+        if recent and recent > limit:
+            owner = await _is_owner(ctx, msg.sender)
+            ceiling = limit * factor if owner else limit
+            if recent > ceiling:
+                log.warning("rate limit: ignoring %s (%d messages in a minute)", mask(msg.sender), recent)
+                if recent == ceiling + 1:
+                    if not owner:
+                        await guard.strike(ctx.pool, msg.sender, "burst")
+                    await _warn_slow_down(ctx, msg)
+                return
         day = await ctx.pool.fetchval("SELECT count(*) FROM inbound_messages WHERE wa_id=$1 AND received_at > now() - interval '24 hours'", msg.sender)
-        if ctx.settings.per_sender_daily_limit and day and day > ctx.settings.per_sender_daily_limit:
+        if await _over_limit(ctx, msg.sender, day, ctx.settings.per_sender_daily_limit):
             log.warning("daily limit: ignoring %s (%d messages in 24 hours)", mask(msg.sender), day)
             return
     log.info("message from %s kind=%s", mask(msg.sender), msg.kind)
     await converse(ctx, msg)
+
+
+_OWNER_CACHE: dict[str, tuple[float, bool]] = {}
+
+
+async def _is_owner(ctx, sender: str) -> bool:
+    """Is this sender the registered owner of an active business? Only asked once a sender is over a limit, and remembered for a minute
+    (a "no" for fifteen seconds, so a business that has just registered is not limited for long)."""
+    now = time.monotonic()
+    hit = _OWNER_CACHE.get(sender)
+    if hit and hit[0] > now:
+        return hit[1]
+    yes = bool(await ctx.pool.fetchval("SELECT 1 FROM salons WHERE owner_wa_id=$1 AND active LIMIT 1", sender))
+    if len(_OWNER_CACHE) > 5000:
+        _OWNER_CACHE.clear()
+    _OWNER_CACHE[sender] = (now + (60.0 if yes else 15.0), yes)
+    return yes
+
+
+async def _over_limit(ctx, sender: str, count, limit: int) -> bool:
+    if not limit or not count or count <= limit:
+        return False
+    if await _is_owner(ctx, sender):
+        return count > limit * ctx.settings.owner_rate_factor
+    return True
 
 
 async def _warn_slow_down(ctx, msg: Message) -> None:

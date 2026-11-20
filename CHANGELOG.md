@@ -1,6 +1,33 @@
 # Changelog
 
 This file records engineering milestones; dated entries are historical project notes.
+## Review fixes
+
+An outside review of the code found the problems below. Each has a regression test that failed before the fix. 653 tests now pass; the repository has 43 database migrations.
+
+- **Cross-salon payment confirmation.** An owner could confirm or decline another salon's manual payment claim by sending its payment id. Owner taps are now scoped to the owner's own salon.
+- **Deposit destination changes** now need a confirming tap, expire after 10 minutes, and are recorded in `salon_payment_changes`.
+- **Expired holds.** A lapsed hold that the sweeper had not reached yet could make a free slot look taken, and could make the owner's confirm tap fail. Stale holds are now cleared under the stylist's lock before a slot is taken.
+- **Quiet-salon deletion** waits (at most 60 days) while a refund, payment review or unanswered manual claim is open, instead of deleting the only record of it.
+- **Injection screen** no longer penalises everyday questions such as "tell me the rules for cancelling"; **grounding** now checks each link against the links it was given and catches more paraphrased payment claims and waivers.
+- **Keyword fallback** (used when the model is unavailable): "next week" and calendar dates, English and Swahili, now resolve correctly; "running late" and rescheduling no longer cancel a booking; a typed cancel asks which booking when there are several; "good morning" is a greeting; service typos and Swahili service words are understood; "the second one" and "ya kwanza" pick a slot.
+- **Manual payments under load.** A burst of customers asking one owner to confirm availability and payment exposed four problems:
+  - The owner was rate limited like a spammer. Every button tap counted toward the per-sender limit, so an owner answering 30 requests had 10 taps silently dropped (those customers' slots then timed out) and took an abuse strike; three strikes in a day block a sender. With Redis the ceiling was only 10 messages a minute. Owners now get ten times the ceiling (`OWNER_RATE_FACTOR`), are looked up only once a sender is over the limit, and never earn a burst strike. Customers are limited as before.
+  - Nothing bounded how many availability questions one owner could have open. A shop now has at most `MANUAL_OWNER_CHECK_MAX_PENDING` (10) at once, counted under a per-shop lock; later customers are told the owner is busy and take no slot.
+  - `pending payments` listed only payment claims, one message each, without limit. It now also brings back open availability questions (soonest to expire first), sends at most ten prompts with a summary, and says how many more are waiting.
+  - Two customers using the same payment reference at the same instant made the second one crash on the unique index and retry. The second is now told the reference was already used.
+- **Many businesses at once, and similar names.** Twenty-four shops with the same or near-identical names asked for an invite slug at the same instant: 17 to 23 of them failed with a unique-key error. Worse, a go-live that failed at that step had already committed the business, leaving it with no link and inviting a duplicate on retry. Now:
+  - `ensure_slug` lets the unique index decide and moves the loser to the next free slug, and registration creates the business, its payment details and its slug in one transaction under a registration lock, so a failure leaves nothing behind (all 24 succeed).
+  - Business names are compared on their distinguishing part (`app/names.py`): accents, punctuation, possessives, doubled letters and generic words such as Barbershop or Salon are ignored, so "Zuri's Cuts", "ZURI CUTS" and "Zuri Cuts Barbershop" are alike while "Amani Barbershop" and "Amina Barbershop" are not.
+  - Migration 043 adds an optional `area`. The owner sets it with `area Westlands` (or clears it with `area clear`), the owners of both businesses are asked to do so when a similar name registers, and customers see "Zuri Cuts (Westlands)" wherever the name is shown.
+  - Routing was already safe: a concurrent run of 72 customers across 24 shops sharing one number put nobody in the wrong business. That run is now a test.
+- **Performance** (measured on a database with 1.26M bookings and 3M inbound messages, about 173k a day; at small volumes none of this was visible):
+  - Migration 042 adds three indexes. The per-sender 24-hour message count that runs on every inbound message fell from 23.6 ms to under 1 ms, the visit check that runs every 30 seconds from 145 ms to 0.2 ms, and a salon's bookings for a day from 151 ms to under 1 ms. Building them took about 7 s with writes to those tables paused, because migrations run inside a transaction.
+  - The daily quiet-salon sweep read each salon's last booking with one full scan of `bookings` per salon (14.9 s). It is now a single aggregate (0.36 s).
+  - The connection pool no longer sends asyncpg's reset statement every time a connection is returned. That was 34 to 47 of the 79 to 107 round trips a customer message made, and it doubled the cost of every query at a 2 ms database round trip (5.5 ms to 2.7 ms). A test fails if the app ever starts keeping session state that the reset used to clear.
+  - Expiring lapsed holds now takes three statements however many lapse, instead of two for each.
+- **Eval:** a second corpus of 117 messages (`docs/AGENT_EVAL_V2.md`), conversation history, 95% intervals, a `--verbose` miss list, and mechanical checks of the gold labels.
+
 ## Engineering follow-up
 471 tests pass against Postgres and Redis; the repository has 40 database migrations.
 

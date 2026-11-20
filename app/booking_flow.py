@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 
 import asyncpg
 
+from .names import S_LABEL
 from . import guard, mpesa, payments, smalltalk, waitlist
 from .availability import Slot, choose, day_slots
 from .bookings import busy_times, hold_slot, release
@@ -192,6 +193,44 @@ async def _cancel(ctx, salon, client, st, services, tz, now, chat, lang, booking
         await outbound.send_text(ctx, salon, salon["owner_wa_id"],
                                  t("en", "owner_refund", amount=paid,
                                    phone=display_contact(payment["phone"]), ref="", when=when_label(row["starts_at"], tz), why="the customer cancelled"))
+
+
+async def _admit_owner_check(ctx, salon_id: str, booking_id: str, deadline) -> bool:
+    """Mark the booking as waiting for the owner, unless the shop already has the most open questions allowed. The count and the update happen
+    under one lock per shop, so a crowd arriving together cannot get past the limit."""
+    cap = ctx.settings.manual_owner_check_max_pending
+    async with ctx.pool.acquire() as con, con.transaction():
+        await con.execute("SELECT pg_advisory_xact_lock(hashtext($1))", f"ownercheck:{salon_id}")
+        if cap and await con.fetchval(
+                "SELECT count(*) FROM bookings WHERE salon_id=$1::uuid AND status='held' AND owner_check_status='pending' "
+                "AND owner_check_expires_at > now() AND id<>$2::uuid", salon_id, booking_id) >= cap:
+            return False
+        await con.execute("UPDATE bookings SET owner_check_status='pending', owner_check_expires_at=$2, hold_expires_at=$2 "
+                          "WHERE id=$1::uuid AND status='held'", booking_id, deadline)
+        return True
+
+
+async def cancel_or_ask(ctx, salon, client, st, services, tz, now, chat, lang) -> None:
+    """A typed cancellation. One upcoming booking is cancelled as before. With several, the customer is asked which, because cancelling the
+    soonest one without asking can cancel the wrong booking (and start a refund for it)."""
+    rows = await ctx.pool.fetch(
+        "SELECT b.id::text, b.starts_at, sv.name AS service FROM bookings b JOIN services sv ON sv.id=b.service_id "
+        "WHERE b.client_id=$1::uuid AND b.status IN ('held','confirmed') AND b.starts_at > now() ORDER BY b.starts_at LIMIT 3", client["id"])
+    if len(rows) <= 1:
+        await _cancel(ctx, salon, client, st, services, tz, now, chat, lang)
+        return
+    lines = "\n".join(f"{i}. {r['service']}, {when_label(r['starts_at'], tz)}" for i, r in enumerate(rows, 1))
+    buttons = [(f"cxl:{r['id']}", f"{r['service']} {r['starts_at'].astimezone(tz):%a %H:%M}"[:20]) for r in rows]
+    await _reply_buttons(ctx, salon["id"], chat.to, st, chat, t(lang, "which_booking_cancel", lines=lines), buttons)
+
+
+async def handle_cancel_tap(ctx, salon, client, st, services, tz, now, chat, lang, reply_id: str | None) -> bool:
+    """The customer's tap on one of the bookings offered by cancel_or_ask. _cancel only ever touches this customer's own bookings."""
+    match = re.fullmatch(r"cxl:([0-9a-fA-F-]{36})", reply_id or "")
+    if not match:
+        return False
+    await _cancel(ctx, salon, client, st, services, tz, now, chat, lang, booking_id=match[1])
+    return True
 
 
 async def handle_manual_payment_tap(ctx, salon, client, st, services, tz, now, chat, lang, reply_id: str) -> bool:
@@ -463,9 +502,12 @@ async def _choose(ctx, salon, client, st, services, tz, now, chat, lang, choice:
     if acct.get("manual"):
         if manual_owner_check:
             deadline = datetime.now(ZoneInfo("UTC")) + timedelta(minutes=MANUAL_OWNER_CHECK_MINUTES)
-            await ctx.pool.execute(
-                "UPDATE bookings SET owner_check_status='pending', owner_check_expires_at=$2, "
-                "hold_expires_at=$2 WHERE id=$1::uuid AND status='held'", booking_id, deadline)
+            if not await _admit_owner_check(ctx, salon["id"], booking_id, deadline):
+                await release(ctx.pool, booking_id)         # the owner already has as many questions open as one person can answer
+                state = {"history": st.get("history", [])}
+                await _save(ctx, salon["id"], chat.to, state)
+                await _reply(ctx, salon["id"], chat.to, state, chat, t(lang, "owner_busy", salon=salon["name"]))
+                return
             waiting_state = {**state, "state": "owner_check_pending", "owner_check_expires_at": deadline.isoformat()}
             await _save(ctx, salon["id"], chat.to, waiting_state)
             await outbound.send_buttons(
@@ -497,7 +539,7 @@ async def _owner_booking_row(pool, booking_id: str, lock: bool = False):
         "b.staff_id::text AS staff_id, b.service_id::text AS service_id, b.status AS booking_status, "
         "b.owner_check_status, b.owner_check_expires_at, b.owner_check_timeout_notice_at, "
         "b.owner_customer_notice_at, b.owner_late_notice_at, b.customer_reply_expires_at, b.starts_at, b.ends_at, "
-        "c.wa_id, c.name AS client_name, c.lang, s.name AS salon_name, s.wa_phone_number_id, s.wa_access_token, "
+        "c.wa_id, c.name AS client_name, c.lang, " + S_LABEL + " AS salon_name, s.wa_phone_number_id, s.wa_access_token, "
         "s.timezone, s.deposit_kes, sv.name AS service_name, sv.price_kes, sv.duration_min, st.name AS stylist_name "
         "FROM bookings b JOIN clients c ON c.id=b.client_id JOIN salons s ON s.id=b.salon_id "
         "JOIN services sv ON sv.id=b.service_id JOIN staff st ON st.id=b.staff_id "
@@ -884,8 +926,13 @@ async def _till_claim(ctx, salon, client, st, chat, lang, text: str,
         await _reply_buttons(ctx, salon["id"], chat.to, st, chat, t(lang, "till_code_used"),
                              _manual_payment_buttons(bid, lang))
         return
-    pay_id = await payments.record_manual_claim(ctx.pool, bid, salon["id"], mpesa.normalize_msisdn(chat.to) or chat.to,
-                                                claimed, code, evidence, provider=provider)
+    try:
+        pay_id = await payments.record_manual_claim(ctx.pool, bid, salon["id"], mpesa.normalize_msisdn(chat.to) or chat.to,
+                                                    claimed, code, evidence, provider=provider)
+    except asyncpg.UniqueViolationError:
+        # Another customer claimed this reference a moment ago, after the check above. Say so, instead of failing and retrying.
+        await _reply_buttons(ctx, salon["id"], chat.to, st, chat, t(lang, "till_code_used"), _manual_payment_buttons(bid, lang))
+        return
     await ctx.pool.execute(f"UPDATE bookings SET hold_expires_at = GREATEST(hold_expires_at, now() + interval '{payments.MANUAL_HOLD}') "
                            "WHERE id=$1::uuid AND status='held'", bid)
     if extracted is not None:
@@ -904,10 +951,14 @@ async def _till_claim(ctx, salon, client, st, chat, lang, text: str,
 async def _file_for_review(ctx, salon, st, chat, lang, bid: str, expected: int, claimed: int | None, code: str | None, text: str) -> None:
     acct = await payments.account(ctx.pool, salon["id"])
     provider = payments.manual_provider(acct)
-    pay_id = await ctx.pool.fetchval(
-        "INSERT INTO payments (booking_id, salon_id, phone, amount_kes, method, provider, status, mpesa_receipt, claim_ref) "
-        "VALUES ($1::uuid,$2::uuid,$3,$4,'manual',$5,'review',$6,$7) RETURNING id::text",
-        bid, salon["id"], mpesa.normalize_msisdn(chat.to) or chat.to, expected or claimed or 1, provider, code, text[:500])
+    try:
+        pay_id = await ctx.pool.fetchval(
+            "INSERT INTO payments (booking_id, salon_id, phone, amount_kes, method, provider, status, mpesa_receipt, claim_ref) "
+            "VALUES ($1::uuid,$2::uuid,$3,$4,'manual',$5,'review',$6,$7) RETURNING id::text",
+            bid, salon["id"], mpesa.normalize_msisdn(chat.to) or chat.to, expected or claimed or 1, provider, code, text[:500])
+    except asyncpg.UniqueViolationError:
+        await _reply_buttons(ctx, salon["id"], chat.to, st, chat, t(lang, "till_code_used"), _manual_payment_buttons(bid, lang))
+        return
     reason = "amount_mismatch" if claimed and expected and claimed != expected else "payment_unresolved"
     await ctx.pool.execute(
         "INSERT INTO payment_reviews (payment_id, reason, status, expected_amount, received_amount, mpesa_receipt) "

@@ -21,8 +21,8 @@ _INJECTION = re.compile(
     r"(ignore|disregard|forget|override|bypass)\W+(all\W+|any\W+|the\W+|your\W+|previous\W+|prior\W+|above\W+|earlier\W+|these\W+|those\W+)*"
     r"(instructions?|rules?|prompts?|guidelines?|directions?|context)|"
     r"(system|developer|hidden|initial|original)\W+(prompt|message|instructions?)|"
-    r"(reveal|show|print|repeat|leak|tell me)\W+(me\W+)?(your\W+|the\W+)*(prompt|instructions?|rules|secrets?|api\W?keys?|tokens?|passwords?|configuration|config)|"
-    r"you\W+are\W+(now\W+(a|an|the|my|dan|in|free|unrestricted)\b|no\W+longer\W)|\bact\W+as\W+(a|an|the)?\W*\w+|pretend\W+(to\W+be|you\W+are)|jailbreak|"
+    r"(reveal|show|print|repeat|leak|tell me)\W+(me\W+)?(?:(your\W+|the\W+)*(prompt|secrets?|api\W?keys?|tokens?|passwords?|configuration|config)|your\W+(instructions?|rules))|"
+    r"you\W+are\W+(now\W+(a|an|the|my|dan|in|free|unrestricted)\b|no\W+longer\W)|\bact\W+as\W+(?!(?:soon|early|late|quickly|fast|well)\b)(a|an|the)?\W*\w+|pretend\W+(to\W+be|you\W+are)|jailbreak|"
     r"\bdo\W+anything\W+now\b|\bDAN\W+(mode|prompt|jailbreak|version)\b|\byou\W+are\W+(?-i:DAN)\b|developer\W+mode|"
     r"<\|?(system|im_start|im_end|assistant)\|?>|\[/?(INST|SYS)\]|^\W*(system|assistant|developer)\s*:", re.I | re.M)
 

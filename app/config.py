@@ -68,6 +68,11 @@ class Settings(BaseSettings):
     vision_enabled: bool = True
     rate_limit_per_min: int = 20
     rate_burst: int = 10
+    # A shop owner working through a queue of customers sends far more messages than a customer. Their ceiling is this many times higher,
+    # and they never earn a burst strike for it (three strikes block a sender for the day).
+    owner_rate_factor: int = 10
+    # Availability questions one shop's owner can have open at once. More would flood the owner and hold slots nobody can answer in five minutes.
+    manual_owner_check_max_pending: int = 10
     rate_window_s: int = 60
     rate_daily: int = 300
     llm_daily_per_salon: int = 5000

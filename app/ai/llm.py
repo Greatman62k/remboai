@@ -146,7 +146,86 @@ def _coerce(d: dict) -> Extraction:
 
 
 _LX = lexicon.load()
-_SW_MARKERS, _CANCEL, _PRICE, _HOURS = (_LX.pattern(c) for c in ("sw_markers", "cancel", "price", "hours"))
+# Only explicit cancel words cancel. The wider "cancel" list (running late, can't come, reschedule) is not used here: this path cancels the
+# soonest booking without asking, so "I'm running late" must never reach it.
+_SW_MARKERS, _CANCEL, _PRICE, _HOURS = (_LX.pattern(c) for c in ("sw_markers", "cancel_now", "price", "hours"))
+_CANCEL_QUESTION = re.compile(r"\bif\s+i\s+cancel|\bhow\s+(?:do|can|to)\s+(?:i\s+)?cancel|\bwhat\s+(?:happens\s+)?if\b.*\bcancel|\bnawezaje\s+kughairi", re.I)
+_TIME_OF_DAY_GREETING = re.compile(r"\bgood\s+(?:morning|afternoon|evening|day)\b|\bhabari\s+(?:za|ya)\s+(?:asubuhi|mchana|jioni)\b", re.I)
+_PICK_WORDS = {w: n for n, cat in ((1, "pick_first"), (2, "pick_second"), (3, "pick_third")) for w in _LX.words(cat)}
+_PICK_FILLER = {"yes", "yeah", "ok", "okay", "sawa", "ndio", "the", "i", "ill", "i'll", "will", "take", "go", "with", "pick", "choose", "let", "lets", "let's", "one", "slot",
+                "option", "please", "pls", "tafadhali", "ya", "wa", "nimechukua", "nachukua", "nitachukua", "naomba", "nataka", "nipe", "number"}
+_NEEDS_LEAD = {"tatu"}          # "ya tatu" is the third one, but "saa tatu" is 9 o'clock, so a bare "tatu" is not a pick
+
+
+def _ordinal_pick(t: str) -> int | None:
+    """'second one', 'yes the first', 'sawa nimechukua ya kwanza'. Every word must be a pick word or filler, so 'give me a second' and
+    'first thing tomorrow' are not picks."""
+    tokens = re.findall(r"[a-z0-9']+", t)
+    picks = [(i, _PICK_WORDS[w]) for i, w in enumerate(tokens) if w in _PICK_WORDS]
+    if len(picks) != 1 or not all(w in _PICK_WORDS or w in _PICK_FILLER for w in tokens):
+        return None
+    i, n = picks[0]
+    if tokens[i] in _NEEDS_LEAD and (i == 0 or tokens[i - 1] not in {"ya", "wa", "number", "option"}):
+        return None
+    return n
+
+
+def _edit_distance(a: str, b: str, cap: int) -> int:
+    if abs(len(a) - len(b)) > cap:
+        return cap + 1
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        if min(cur) > cap:
+            return cap + 1
+        prev = cur
+    return prev[-1]
+
+
+def _fuzzy_service(t: str, services: list[dict]) -> str | None:
+    """A service typed with a slip: fadde, bearad trim, kids cutt, silkpress, brades. Short names tolerate one slip, long names two; the first
+    letter must match and the typed word must be at least five letters, so 'made' is never 'fade'. Two services that tie match nothing."""
+    tokens = re.findall(r"[a-z']+", t)
+    found: dict[str, int] = {}
+    for s in services:
+        for key in [s["name"], *s.get("aliases", [])]:
+            k = re.sub(r"[^a-z ]", "", (key or "").lower()).strip()
+            glued = k.replace(" ", "")
+            if len(glued) < 4:
+                continue
+            n = len(k.split())
+            heard = ({" ".join(tokens[i:i + n]) for i in range(len(tokens) - n + 1)} | {"".join(tokens[i:i + n]) for i in range(len(tokens) - n + 1)}
+                     | set(tokens))                      # a multi-word name typed as one word: silkpress
+            for h in heard:
+                hg = h.replace(" ", "")
+                if len(hg) < 5 or hg[0] != glued[0]:
+                    continue
+                cap = 2 if len(glued) >= 8 or (len(glued) >= 6 and hg[:2] == glued[:2] and hg[-1] == glued[-1]) else 1
+                d = _edit_distance(hg, glued, cap)
+                if d <= cap:
+                    found[s["name"]] = min(d, found.get(s["name"], cap))
+    if not found:
+        return None
+    best = min(found.values())
+    top = [name for name, d in found.items() if d == best]
+    return top[0] if len(top) == 1 else None
+
+
+_CONCEPTS = tuple(_LX.pattern(c) for c in ("concept_beard", "concept_kids", "concept_braids"))
+
+
+def _concept_service(t: str, services: list[dict]) -> str | None:
+    """'ndevu' is beard, 'mtoto' is kid, 'kusukwa' is braiding, even when the salon never listed those words. It only counts when exactly one
+    of the salon's services speaks of that concept in its own name or aliases."""
+    names: set[str] = set()
+    for pat in _CONCEPTS:
+        if pat.search(t):
+            hits = [s["name"] for s in services if any(k and pat.search(k.lower()) for k in [s["name"], *s.get("aliases", [])])]
+            if len(hits) == 1:
+                names.add(hits[0])
+    return next(iter(names)) if len(names) == 1 else None
 
 
 def rule_extract(text: str, today: date, services: list[dict], state: str = "idle") -> Extraction:
@@ -156,7 +235,9 @@ def rule_extract(text: str, today: date, services: list[dict], state: str = "idl
     lang = "sw" if sw else "en"
     if state == "offered" and re.fullmatch(r"[1-3]", t):
         return Extraction(intent="choose_slot", choice=int(t), language=lang)
-    if _CANCEL.search(t):
+    if state == "offered" and (n := _ordinal_pick(t)):
+        return Extraction(intent="choose_slot", choice=n, language=lang)
+    if _CANCEL.search(t) and not _CANCEL_QUESTION.search(t):
         return Extraction(intent="cancel", language=lang)
     if re.search(r"\b(service|services|huduma|orodha|menu)\b", t):
         return Extraction(intent="price_list", language=lang)
@@ -165,7 +246,9 @@ def rule_extract(text: str, today: date, services: list[dict], state: str = "idl
     if _HOURS.search(t):
         return Extraction(intent="hours", language=lang)
     svc = next((s["name"] for s in services if any(k and re.search(rf"\b{re.escape(k.lower())}\b", t) for k in [s["name"], *s.get("aliases", [])])), None)
-    day, window, at = parse_day(t, today), parse_window(t), parse_time(t)
+    svc = svc or _fuzzy_service(t, services) or _concept_service(t, services)
+    t2 = _TIME_OF_DAY_GREETING.sub(" ", t)      # 'good morning' is a hello, not a request for the morning
+    day, window, at = parse_day(t2, today), parse_window(t2), parse_time(t2)
     if svc or day or window or at:
         greeted = smalltalk.detect(t)[0]
         if greeted and greeted.startswith("good") and not (svc or day or at):

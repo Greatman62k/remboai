@@ -9,6 +9,14 @@ MIGRATIONS = Path(__file__).resolve().parent.parent / "migrations"
 
 MIN_POOL = 3
 
+
+async def _no_reset(conn) -> None:
+    """asyncpg's default reset sends `pg_advisory_unlock_all(); CLOSE ALL; UNLISTEN *; RESET ALL;` every time a connection returns to the
+    pool: a whole extra round trip for each query the app makes (5.5 ms against 2.7 ms at a 2 ms database round trip). Nothing here keeps
+    session state, and tests/test_performance_fixes.py fails if something starts to. asyncpg still rolls back an open transaction itself.
+    The migration lock is session-level and is released explicitly in migrate()."""
+
+
 async def make_pool(dsn: str, max_size: int = 10) -> asyncpg.Pool:
     max_size = max(MIN_POOL, int(max_size))
     async def init(conn):
@@ -19,10 +27,10 @@ async def make_pool(dsn: str, max_size: int = 10) -> asyncpg.Pool:
             return json.dumps(v)
         await conn.set_type_codec("jsonb", encoder=_enc, decoder=lambda x: __import__("json").loads(x) if isinstance(x, str) else x, schema="pg_catalog")
     try:
-        return await asyncpg.create_pool(dsn, min_size=1, max_size=max_size, init=init)
+        return await asyncpg.create_pool(dsn, min_size=1, max_size=max_size, init=init, reset=_no_reset)
     except Exception:
         log.warning("connection pool without the jsonb codec: jsonb columns will come back as strings")
-        return await asyncpg.create_pool(dsn, min_size=1, max_size=max_size)
+        return await asyncpg.create_pool(dsn, min_size=1, max_size=max_size, reset=_no_reset)
 
 async def migrate(pool: asyncpg.Pool, directory: Path = MIGRATIONS) -> list[str]:
     applied_now: list[str] = []
@@ -46,7 +54,9 @@ async def _migrate_locked(con: asyncpg.Connection, directory: Path, applied_now:
             await con.execute("INSERT INTO schema_migrations (name) VALUES ($1)", f.name)
         applied_now.append(f.name)
 
-_SALON_SQL = "SELECT id::text AS id, name, wa_phone_number_id, wa_business_number, owner_wa_id, wa_access_token, timezone, deposit_kes, open_hours, tg_bot_id, active FROM salons WHERE wa_phone_number_id = $1"
+from .names import LABEL
+
+_SALON_SQL = "SELECT id::text AS id, " + LABEL + " AS name, wa_phone_number_id, wa_business_number, owner_wa_id, wa_access_token, timezone, deposit_kes, open_hours, tg_bot_id, active FROM salons WHERE wa_phone_number_id = $1"
 _salon_cache: dict[str, tuple[float, dict | None]] = {}
 
 def clear_salon_cache(phone_number_id: str | None = None) -> None:

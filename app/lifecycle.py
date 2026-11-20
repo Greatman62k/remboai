@@ -10,6 +10,7 @@ import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from .names import LABEL
 from .channels import outbound
 from .channels.whatsapp import mask
 from .db import clear_salon_cache
@@ -20,6 +21,7 @@ log = logging.getLogger("rembo.lifecycle")
 WARN_DAYS = 7
 FINAL_DAYS = 13
 DELETE_DAYS = 14
+MAX_HOLD_BACK_DAYS = 60   # unresolved refunds or manual claims delay deletion, but never past this
 
 
 async def delete_salon(pool, salon_id: str) -> dict:
@@ -43,11 +45,20 @@ async def delete_salon(pool, salon_id: str) -> dict:
     return out
 
 
+async def money_unresolved(pool, salon_id: str) -> bool:
+    """A refund still owed, a payment awaiting review, or a manual claim the owner has not answered. Deleting the salon would delete the
+    only record of it. (An abandoned STK prompt does not count: nobody can act on it.)"""
+    return bool(await pool.fetchval(
+        "SELECT 1 FROM payments p WHERE p.salon_id=$1::uuid AND (p.status IN ('needs_refund','review') OR (p.status='pending' AND p.method='manual')) "
+        "UNION ALL SELECT 1 FROM payment_reviews r JOIN payments p ON p.id=r.payment_id "
+        "WHERE p.salon_id=$1::uuid AND r.status IN ('pending_review','refund_due') LIMIT 1", salon_id))
+
+
 async def delete_salon_and_notify(ctx, salon_id: str) -> dict:
     """Delete a salon and tell every upcoming customer, so nobody turns up to a dead business.
     Returns the delete_salon counts plus how many customers were told."""
     salon = await ctx.pool.fetchrow(
-        "SELECT id::text, name, wa_phone_number_id, wa_access_token, timezone, owner_wa_id FROM salons WHERE id=$1::uuid", salon_id)
+        "SELECT id::text, " + LABEL + " AS name, wa_phone_number_id, wa_access_token, timezone, owner_wa_id FROM salons WHERE id=$1::uuid", salon_id)
     upcoming = []
     if salon is not None:
         upcoming = [dict(r) for r in await ctx.pool.fetch(
@@ -78,14 +89,18 @@ async def owner_lang(pool, salon_id: str, owner_wa_id: str | None) -> str:
     return "en"
 
 
+# One pass over bookings. A correlated "(SELECT max(...) WHERE salon_id=s.id)" scanned the whole table once per salon: 14.9 s against 0.24 s at 1.26M bookings.
+SALONS_WITH_LAST_BOOKING_SQL = (
+    "SELECT s.id::text, s.name, s.wa_phone_number_id, s.wa_access_token, s.owner_wa_id, "
+    "s.inactivity_warned_at, s.inactivity_final_at, s.created_at, lb.last_booking "
+    "FROM salons s LEFT JOIN (SELECT salon_id, max(created_at) AS last_booking FROM bookings GROUP BY salon_id) lb ON lb.salon_id=s.id "
+    "WHERE s.active")
+
+
 async def sweep(ctx) -> dict:
     """Warn and delete quiet salons. Returns what happened, per salon id."""
     now = datetime.now(ZoneInfo("UTC"))
-    rows = await ctx.pool.fetch(
-        "SELECT s.id::text, s.name, s.wa_phone_number_id, s.wa_access_token, s.owner_wa_id, "
-        "s.inactivity_warned_at, s.inactivity_final_at, s.created_at, "
-        "(SELECT max(b.created_at) FROM bookings b WHERE b.salon_id=s.id) AS last_booking "
-        "FROM salons s WHERE s.active")
+    rows = await ctx.pool.fetch(SALONS_WITH_LAST_BOOKING_SQL)
     done: dict = {"warned": [], "final": [], "deleted": [], "reset": []}
     for r in rows:
         salon = dict(r)
@@ -95,6 +110,9 @@ async def sweep(ctx) -> dict:
             if salon["inactivity_warned_at"] or salon["inactivity_final_at"]:
                 await ctx.pool.execute("UPDATE salons SET inactivity_warned_at=NULL, inactivity_final_at=NULL WHERE id=$1::uuid", salon["id"])
                 done["reset"].append(salon["id"])
+            continue
+        if age >= DELETE_DAYS and age < MAX_HOLD_BACK_DAYS and await money_unresolved(ctx.pool, salon["id"]):
+            log.warning("not deleting quiet salon %s (%s): money is unresolved", salon["id"], salon["name"])
             continue
         if not salon["owner_wa_id"]:
             if age >= DELETE_DAYS:

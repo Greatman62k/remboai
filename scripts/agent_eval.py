@@ -1,12 +1,17 @@
 """Agent eval: what does the model decide to do with a customer message, compared with the keyword rules?
 
-The corpus (scripts/agent_corpus.json, 33 messages) was written to be hard for keyword rules: Sheng, typos, swahili clock times, a
-stylist's name, a pick that depends on the slots just offered, a refund complaint, an injection attempt. Each item says which tool
-the receptionist should call first and with which arguments, or that it should answer in words (and what the words must or must not say).
+Two corpora live next to this file. agent_corpus.json (33 messages) was written to be hard for keyword rules. agent_corpus_v2.json
+(see docs/AGENT_EVAL_V2.md) is larger, covers more kinds of message and carries conversation history for the context items. Each item
+says which tool the receptionist should call first and with which arguments, or that it should answer in words (and what the words
+must or must not say).
 
-  python scripts/agent_eval.py                 # keyword rules only, no keys needed
-  python scripts/agent_eval.py --models        # also every model backend configured in .env (LLM_* and LLM_FALLBACK_*)
-  python scripts/agent_eval.py --models --out docs/AGENT_EVAL.md
+  python scripts/agent_eval.py                                  # keyword rules on the original corpus, no keys needed
+  python scripts/agent_eval.py --corpus scripts/agent_corpus_v2.json
+  python scripts/agent_eval.py --models --corpus scripts/agent_corpus_v2.json --verbose
+  python scripts/agent_eval.py --models --corpus scripts/agent_corpus.json --corpus scripts/agent_corpus_v2.json --out docs/AGENT_EVAL.md
+
+Every score is printed with a 95% Wilson interval, because a perfect score on a small corpus still leaves a wide range of true accuracy.
+--verbose lists each miss (message, what was expected, what the model did).
 
 Only the model's FIRST move is scored (the tool it calls, or its reply); the checker and tools in the live app add safety on top.
 Rules cannot produce a reply, so their reply checks are skipped and only the booking decision counts."""
@@ -80,7 +85,7 @@ def judge(item: dict, tool: str | None, args: dict, reply: str | None) -> tuple[
             ok &= v.lower() in str(args.get("stylist", "")).lower()
         else:
             ok &= str(args.get(k, "")).lower() == str(v).lower()
-    if reply is not None and e["tool"] is None:
+    if reply is not None and tool is None:
         low = reply.lower()
         if e.get("reply_has_any"):
             ok &= any(w.lower() in low for w in e["reply_has_any"])
@@ -91,6 +96,8 @@ def judge(item: dict, tool: str | None, args: dict, reply: str | None) -> tuple[
 def rules_decide(item: dict) -> tuple[str | None, dict]:
     ex = rule_extract(item["text"], TODAY, SERVICES, "offered" if item["offered"] else "idle")
     if ex.intent == "book":
+        if not (ex.service and ex.date):      # production asks for whatever is missing instead of searching
+            return None, {}
         return "find_slots", {"service": ex.service, "date": ex.date, "window": ex.window, "time": ex.time}
     if ex.intent == "choose_slot" and ex.choice:
         return "reserve_slot", {"slot_id": f"s{ex.choice}"}
@@ -100,10 +107,26 @@ def rules_decide(item: dict) -> tuple[str | None, dict]:
 
 
 async def model_decide(model: AgentModel, item: dict) -> tuple[str | None, dict, str | None, int]:
-    step = await model.step(brief(item), [{"role": "user", "content": item["text"]}], eval_tools())
+    messages = [*item.get("history", []), {"role": "user", "content": item["text"]}]
+    step = await model.step(brief(item), messages, eval_tools())
     if step.calls:
         return step.calls[0].name, step.calls[0].args, None, step.ms
     return None, {}, step.text, step.ms
+
+
+def wilson(k: int, n: int, z: float = 1.96) -> tuple[int, int]:
+    """95% Wilson score interval for k successes in n trials, in whole percent."""
+    if n == 0:
+        return 0, 0
+    p = k / n
+    centre = (p + z * z / (2 * n)) / (1 + z * z / n)
+    half = z * ((p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5) / (1 + z * z / n)
+    return round(100 * max(0.0, centre - half)), round(100 * min(1.0, centre + half))
+
+
+def fmt(k: int, n: int) -> str:
+    lo, hi = wilson(k, n)
+    return f"{k}/{n} ({lo}-{hi}%)"
 
 
 def summarize(rows: list[dict]) -> dict:
@@ -119,14 +142,21 @@ async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--models", action="store_true", help="also score the configured model backends")
     ap.add_argument("--out", help="write a markdown table here")
+    ap.add_argument("--corpus", action="append", help="corpus file (repeatable); default scripts/agent_corpus.json")
+    ap.add_argument("--verbose", action="store_true", help="list every miss")
     a = ap.parse_args()
-    corpus = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent_corpus.json")))
+    here = os.path.dirname(os.path.abspath(__file__))
+    paths = a.corpus or [os.path.join(here, "agent_corpus.json")]
+    corpus = [it for path in paths for it in json.load(open(path))]
+    names = ", ".join(os.path.basename(x) for x in paths)
     results: dict[str, dict] = {}
     rows = []
     for it in corpus:
         tool, args = rules_decide(it)
         acted, exact = judge(it, tool, args, None)
         rows.append({"cat": it["cat"], "acted": acted, "exact": exact, "ms": 0})
+        if a.verbose and not exact:
+            print(f"  MISS keyword rules  {it['text'][:60]!r}: expected {it['expect']['tool']} {it['expect'].get('args', '')}, got {tool} {args}", file=sys.stderr)
     results["keyword rules"] = summarize(rows)
     if a.models:
         s = get_settings()
@@ -146,18 +176,22 @@ async def main() -> int:
                             print(f"  {ep[3]}: {it['text'][:40]!r} failed: {e.__class__.__name__}", file=sys.stderr)
                             return {"cat": it["cat"], "acted": False, "exact": False, "ms": 0}
                         acted, exact = judge(it, tool, args, reply)
+                        if a.verbose and not exact:
+                            print(f"  MISS {ep[3]}  {it['text'][:60]!r}: expected {it['expect']['tool']} {it['expect'].get('args', '') or it['expect'].get('reply_has_any', '')}, "
+                                  f"got {tool} {args or (reply or '')[:80]!r}", file=sys.stderr)
                         return {"cat": it["cat"], "acted": acted, "exact": exact, "ms": ms}
                 results[f"{ep[3]} ({ep[0]})"] = summarize(await asyncio.gather(*(one(it) for it in corpus)))
     cats = sorted({c["cat"] for c in corpus})
     head = f"| Decision maker | Right action | Right action and details | " + " | ".join(cats) + " | median ms |"
     lines = [head, "|" + "---|" * (len(cats) + 4)]
     for name, r in results.items():
-        lines.append(f"| {name} | {r['action']}/{r['n']} | {r['exact']}/{r['n']} | " + " | ".join(f"{r['by_cat'][c][0]}/{r['by_cat'][c][1]}" for c in cats) + f" | {r['ms'] or '-'} |")
+        lines.append(f"| {name} | {fmt(r['action'], r['n'])} | {fmt(r['exact'], r['n'])} | " + " | ".join(f"{r['by_cat'][c][0]}/{r['by_cat'][c][1]}" for c in cats) + f" | {r['ms'] or '-'} |")
     table = "\n".join(lines)
     print(table)
     if a.out:
         with open(a.out, "w") as f:
-            f.write(f"# Agent eval\n\nHeld-out messages the keyword rules were not tuned for. First move only. Date fixed at {TODAY}.\n\n{table}\n")
+            f.write(f"# Agent eval\n\nCorpora: {names} ({len(corpus)} messages). Written to be hard for keyword rules, and not tuned against. "
+                    f"First move only. Intervals are 95% Wilson. Date fixed at {TODAY}.\n\n{table}\n")
     return 0
 
 

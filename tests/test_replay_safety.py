@@ -228,7 +228,33 @@ async def test_a_retried_cancel_does_not_cancel_the_customers_next_appointment(m
         await post(c, payload(A, "cancel it", mid="x1"))
     await _run_job_to_exhaustion(pool, app.state.ctx)
     rows = await pool.fetch("SELECT status FROM bookings ORDER BY starts_at")
-    assert [r["status"] for r in rows] == ["cancelled", "confirmed"], "only the appointment this message asked to cancel"
+    assert [r["status"] for r in rows] == ["confirmed", "confirmed"], "with two bookings the customer is asked which; a retry must not cancel either"
+    assert len(out.bodies(A)) == 1, "and must not ask twice"
+    await pool.close()
+
+
+@needs_db
+@pytest.mark.asyncio
+async def test_a_retried_cancel_tap_cancels_only_the_tapped_appointment(monkeypatch):
+    from datetime import datetime, timedelta
+    from app.main import app
+    from tests.harness import NBO
+    pool, out, salon = await build(DSN)
+    staff = await pool.fetchval("SELECT id::text FROM staff LIMIT 1")
+    svc = await pool.fetchval("SELECT id::text FROM services WHERE name='Fade'")
+    cid = await pool.fetchval("INSERT INTO clients (salon_id, wa_id) VALUES ($1::uuid,$2) RETURNING id::text", salon, A)
+    ids = []
+    for days in (2, 4):
+        start = datetime.now(NBO) + timedelta(days=days)
+        ids.append(await pool.fetchval(
+            "INSERT INTO bookings (salon_id, staff_id, service_id, client_id, starts_at, ends_at, status) VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,'confirmed') RETURNING id::text",
+            salon, staff, svc, cid, start, start + timedelta(minutes=45)))
+    crash_after_handling(monkeypatch, "x1")
+    async with client() as c:
+        await post(c, payload(A, reply_id=f"cxl:{ids[1]}", mid="x1"))
+    await _run_job_to_exhaustion(pool, app.state.ctx)
+    rows = await pool.fetch("SELECT status FROM bookings ORDER BY starts_at")
+    assert [r["status"] for r in rows] == ["confirmed", "cancelled"], "only the appointment that was tapped, and only once"
     assert len(out.bodies(A)) == 1
     await pool.close()
 

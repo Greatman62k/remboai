@@ -378,13 +378,13 @@ def wants_customer_booking(text: str) -> bool:
 
 async def similar_salon(pool, name: str) -> str | None:
     """An existing business name close enough that this may be a duplicate registration."""
-    names = [r["name"] for r in await pool.fetch("SELECT name FROM salons WHERE active")]
+    from .names import similarity
     best, score = None, 0.0
-    for other in names:
-        s = difflib.SequenceMatcher(None, name.lower(), other.lower()).ratio()
-        if s > score:
-            best, score = other, s
-    return best if score >= 0.8 else None
+    for r in await pool.fetch("SELECT name FROM salons WHERE active"):
+        sc = similarity(name, r["name"])
+        if sc > score:
+            best, score = r["name"], sc
+    return best
 
 
 async def _say(ctx, pid: str, to: str, body: str) -> None:
@@ -762,6 +762,26 @@ def registration_next_step(state: dict) -> str:
     return "confirm_all"
 
 
+async def _similar_businesses(con, name: str) -> list[dict]:
+    rows = await con.fetch("SELECT id::text, name, area, owner_wa_id, wa_phone_number_id, wa_access_token FROM salons WHERE active")
+    from .names import similar
+    return [dict(r) for r in rows if similar(name, r["name"])]
+
+
+async def _nudge_similar(ctx, pid: str, salon_id: str, name: str, sender: str, twins: list[dict], lang: str) -> None:
+    """Customers cannot tell two similar names apart, so both owners are asked for an area. A failure here never undoes a registration."""
+    if not twins:
+        return
+    try:
+        await _say(ctx, pid, sender, t(lang, "owner_area_nudge_new", name=name))
+        async with outbound.message_scope(f"area-nudge:{salon_id}"):
+            for twin in twins:
+                if twin.get("owner_wa_id") and twin["owner_wa_id"] != sender and not (twin.get("area") or "").strip():
+                    await outbound.send_text(ctx, twin, twin["owner_wa_id"], t("en", "owner_area_nudge_existing", name=twin["name"]))
+    except Exception:
+        log.warning("could not send the similar-name notices")
+
+
 async def _go_live(ctx, pid: str, sender: str, state: dict) -> bool:
     """Create the salon, its stylists, and its services, then hand back the invite link."""
     if not state.get("final_confirmation_pending"):
@@ -779,6 +799,9 @@ async def _go_live(ctx, pid: str, sender: str, state: dict) -> bool:
     wa_pid = None if pid.startswith("tg:") else pid
     tg_id = pid if pid.startswith("tg:") else None
     async with ctx.pool.acquire() as con, con.transaction():
+        # One registration at a time: the similar-name look, the new row and its invite slug are then one consistent step, whoever else is signing up.
+        await con.execute("SELECT pg_advisory_xact_lock(hashtext('salon-registration'))")
+        twins = await _similar_businesses(con, data["salon"])
         salon = await con.fetchval(
             "INSERT INTO salons (name, owner_wa_id, timezone, deposit_kes, open_hours, active, wa_phone_number_id, tg_bot_id) "
             "VALUES ($1,$2,'Africa/Nairobi',$3,$4,true,$5,$6) RETURNING id::text",
@@ -799,8 +822,8 @@ async def _go_live(ctx, pid: str, sender: str, state: dict) -> bool:
                 salon, s["name"], s["price"], s["minutes"])
             for staff in staff_ids:
                 await con.execute("INSERT INTO staff_services (staff_id, service_id) VALUES ($1::uuid,$2::uuid)", staff, sid)
+        slug = await binding.ensure_slug(con, salon, data["salon"])        # inside the transaction: no business is ever left without its link
     await outbound.set_conversation_salon(ctx, salon)
-    slug = await binding.ensure_slug(ctx.pool, salon, data["salon"])
     clear_salon_cache()
     from .channels.telegram import bot_username
     username = await bot_username(getattr(ctx, "wa", None))
@@ -810,6 +833,7 @@ async def _go_live(ctx, pid: str, sender: str, state: dict) -> bool:
     await _clear_session(ctx.pool, sender)
     from .owner import send_qr_sticker
     await send_qr_sticker(ctx, sender, link, data["salon"])
+    await _nudge_similar(ctx, pid, salon, data["salon"], sender, twins, lang)
     await _say(ctx, pid, sender, t(lang, "ob_live", salon=data["salon"], link=link))
     return True
 
