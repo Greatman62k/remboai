@@ -82,7 +82,10 @@ async def _reply(ctx, salon_id: str, wa_id: str, st: dict, chat: Chat, text: str
     if len(st["history"]) > guard.MAX_HISTORY * 2:
         st["history"] = st["history"][-guard.MAX_HISTORY * 2 :]
     await _save(ctx, salon_id, wa_id, st)
-    await chat.text(text)
+    sent = await chat.text(text)
+    if sent:
+        from .handoffs import record_customer_reply
+        await record_customer_reply(ctx.pool, salon_id, wa_id, text)
 
 
 async def _reply_buttons(ctx, salon_id: str, wa_id: str, st: dict, chat: Chat, body: str, buttons) -> None:
@@ -96,7 +99,10 @@ async def _reply_buttons(ctx, salon_id: str, wa_id: str, st: dict, chat: Chat, b
     if len(st["history"]) > guard.MAX_HISTORY * 2:
         st["history"] = st["history"][-guard.MAX_HISTORY * 2 :]
     await _save(ctx, salon_id, wa_id, st)
-    await chat.buttons(body, buttons)
+    sent = await chat.buttons(body, buttons)
+    if sent:
+        from .handoffs import record_customer_reply
+        await record_customer_reply(ctx.pool, salon_id, wa_id, body)
 
 
 def _manual_payment_buttons(booking_id: str, lang: str, *, include_paid: bool = True) -> list[tuple[str, str]]:

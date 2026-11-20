@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 import unicodedata
-import json
 
 from . import lexicon
 from .channels import outbound
@@ -11,7 +10,6 @@ from .contact import display_contact
 MAX_TEXT = 1000
 MAX_NAME = 40
 MAX_HISTORY = 6
-HANDOFF_HOURS = 4.0
 ACK_EVERY_S = 3600
 
 _DROP = {"Cc", "Cf", "Cs", "Co", "Cn"}
@@ -109,39 +107,34 @@ def injection(text: str) -> bool:
 
 async def hand_off(ctx, salon: dict, client: dict, lang: str, category: str, text: str) -> None:
     import logging
+    from . import handoffs
     log = logging.getLogger("rembo.guard")
-    try:
-        await ctx.pool.execute(
-            "INSERT INTO handoffs (salon_id, client_id, category, message) VALUES ($1::uuid,$2::uuid,$3,$4) "
-            "ON CONFLICT (client_id) WHERE status = 'open' DO UPDATE SET "
-            "category=CASE WHEN EXCLUDED.category='emergency' THEN EXCLUDED.category ELSE handoffs.category END, "
-            "message=CASE WHEN EXCLUDED.category='emergency' THEN EXCLUDED.message ELSE handoffs.message END",
-            salon["id"], client["id"], category, text[:1000],
-        )
-    except Exception:
-        log.exception("handoff insert failed")
     owner = (salon.get("owner_wa_id") or "").strip().lstrip("+")
+    owner_body = None
     if owner:
-        try:
-            wa_id = client.get("wa_id") or ""
-            who = client.get("name") or display_contact(wa_id)
-            if wa_id.startswith("tg:"):
-                contact_line = f"Telegram contact: {display_contact(wa_id)}"
-            else:
-                digits = re.sub(r"\D", "", wa_id)
-                contact_line = f"Chat: https://wa.me/{digits}" if digits else f"Contact: {display_contact(wa_id)}"
-            body = (f"Needs a human ({category.replace('_',' ')}): {who}\n{contact_line}\n"
-                    f"They said: \"{(text or '')[:200]}\"\nReply \"resolve {wa_id}\" when done.")
-            await outbound.send_text(ctx, salon, owner, body)
-        except Exception:
-            log.exception("owner notify failed")
-    try:
-        await ctx.pool.execute(
-            "INSERT INTO conversations (salon_id, wa_id, state) VALUES ($1::uuid,$2,$3::jsonb) ON CONFLICT (salon_id, wa_id) DO UPDATE SET state=EXCLUDED.state, updated_at=now()",
-            salon["id"], client["wa_id"], json.dumps({"state": "handoff", "category": category}),
-        )
-    except Exception:
-        log.exception("handoff state save failed")
+        wa_id = client.get("wa_id") or ""
+        who = client.get("name") or display_contact(wa_id)
+        if wa_id.startswith("tg:"):
+            contact_line = f"Telegram contact: {display_contact(wa_id)}"
+        else:
+            digits = re.sub(r"\D", "", wa_id)
+            contact_line = f"Chat: https://wa.me/{digits}" if digits else f"Contact: {display_contact(wa_id)}"
+        owner_body = (f"Needs a human ({category.replace('_',' ')}): {who}\n{contact_line}\n"
+                      f"They said: \"{(text or '')[:200]}\"\nReply \"resolve {wa_id}\" when done.")
+
+    # A failure aborts this turn before either party is acknowledged. The handoff
+    # row, initial customer event, notification intent and paused state commit together.
+    result = await handoffs.create_handoff(
+        ctx.pool, salon["id"], client["id"], client["wa_id"], category, text,
+        source_message_id=outbound.current_message_id(), owner_notification=owner_body)
+    if owner and owner_body:
+        # Keep the owner alert out of the diagnostic row representing the customer's turn.
+        source = result.get("source_message_id") or "unknown"
+        async with outbound.message_scope(f"handoff-notice:{result['id']}:{source}"):
+            try:
+                await outbound.send_text(ctx, salon, owner, owner_body)
+            except Exception:
+                log.exception("owner notify failed for handoff %s", result["id"])
 
 async def is_handoff(pool, salon_id: str, wa_id: str) -> bool:
     row = await pool.fetchval(
@@ -149,12 +142,6 @@ async def is_handoff(pool, salon_id: str, wa_id: str) -> bool:
         salon_id, wa_id,
     )
     return bool(row)
-
-async def clear_handoff(pool, salon_id: str, wa_id: str) -> None:
-    await pool.execute(
-        "UPDATE handoffs SET status='resolved', resolved_at=now() WHERE status='open' AND salon_id=$1::uuid AND client_id IN (SELECT id FROM clients WHERE salon_id=$1::uuid AND wa_id=$2)",
-        salon_id, wa_id,
-    )
 
 async def owner_command(ctx, salon: dict, wa_id: str, text: str, send) -> bool:
     owner = (salon.get("owner_wa_id") or "").strip().lstrip("+")
@@ -184,20 +171,17 @@ async def owner_command(ctx, salon: dict, wa_id: str, text: str, send) -> bool:
         target = m.group(1)
         target = target.lower() if target.lower().startswith("tg:") else target.lstrip("+")
 
-    open_request = await ctx.pool.fetchval(
-        "SELECT 1 FROM handoffs h JOIN clients c ON c.id=h.client_id "
-        "WHERE h.salon_id=$1::uuid AND h.status='open' AND c.wa_id=$2 LIMIT 1", salon["id"], target)
-    if not open_request:
+    from .handoffs import resolve_handoff
+    target_case = await ctx.pool.fetchrow(
+        "SELECT h.id::text FROM handoffs h JOIN clients c ON c.id=h.client_id AND c.salon_id=h.salon_id "
+        "WHERE h.salon_id=$1::uuid AND h.status='open' AND c.wa_id=$2 ORDER BY h.created_at LIMIT 1", salon["id"], target)
+    if not target_case:
         await send.text(f"There is no open request for {display_contact(target)}.")
         return True
-    await ctx.pool.execute(
-        "UPDATE handoffs SET status='resolved', resolved_at=now() WHERE status='open' AND salon_id=$1::uuid AND client_id IN (SELECT id FROM clients WHERE salon_id=$1::uuid AND wa_id=$2)",
-        salon["id"], target,
-    )
-    await ctx.pool.execute(
-        "INSERT INTO conversations (salon_id, wa_id, state) VALUES ($1::uuid,$2,$3::jsonb) ON CONFLICT (salon_id, wa_id) DO UPDATE SET state=EXCLUDED.state, updated_at=now()",
-        salon["id"], target, json.dumps({}),
-    )
+    resolved = await resolve_handoff(ctx.pool, salon["id"], target_case["id"], wa_id, "owner_resolved_via_telegram")
+    if not resolved or resolved.get("already_resolved"):
+        await send.text(f"There is no open request for {display_contact(target)}.")
+        return True
     await send.text(f"Resolved for {display_contact(target)}. The bot will handle them again.")
     return True
 

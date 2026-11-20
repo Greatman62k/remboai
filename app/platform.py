@@ -303,7 +303,11 @@ async def handle(ctx, sender: str, text: str) -> bool:
             await say("No matching deletion is awaiting confirmation. First send del with the full business name or slug, "
                       "review the business shown, then confirm with the same exact name within 5 minutes.")
             return True
-        counts = await lifecycle.delete_salon_and_notify(ctx, found[0]["id"])
+        try:
+            counts = await lifecycle.delete_salon_and_notify(ctx, found[0]["id"])
+        except lifecycle.OpenHandoffsError:
+            await say("This business still has an open request waiting for its owner. Resolve it before deleting the business.")
+            return True
         await say(f"Deleted {found[0]['name']}: {counts['bookings']} bookings, {counts['payments']} payments. "
                   f"{counts['notified']} customer(s) told.")
         return True

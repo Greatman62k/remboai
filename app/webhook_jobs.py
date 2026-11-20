@@ -284,7 +284,8 @@ async def purge_expired_data(pool, webhook_days: int = 30, inbound_days: int = 9
     p = await pool.fetchval("WITH deleted AS (DELETE FROM platform_agent_sessions WHERE updated_at < now() - ($1 * interval '1 day') RETURNING 1) SELECT count(*) FROM deleted", agent_days)
     t = await pool.fetchval("WITH deleted AS (DELETE FROM conversation_trace WHERE created_at < now() - ($1 * interval '1 day') RETURNING 1) SELECT count(*) FROM deleted", agent_days)
     h = await pool.fetchval(
-        "WITH deleted AS (DELETE FROM handoffs WHERE COALESCE(resolved_at, created_at) < now() - ($1 * interval '1 day') RETURNING 1) "
+        "WITH deleted AS (DELETE FROM handoffs WHERE status='resolved' "
+        "AND COALESCE(resolved_at, created_at) < now() - ($1 * interval '1 day') RETURNING 1) "
         "SELECT count(*) FROM deleted", handoff_days)
     cb = await pool.fetchval(
         "WITH deleted AS (DELETE FROM mpesa_callbacks c WHERE c.received_at < now() - ($1 * interval '1 day') "

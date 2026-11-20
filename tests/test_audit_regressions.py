@@ -526,9 +526,9 @@ async def test_a_handoff_really_pauses_the_bot_and_tells_the_owner_who_to_contac
 
 @needs_db
 @pytest.mark.asyncio
-async def test_the_handoff_pause_follows_the_configured_hours():
+async def test_an_elapsed_handoff_timeout_never_releases_the_customer_to_the_bot():
     from app.main import app
-    pool, out, salon = await build(DSN, handoff_hours=1.0)
+    pool, out, salon = await build(DSN)
     async with client() as c:
         await post(c, payload(A, "I want to speak to the owner", mid="h1"))
         await _run_job_to_exhaustion(pool, app.state.ctx)
@@ -537,8 +537,10 @@ async def test_the_handoff_pause_follows_the_configured_hours():
         before = len(out.bodies(A))
         await post(c, payload(A, "hi", mid="h2"))
         await _run_job_to_exhaustion(pool, app.state.ctx)
-    assert await pool.fetchval("SELECT count(*) FROM handoffs WHERE status='open'") == 0, "after the configured pause the bot takes the customer back"
-    assert len(out.bodies(A)) == before + 1 and "owner has your message" not in out.bodies(A)[-1].lower()
+        assert await pool.fetchval("SELECT count(*) FROM handoffs WHERE status='open'") == 1
+        assert await pool.fetchval("SELECT state->>'state' FROM conversations WHERE wa_id=$1", A) == "handoff"
+        assert "owner has your message" in out.bodies(A)[-1].lower()
+        assert len(out.bodies(A)) == before + 1
     await pool.close()
 
 

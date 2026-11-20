@@ -12,7 +12,7 @@ from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 from .names import LABEL, S_LABEL
-from . import agent, binding, guard, locks, mpesa, onboarding_chat, owner, payments, platform, screen, smalltalk, waitlist
+from . import agent, binding, guard, handoffs, locks, mpesa, onboarding_chat, owner, payments, platform, screen, smalltalk, waitlist
 from .availability import DAY_KEYS
 from .booking_flow import (
     _book,
@@ -75,11 +75,11 @@ class Chat:
     def __init__(self, ctx, salon, to: str):
         self.ctx, self.salon, self.pid, self.to = ctx, salon, salon["wa_phone_number_id"], to
 
-    async def text(self, body: str) -> None:
-        await outbound.send_text(self.ctx, self.salon, self.to, body)
+    async def text(self, body: str) -> bool:
+        return await outbound.send_text(self.ctx, self.salon, self.to, body)
 
-    async def buttons(self, body: str, buttons: list[tuple[str, str]]) -> None:
-        await outbound.send_buttons(self.ctx, self.salon, self.to, body, buttons)
+    async def buttons(self, body: str, buttons: list[tuple[str, str]]) -> bool:
+        return await outbound.send_buttons(self.ctx, self.salon, self.to, body, buttons)
 
 
 def _tap_is_duplicate(st: dict, reply_id: str | None, now: datetime) -> bool:
@@ -114,21 +114,28 @@ async def _load(ctx, salon_id: str, wa_id: str, name: str | None) -> tuple[dict,
     return dict(client), state or {"history": []}
 
 
-async def _handoff_before_onboarding(ctx, salon: dict, sender: str, chat: Chat) -> bool:
-    """Keep onboarding from intercepting a conversation that is paused for a human."""
+async def _handoff_before_onboarding(ctx, salon: dict, sender: str, chat: Chat, msg: Message) -> bool:
+    """Keep every open case paused and append subsequent customer messages to it."""
     row = await ctx.pool.fetchrow(
-        "SELECT h.created_at, c.lang FROM handoffs h JOIN clients c ON c.id=h.client_id "
+        "SELECT h.id::text,h.created_at,h.category,c.id::text AS client_id,c.lang FROM handoffs h "
+        "JOIN clients c ON c.id=h.client_id AND c.salon_id=h.salon_id "
         "WHERE h.salon_id=$1::uuid AND c.wa_id=$2 AND h.status='open' "
         "ORDER BY h.created_at DESC LIMIT 1", salon["id"], sender,
     )
     if row is not None:
-        age = (datetime.now(ZoneInfo(salon["timezone"])) - row["created_at"]).total_seconds()
-        if age < float(getattr(ctx.settings, "handoff_hours", guard.HANDOFF_HOURS)) * 3600:
-            await chat.text(guard.reply_for("waiting", row["lang"] or "en"))
-            return True
-        await guard.clear_handoff(ctx.pool, salon["id"], sender)
+        content = msg.text or ("[Voice message; audio not stored]" if msg.kind == "audio" else "[Message; attachment not stored]")
+        await handoffs.record_customer_message(ctx.pool, salon["id"], sender, content, msg.id)
+        client_lang = row["lang"] or "en"
+        state = await ctx.pool.fetchval(
+            "SELECT state FROM conversations WHERE salon_id=$1::uuid AND wa_id=$2", salon["id"], sender)
+        state = state if isinstance(state, dict) else json.loads(state or "{}")
+        state = state if isinstance(state, dict) else {}
+        state.update({"state": "handoff", "category": row["category"]})
+        await _reply(ctx, salon["id"], sender, state, chat, guard.reply_for("waiting", client_lang))
+        return True
 
-    # A resolved or expired handoff must not leave a stale state flag behind.
+    # A resolved case may leave stale conversation state behind; that state does
+    # not itself constitute an open handoff and can safely be cleared.
     await ctx.pool.execute(
         "UPDATE conversations SET state=COALESCE(state,'{}'::jsonb)-'state'-'category', updated_at=now() "
         "WHERE salon_id=$1::uuid AND wa_id=$2 AND state->>'state'='handoff'",
@@ -751,7 +758,7 @@ async def _handle(ctx, msg: Message) -> None:
             and sensitive_hit[0] == "emergency"):
         await _handle_sensitive_text(ctx, salon, msg, chat, msg.text or "")
         return
-    if salon_context_selected and await _handoff_before_onboarding(ctx, salon, msg.sender, chat):
+    if salon_context_selected and await _handoff_before_onboarding(ctx, salon, msg.sender, chat, msg):
         return
     if (not owner_mode and salon_context_selected and msg.kind == "text" and
             await _handle_sensitive_text(ctx, salon, msg, chat, msg.text or "")):
@@ -827,15 +834,10 @@ async def _handle(ctx, msg: Message) -> None:
         await handle_manual_payment_tap(ctx, salon, client, st, services, tz, datetime.now(tz), chat, lang, msg.reply_id)
         return
     if st.get("state") == "handoff":
-        created = await ctx.pool.fetchval(
-            "SELECT created_at FROM handoffs WHERE salon_id=$1::uuid AND client_id=$2::uuid AND status='open' ORDER BY created_at DESC LIMIT 1",
-            salon["id"], client["id"],
-        )
-        if created and (datetime.now(ZoneInfo(salon["timezone"])) - created).total_seconds() < float(getattr(ctx.settings, "handoff_hours", guard.HANDOFF_HOURS)) * 3600:
+        if await guard.is_handoff(ctx.pool, salon["id"], msg.sender):
             await _reply(ctx, salon["id"], msg.sender, st, chat, guard.reply_for("waiting", lang))
             return
-        await guard.clear_handoff(ctx.pool, salon["id"], msg.sender)
-        st = {"history": st.get("history", [])}
+        st = {key: value for key, value in st.items() if key not in ("state", "category")}
     if await _handle_sensitive_text(ctx, salon, msg, chat, msg.text or "", client, st):
         return
     st.setdefault("history", []).append({"role": "user", "text": msg.text or "", "ts": datetime.now(ZoneInfo(salon["timezone"])).isoformat()})

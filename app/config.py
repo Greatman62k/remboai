@@ -111,7 +111,6 @@ class Settings(BaseSettings):
     handoff_retention_days: int = 30
     mpesa_callback_retention_days: int = 90
     unmatched_raw_retention_days: int = 90
-    handoff_hours: float = 4.0
     webhook_workers: int = 4
     db_pool_max: int = 10
     trusted_proxy_cidrs: str = ""

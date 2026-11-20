@@ -24,23 +24,34 @@ DELETE_DAYS = 14
 MAX_HOLD_BACK_DAYS = 60   # unresolved refunds or manual claims delay deletion, but never past this
 
 
+class OpenHandoffsError(RuntimeError):
+    pass
+
+
 async def delete_salon(pool, salon_id: str) -> dict:
     """Remove a salon and everything that cannot outlive it. Tables with
     ON DELETE CASCADE follow the salon row on their own; bookings and payments
     do not cascade, so they go first."""
     out = {}
-    out["reviews"] = int((await pool.execute(
-        "DELETE FROM payment_reviews WHERE payment_id IN (SELECT id FROM payments WHERE salon_id=$1::uuid)", salon_id)).split()[-1])
-    out["callbacks"] = int((await pool.execute(
-        "DELETE FROM mpesa_callbacks c USING payments p WHERE p.salon_id=$1::uuid "
-        "AND c.checkout_request_id=p.checkout_request_id", salon_id)).split()[-1])
-    out["payments"] = int((await pool.execute("DELETE FROM payments WHERE salon_id=$1::uuid", salon_id)).split()[-1])
-    await pool.execute("DELETE FROM visit_checks WHERE salon_id=$1::uuid", salon_id)
-    await pool.execute("DELETE FROM agent_turns WHERE salon_id=$1::uuid", salon_id)
-    await pool.execute("DELETE FROM conversation_trace WHERE salon_id=$1::uuid", salon_id)
-    await pool.execute("DELETE FROM reminder_jobs WHERE salon_id=$1::uuid", salon_id)
-    out["bookings"] = int((await pool.execute("DELETE FROM bookings WHERE salon_id=$1::uuid", salon_id)).split()[-1])
-    out["salons"] = int((await pool.execute("DELETE FROM salons WHERE id=$1::uuid", salon_id)).split()[-1])
+    async with pool.acquire() as con:
+        async with con.transaction():
+            salon = await con.fetchrow("SELECT id FROM salons WHERE id=$1::uuid FOR UPDATE", salon_id)
+            if salon is None:
+                return {"reviews": 0, "callbacks": 0, "payments": 0, "bookings": 0, "salons": 0}
+            if await con.fetchval("SELECT 1 FROM handoffs WHERE salon_id=$1::uuid AND status='open' LIMIT 1", salon_id):
+                raise OpenHandoffsError("salon has open handoffs; resolve them before deletion")
+            out["reviews"] = int((await con.execute(
+                "DELETE FROM payment_reviews WHERE payment_id IN (SELECT id FROM payments WHERE salon_id=$1::uuid)", salon_id)).split()[-1])
+            out["callbacks"] = int((await con.execute(
+                "DELETE FROM mpesa_callbacks c USING payments p WHERE p.salon_id=$1::uuid "
+                "AND c.checkout_request_id=p.checkout_request_id", salon_id)).split()[-1])
+            out["payments"] = int((await con.execute("DELETE FROM payments WHERE salon_id=$1::uuid", salon_id)).split()[-1])
+            await con.execute("DELETE FROM visit_checks WHERE salon_id=$1::uuid", salon_id)
+            await con.execute("DELETE FROM agent_turns WHERE salon_id=$1::uuid", salon_id)
+            await con.execute("DELETE FROM conversation_trace WHERE salon_id=$1::uuid", salon_id)
+            await con.execute("DELETE FROM reminder_jobs WHERE salon_id=$1::uuid", salon_id)
+            out["bookings"] = int((await con.execute("DELETE FROM bookings WHERE salon_id=$1::uuid", salon_id)).split()[-1])
+            out["salons"] = int((await con.execute("DELETE FROM salons WHERE id=$1::uuid", salon_id)).split()[-1])
     clear_salon_cache()
     return out
 
@@ -117,8 +128,11 @@ async def sweep(ctx) -> dict:
         if not salon["owner_wa_id"]:
             if age >= DELETE_DAYS:
                 log.warning("deleting ownerless salon %s (%s) after %.0f quiet days", salon["id"], salon["name"], age)
-                await delete_salon_and_notify(ctx, salon["id"])
-                done["deleted"].append(salon["id"])
+                try:
+                    await delete_salon_and_notify(ctx, salon["id"])
+                    done["deleted"].append(salon["id"])
+                except OpenHandoffsError:
+                    log.warning("not deleting salon %s: an owner handoff is still open", salon["id"])
             continue
         lang = await owner_lang(ctx.pool, salon["id"], salon["owner_wa_id"])
         if age < FINAL_DAYS:
@@ -133,8 +147,12 @@ async def sweep(ctx) -> dict:
                 await ctx.pool.execute("UPDATE salons SET inactivity_final_at=now() WHERE id=$1::uuid", salon["id"])
                 done["final"].append(salon["id"])
             continue
-        await delete_salon_and_notify(ctx, salon["id"])
-        done["deleted"].append(salon["id"])
+        try:
+            await delete_salon_and_notify(ctx, salon["id"])
+            done["deleted"].append(salon["id"])
+        except OpenHandoffsError:
+            log.warning("not deleting salon %s: an owner handoff is still open", salon["id"])
+            continue
         try:
             await outbound.send_plain(ctx, salon["owner_wa_id"], t(lang, "owner_deleted", salon=salon["name"]))
         except Exception:
