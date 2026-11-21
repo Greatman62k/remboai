@@ -184,6 +184,6 @@ def test_customers_of_similar_named_businesses_reach_the_right_one_and_see_which
             assert await pool.fetchval("SELECT salon_id::text FROM sender_salon WHERE sender=$1", phone) == sid
             assert await pool.fetchval("SELECT count(*) FROM clients WHERE wa_id=$1 AND salon_id<>$2::uuid", phone, sid) == 0
             assert await pool.fetchval("SELECT count(*) FROM bookings b JOIN clients c ON c.id=b.client_id WHERE c.wa_id=$1 AND b.salon_id<>$2::uuid", phone, sid) == 0
-            assert f"Welcome to {label[sid]}" in out.bodies(phone)[0], (label[sid], out.bodies(phone)[0])
+            assert f"book at {label[sid]}" in out.bodies(phone)[0], (label[sid], out.bodies(phone)[0])
         await pool.close()
     asyncio.run(run())

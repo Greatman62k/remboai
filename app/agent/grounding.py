@@ -19,7 +19,10 @@ _MONEY_AFTER = re.compile(r"([\d,]+)\s*(?:/=|kes|ksh|bob|shillings?|shilingi)\b"
 _DIGITS = re.compile(r"\d+")
 
 # Words that state a result. They are only allowed when a tool in this very turn produced that result.
-_PAID = re.compile(r"\b(paid|payment (?:received|confirmed|successful)|umelipa|malipo (?:yamepokelewa|yamethibitishwa)|nimepokea malipo|received your (?:deposit|payment)|(?:deposit|payment)\s+(?:has\s+|have\s+)?(?:gone|went)\s+through)\b", re.I)
+_PAID = re.compile(
+    r"\b(paid|payment\s+(?:(?:is|was|has been)\s+)?(?:received|confirmed|successful)|umelipa|"
+    r"malipo(?:\s+\w+){0,5}\s+(?:yamepokelewa|yamethibitishwa)|nimepokea malipo|"
+    r"received your (?:deposit|payment)|(?:deposit|payment)\s+(?:has\s+|have\s+)?(?:gone|went)\s+through)\b", re.I)
 _BOOKED = re.compile(r"\b(confirmed|you'?re booked|you are booked|booking is (?:done|complete)|imethibitishwa|umethibitishiwa|umepata nafasi|miadi yako imekamilika)\b", re.I)
 _HELD = re.compile(r"\b(?:held|reserved)\s+(?:your\s+)?(?:slot|appointment|place|nafasi)\b|\b(?:your\s+)?(?:slot|appointment)\s+(?:is|has been)\s+(?:held|reserved)\b|\b(?:i|we)(?:'ve| have)?\s+(?:just\s+)?(?:held|reserved)\b|\bon hold for you\b", re.I)
 _CANCELLED = re.compile(r"\b(cancell?ed|nimeghairi|imeghairiwa|nimefuta|umeghairi)\b", re.I)
@@ -27,7 +30,7 @@ _WAITLISTED = re.compile(r"\b(?:on|joined|added to|put on)\s+(?:the\s+)?(?:waitl
 _HANDOFF = re.compile(r"\b(?:i|we)(?:'ve| have)?\s+(?:notified|informed|contacted|told|passed this to)\s+(?:the\s+)?(?:(?:salon|business|barbershop) )?(?:owner|manager)\b|\b(?:(?:salon|business|barbershop) )?(?:owner|manager)\s+(?:has been|was)\s+(?:notified|informed|contacted)\b|\b(?:(?:salon|business|barbershop) )?(?:owner|manager)\s+will\s+(?:contact|reply|respond|get back to|call)\s+(?:you)?\b|\b(?:(?:salon|business|barbershop) )?(?:owner|manager)\s+will be in touch\b", re.I)
 _POLICY = re.compile(r"\b(waiv\w*|discount\w*|free of charge|no deposit|punguzo|msamaha|bila amana|hakuna amana|bure|no need (?:for|to pay) (?:a |the |any )?deposit|skip(?:ping)? the deposit)\b", re.I)
 _LEAK = re.compile(r"\b(tool call|function call|system prompt|developer message|find_slots|reserve_slot|cancel_booking|my_bookings|join_waitlist|hand_to_owner|list_businesses|platform_totals|business_status|json)\b|<think>|```", re.I)
-_DENIED_PAID = re.compile(r"\b(?:not|never|no|isn't|hasn't|has not|is not|wasn't|was not)\s+(?:yet\s+|been\s+)?(?:paid|received)\b", re.I)
+_DENIED_PAID = re.compile(r"\b(?:not|never|no|isn't|hasn't|has not|is not|wasn't|was not)\s+(?:(?:yet|been)\s+)*(?:paid|received|confirmed|successful)\b", re.I)
 _DENIED_BOOKED = re.compile(r"\b(?:not|never|isn't|hasn't|has not|is not|wasn't|was not)\s+(?:yet\s+|been\s+)?(?:a\s+)?(?:confirmed|booked)\b", re.I)
 _DENIED_HELD = re.compile(r"\b(?:not|never|isn't|hasn't|has not|is not|wasn't|was not)\s+(?:yet\s+|been\s+)?(?:held|reserved)\b", re.I)
 _DENIED_CANCELLED = re.compile(r"\b(?:not|never|isn't|hasn't|has not|is not|wasn't|was not)\s+(?:yet\s+|been\s+)?cancell?ed\b", re.I)

@@ -93,7 +93,7 @@ def test_a_photo_becomes_a_service_and_the_booking_carries_on_from_there():
             assert requests[0]["endpoint"] == "https://primary.test/v1/chat/completions"
             assert requests[0]["request_id"] == "chatcmpl-vision-1"
             await post(c, payload(A, "kesho mchana", mid="t1"))
-            assert "earliest" in out.bodies(A)[-1].lower() and "Fade" in out.bodies(A)[-1]
+        assert "Available times for Fade:" in out.bodies(A)[-1]
         await pool.close()
     asyncio.run(run())
 
@@ -107,7 +107,7 @@ def test_a_caption_with_a_day_goes_straight_to_slots():
         out.script["kesho mchana"] = {"intent": "book", "date": open_day().isoformat(), "window": "afternoon"}
         async with client() as c:
             await post(c, photo(caption="kesho mchana"))
-        assert "Silk press" in out.bodies(A)[-2] and "earliest" in out.bodies(A)[-1].lower() and "Silk press" in out.bodies(A)[-1]
+        assert "Silk press" in out.bodies(A)[-2] and "Available times for Silk press:" in out.bodies(A)[-1]
         await pool.close()
     asyncio.run(run())
 

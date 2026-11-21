@@ -63,7 +63,7 @@ def test_stale_telegram_backlog_gets_one_resend_notice_without_processing_old_re
             await post_tg(c, tg_update(402, C1, "tomorrow afternoon", date=old_date))
         notices = out.tg_bodies(str(C1))
         assert len(notices) == 1
-        assert "offline" in notices[0].lower() and "send it again" in notices[0].lower()
+        assert "over 30 minutes old" in notices[0].lower() and "send it again" in notices[0].lower()
         assert await pool.fetchval("SELECT count(*) FROM inbound_messages WHERE wa_id=$1 AND completed_at IS NOT NULL", f"tg:{C1}") == 2
         assert await pool.fetchval("SELECT count(*) FROM clients WHERE wa_id=$1", f"tg:{C1}") == 0
         assert out.calls == [] and out.agent_requests == []
@@ -82,7 +82,7 @@ def test_a_telegram_customer_can_book_through_text_and_buttons():
         async with client() as c:
             assert (await post_tg(c, tg_update(1, C1, "fade"))).json() == {"ok": True}
             offer = out.tg_to(str(C1))[-1]
-            assert "earliest" in offer["text"].lower() and "Fade" in offer["text"]
+            assert "Available times for Fade:" in offer["text"]
             buttons = [b for row in offer["reply_markup"]["inline_keyboard"] for b in row]
             assert buttons[0]["callback_data"] == "slot:0"
             await post_tg(c, tg_update(2, C1, data="slot:0"))
@@ -231,7 +231,7 @@ def test_payment_screenshot_provider_mismatch_is_rejected_and_amount_mismatch_go
         assert (payment["status"], payment["mpesa_receipt"]) == ("review", "UK3L70E32L")
         assert (review["reason"], review["received_amount"]) == ("amount_mismatch", 150)
         assert await pool.fetchval("SELECT status FROM bookings") == "held"
-        assert "human eye" in out.tg_bodies(str(C1))[-1].lower()
+        assert "payment claim is saved for zuri cuts to review" in out.tg_bodies(str(C1))[-1].lower()
         await pool.close()
     asyncio.run(run())
 
@@ -308,7 +308,7 @@ def test_voice_notes_and_photos_work_over_telegram():
         out.script["nataka fade kesho mchana"] = {"intent": "book", "service": "Fade", "date": open_day().isoformat(), "window": "afternoon", "language": "sw"}
         async with client() as c:
             await post_tg(c, tg_update(1, C1, voice={"file_id": "VOICE1", "duration": 3}))
-            assert "Nafasi za mapema za Fade" in out.tg_bodies(str(C1))[0]
+            assert "Nafasi za Fade:" in out.tg_bodies(str(C1))[0]
             assert len(out.tg_bodies(str(C1))) == 1
             assert all("Nimesikia:" not in body for body in out.tg_bodies(str(C1)))
             assert out.asr[0]["bytes"] == b"TG-FILE-BYTES" and out.asr[0]["type"] == "audio/ogg"
@@ -396,7 +396,7 @@ def test_the_poller_handles_updates_in_order_acknowledges_buttons_and_backs_off_
             await asyncio.sleep(0.05)
             if out.tg_to(str(C1)):
                 break
-        assert "earliest" in out.tg_to(str(C1))[-1]["text"].lower() and "Fade" in out.tg_to(str(C1))[-1]["text"]
+        assert "Available times for Fade:" in out.tg_to(str(C1))[-1]["text"]
         assert any(m["method"] == "deleteWebhook" for m in out.tg)
         out.tg_updates = [tg_update(2, C1, data="slot:0")]
         for _ in range(100):

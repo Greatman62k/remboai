@@ -169,7 +169,7 @@ def test_returning_customer_gets_one_welcome_not_two():
         pool, out, _salon = await build(DSN)
         async with client() as c:
             await post(c, payload(A, "hi", mid="g0"))
-            assert "Welcome to Zuri Cuts" in out.bodies(A)[-1]
+            assert "What would you like to book at Zuri Cuts?" in out.bodies(A)[-1]
             cid = await pool.fetchval("SELECT id::text FROM clients WHERE wa_id=$1", A)
             sid = await pool.fetchval("SELECT id::text FROM services WHERE name='Fade'")
             stid = await pool.fetchval("SELECT id::text FROM staff LIMIT 1")
@@ -179,7 +179,8 @@ def test_returning_customer_gets_one_welcome_not_two():
                 _salon, cid, stid, sid)
             await post(c, payload(A, "hi", mid="g1"))
             body = out.bodies(A)[-1]
-            assert "Welcome back! What would you like" in body and "We are delighted" not in body
+            assert "What would you like to book?" in body and "Welcome back" not in body
+            assert body.count("Hi!") <= 1
         await pool.close()
     asyncio.run(run())
 

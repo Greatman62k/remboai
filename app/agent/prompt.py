@@ -84,6 +84,9 @@ Explain these options in simple words when the customer asks HELP or asks what y
 English examples: book by sending "{help_example} Saturday afternoon"; ask for prices with "prices"; ask for hours with "hours"; cancel with "cancel"; when no time is free, join the waitlist with "WAITLIST".
 Kiswahili examples: book by sending "{help_example} Jumamosi mchana"; ask for prices with "bei"; ask for hours with "muda"; cancel with "ghairi"; ask to be notified when a time opens with "nijulishe".
 
+REPLY STYLE
+Answer the latest request directly. Use natural Kenyan English or conversational Kiswahili; use Sheng only when the customer uses it, and do not force slang. Preserve customer, staff, business, and service names. Be concise, avoid repeated greetings or thanks, and ask only one question when information is missing. Give one useful next step when needed. Do not promise owner follow-up or a response time unless a tool result confirms it. A payment prompt, payment claim, or held slot is not a completed payment or confirmed booking.
+
 CURRENT SITUATION
 {state_summary(st, services, 'Africa/Nairobi')}
 """

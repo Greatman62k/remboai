@@ -519,7 +519,7 @@ async def test_a_handoff_really_pauses_the_bot_and_tells_the_owner_who_to_contac
         assert f"https://wa.me/{A}" in alert and f"resolve {A}" in alert
         await post(c, payload(A, "hi", mid="p2"))
         await _run_job_to_exhaustion(pool, app.state.ctx)
-        assert "owner has your message" in out.bodies(A)[-1].lower()
+        assert "saved for the business to review" in out.bodies(A)[-1].lower()
         await post(c, payload(OWNER, f"resolve {A}", mid="p3"))
         await _run_job_to_exhaustion(pool, app.state.ctx)
         assert await pool.fetchval("SELECT count(*) FROM handoffs WHERE status='open'") == 0
@@ -541,7 +541,7 @@ async def test_an_elapsed_handoff_timeout_never_releases_the_customer_to_the_bot
         await _run_job_to_exhaustion(pool, app.state.ctx)
         assert await pool.fetchval("SELECT count(*) FROM handoffs WHERE status='open'") == 1
         assert await pool.fetchval("SELECT state->>'state' FROM conversations WHERE wa_id=$1", A) == "handoff"
-        assert "owner has your message" in out.bodies(A)[-1].lower()
+        assert "saved for the business to review" in out.bodies(A)[-1].lower()
         assert len(out.bodies(A)) == before + 1
     await pool.close()
 
@@ -894,7 +894,8 @@ async def test_deleting_a_salon_tells_its_upcoming_customers():
     assert counts["notified"] == 1
     assert await pool.fetchval("SELECT count(*) FROM salons") == 0
     bodies = [m["text"]["body"] for m in out.to(A) if m["type"] == "text"]
-    assert bodies and "closed permanently" in bodies[-1]
+    assert bodies and "zuri cuts has closed" in bodies[-1].lower()
+    assert "contact zuri cuts about a refund" in bodies[-1].lower()
     await pool.close()
 
 
@@ -1018,8 +1019,8 @@ async def test_far_future_date_keeps_the_asking_state():
 
 def test_the_trouble_message_exists_in_english_and_swahili():
     from app.messages import t
-    assert "keep it short" in t("en", "fallback_degraded", example="Fade")
-    assert "kifupi" in t("sw", "fallback_degraded", example="Fade")
+    assert "send a service and day" in t("en", "fallback_degraded", example="Fade").lower()
+    assert "tuma huduma na siku" in t("sw", "fallback_degraded", example="Fade").lower()
 
 
 @needs_db
@@ -1045,8 +1046,9 @@ async def test_a_customer_is_told_what_to_do_when_the_model_is_unreachable(monke
     await _run_job_to_exhaustion(pool, app.state.ctx)
     bodies = out.bodies(A)
     assert len(bodies) == 1, bodies
-    assert "keep it short" in bodies[0] and "contact the shop directly" in bodies[0]
-    assert bodies[0].endswith("Type HELP anytime to see what I can do.")
+    assert "couldn't read that clearly" in bodies[0].lower()
+    assert '"Fade Saturday afternoon"' in bodies[0]
+    assert bodies[0].endswith("type HELP for examples.")
     for secret in ("primary.test", "fallback.test", "401", "traceback", "Exception"):
         assert secret not in bodies[0]
 
@@ -1054,7 +1056,8 @@ async def test_a_customer_is_told_what_to_do_when_the_model_is_unreachable(monke
     async with client() as c:
         await post(c, payload(A, "blorp wobble xyzq", mid="up1"))
     await _run_job_to_exhaustion(pool, app.state.ctx)
-    assert "send the service and day" in out.bodies(A)[-1].lower()
+    assert "send a service and day" in out.bodies(A)[-1].lower()
+    assert '"Fade Saturday afternoon"' in out.bodies(A)[-1]
     await pool.close()
 
 

@@ -127,12 +127,13 @@ def test_booking_conversation_from_message_to_held_slot():
             sent = out.to(A)
             assert sent[0]["text"]["body"] == "Hello!\n\nTuma MSAADA wakati wowote uone ninavyoweza kukusaidia."
             offer = sent[1]
-            assert offer["type"] == "interactive" and "Nafasi za mapema za Fade" in offer["interactive"]["body"]["text"]
+            assert offer["type"] == "interactive" and "Nafasi za Fade:" in offer["interactive"]["body"]["text"]
             ids = [b["reply"]["id"] for b in offer["interactive"]["action"]["buttons"]]
             assert ids == ["slot:0", "slot:1", "slot:2"] and offer["_auth"] == "Bearer TOK"
             await post(c, payload(A, reply_id="slot:1", mid="m2"))
             assert len(out.calls) == 1
-            assert "Nimehifadhi Fade" in out.bodies(A)[-1]
+            assert "Fade" in out.bodies(A)[-1] and "imeshikiliwa" in out.bodies(A)[-1]
+            assert "haijathibitishwa" in out.bodies(A)[-1] and "PIN" in out.bodies(A)[-1]
         b = await pool.fetchrow("SELECT status, starts_at, hold_expires_at FROM bookings")
         assert b["status"] == "held" and b["hold_expires_at"] > datetime.now(NBO)
         assert b["starts_at"].astimezone(NBO).hour == 12 and b["starts_at"].astimezone(NBO).minute == 30
@@ -146,7 +147,7 @@ def test_thanks_alone_is_answered_warmly_with_no_model_call():
         pool, out, salon = await build(DSN)
         async with client() as c:
             await post(c, payload(A, "Asante", mid="t1"))
-            assert "Karibu" in out.bodies(A)[-1]
+            assert "Karibu!" in out.bodies(A)[-1]
             await post(c, payload(B, "perfect", mid="t2"))
             assert "welcome" in out.bodies(B)[-1].lower()
         assert out.calls == []
@@ -160,10 +161,10 @@ def test_language_follows_each_message_and_start_register_needs_no_slash():
         pool, out, salon = await build(DSN)
         async with client() as c:
             await post(c, payload(A, "Niaje", mid="l1"))
-            assert "Karibu" in out.bodies(A)[-1]
+            assert "Poa!" in out.bodies(A)[-1] and "miadi" in out.bodies(A)[-1].lower()
             assert await pool.fetchval("SELECT lang FROM clients WHERE wa_id=$1", A) == "sw"
             await post(c, payload(A, "Start", mid="l2"))
-            assert "booking assistant" in out.bodies(A)[-1]
+            assert "I can help with bookings" in out.bodies(A)[-1]
             assert await pool.fetchval("SELECT lang FROM clients WHERE wa_id=$1", A) == "en"
             await post(c, payload(B, "Start register", mid="l3"))
             assert "what name do customers know your shop by" in out.bodies(B)[-1].lower()
@@ -210,7 +211,7 @@ def test_with_no_model_at_all_the_rules_still_complete_a_booking_across_messages
         out.down.add("primary.test")
         async with client() as c:
             await post(c, payload(A, "fade", mid="1"))
-            assert "which day" in out.bodies(A)[-1].lower()
+            assert "what day works for you" in out.bodies(A)[-1].lower()
             await post(c, payload(A, "kesho", mid="2"))
             assert out.to(A)[-1]["type"] == "interactive"
             await post(c, payload(A, "2", mid="3"))
@@ -235,9 +236,9 @@ def test_cancel_prices_hours_greeting_and_unknown_service():
             await post(c, payload(A, "when are you open", mid="2"))
             assert "Sun: closed" in out.bodies(A)[-1]
             await post(c, payload(A, "how are you", mid="3"))
-            assert out.bodies(A)[-1].startswith("Hi! I'm doing great") and "Welcome to Zuri Cuts" in out.bodies(A)[-1]
+            assert out.bodies(A)[-1].startswith("Hi! I'm doing great") and "book at Zuri Cuts" in out.bodies(A)[-1]
             await post(c, payload(A, "i want a perm", mid="4"))
-            assert "couldn't find that service" in out.bodies(A)[-1]
+            assert "isn't on the menu" in out.bodies(A)[-1]
             await post(c, payload(A, "book silk", mid="5"))
             await post(c, payload(A, reply_id="slot:0", mid="6"))
             assert await pool.fetchval("SELECT count(*) FROM bookings WHERE status='held'") == 1
@@ -320,12 +321,12 @@ def test_an_expired_hold_does_not_block_the_calendar():
 
 
 @needs_db
-def test_sheng_gets_a_swahili_answer_and_returning_customers_are_welcomed_back():
+def test_sheng_gets_a_swahili_answer_and_returning_customer_keeps_that_language():
     async def run():
         pool, out, salon = await build(DSN)
         async with client() as c:
             await post(c, payload(B, "niaje maze", mid="s1"))
-            assert "Karibu" in out.bodies(B)[-1]
+            assert "Poa!" in out.bodies(B)[-1] and "miadi" in out.bodies(B)[-1].lower()
             assert "Welcome back" not in out.bodies(B)[-1] and "Karibu tena" not in out.bodies(B)[-1]
             staff = await pool.fetchval("SELECT id::text FROM staff")
             svc = await pool.fetchval("SELECT id::text FROM services WHERE name='Fade'")
@@ -336,7 +337,8 @@ def test_sheng_gets_a_swahili_answer_and_returning_customers_are_welcomed_back()
                 "VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,'no_show')",
                 salon, staff, svc, client_id, start, start + timedelta(minutes=45))
             await post(c, payload(B, "habari", mid="s2"))
-            assert "Karibu tena" in out.bodies(B)[-1]
+            assert "Ungependa kuweka miadi ya huduma gani?" in out.bodies(B)[-1]
+            assert "Karibu tena" not in out.bodies(B)[-1]
         await pool.close()
     asyncio.run(run())
 

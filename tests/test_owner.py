@@ -214,7 +214,7 @@ def test_a_customer_answers_a_lateness_notice_cancel_or_new_time():
         ba, bb = await mkb(a, 0), await mkb(b, 1)
         async with client() as c:
             await post(c, payload(A, reply_id=f"late-cancel:{ba}", mid="c1"))
-            assert "has been cancelled" in out.bodies(A)[-1]
+            assert "is cancelled" in out.bodies(A)[-1]
             assert await pool.fetchval("SELECT status FROM bookings WHERE id=$1::uuid", ba) == "cancelled"
             await post(c, payload(B, reply_id=f"late-move:{bb}", mid="m1"))
             assert "new time" in out.bodies(B)[-1]

@@ -39,7 +39,7 @@ def test_a_voice_note_becomes_a_booking_conversation_and_the_customer_is_told_wh
         out.script["nataka fade kesho mchana"] = {"intent": "book", "service": "Fade", "date": open_day().isoformat(), "window": "afternoon", "language": "sw"}
         async with client() as c:
             await post(c, voice())
-        assert "Nafasi za mapema za Fade" in out.bodies(A)[0]
+        assert "Nafasi za Fade:" in out.bodies(A)[0]
         assert all("Nimesikia:" not in body for body in out.bodies(A))
         [call] = out.asr
         assert call["auth"] == "asrtok" and call["type"] == "audio/ogg" and call["bytes"] == b"OggS-fake-voice-note"
@@ -57,7 +57,7 @@ def test_a_known_swahili_speaker_gets_swahili_recognition_and_replies():
             await post(c, voice(mid="v1"))
             await post(c, voice(mid="v2"))
         assert [x["lang"] for x in out.asr] == [None, "swh_Latn"]
-        assert any("Nafasi za mapema za Fade" in body for body in out.bodies(A))
+        assert any("Nafasi za Fade:" in body for body in out.bodies(A))
         assert all("Nimesikia:" not in body for body in out.bodies(A))
         await pool.close()
     asyncio.run(run())
@@ -70,17 +70,17 @@ def test_when_recognition_fails_the_customer_is_asked_to_retry_and_nothing_is_bo
         async with client() as c:
             out.asr_down = True
             await post(c, voice(mid="v1"))
-            assert ("could not" in out.bodies(A)[-1].lower() or "couldn't" in out.bodies(A)[-1].lower()) and "make it out" in out.bodies(A)[-1].lower()
+            assert "couldn't make out that voice note" in out.bodies(A)[-1].lower()
             out.asr_down = False
             out.asr_text = "   "
             await post(c, voice(mid="v2"))
-            assert ("could not" in out.bodies(A)[-1].lower() or "couldn't" in out.bodies(A)[-1].lower()) and "make it out" in out.bodies(A)[-1].lower()
+            assert "couldn't make out that voice note" in out.bodies(A)[-1].lower()
             out.media_gone = True
             await post(c, voice(mid="v3"))
-            assert ("could not" in out.bodies(A)[-1].lower() or "couldn't" in out.bodies(A)[-1].lower()) and "make it out" in out.bodies(A)[-1].lower()
+            assert "couldn't make out that voice note" in out.bodies(A)[-1].lower()
             out.media_gone, out.media_size = False, 5_000_000
             await post(c, voice(mid="v4"))
-            assert ("could not" in out.bodies(A)[-1].lower() or "couldn't" in out.bodies(A)[-1].lower()) and "make it out" in out.bodies(A)[-1].lower() and len(out.asr) == 1
+            assert "couldn't make out that voice note" in out.bodies(A)[-1].lower() and len(out.asr) == 1
         assert await pool.fetchval("SELECT count(*) FROM bookings") == 0
         await pool.close()
     asyncio.run(run())

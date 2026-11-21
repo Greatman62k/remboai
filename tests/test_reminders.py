@@ -306,7 +306,8 @@ async def test_a_finished_visit_is_checked_once_and_a_yes_earns_feedback():
         await post(c, payload("254711000001", reply_id=f"visit-yes:{booking}", mid="v1"))
         assert "How did it go" in out.bodies("254711000001")[-1]
         await post(c, payload("254711000001", "5, Brian was great", mid="v2"))
-        assert "Thank you for the lovely feedback" in out.bodies("254711000001")[-1]
+        assert "Thanks for the feedback" in out.bodies("254711000001")[-1]
+        assert "welcome back anytime" in out.bodies("254711000001")[-1]
     row = await pool.fetchrow("SELECT attended, feedback FROM visit_checks")
     assert (row["attended"], row["feedback"]) == (True, "5, Brian was great")
     await pool.close()
@@ -393,7 +394,7 @@ async def test_a_missed_visit_alerts_the_owner_and_offers_a_way_back():
     async with client() as c:
         n_owner = len(out.to("254799999999"))
         await post(c, payload("254711000002", reply_id=f"visit-no:{booking}", mid="w1"))
-        assert "shared your feedback with the owner" in out.bodies("254711000002")[-1]
+        assert "sent your feedback to the owner" in out.bodies("254711000002")[-1]
         assert "NOT attended" in out.bodies("254799999999")[-1] and len(out.to("254799999999")) == n_owner + 1
         n_b = len(out.to("254711000001"))
         await post(c, payload("254711000001", reply_id=f"visit-no:{booking}", mid="w2"))

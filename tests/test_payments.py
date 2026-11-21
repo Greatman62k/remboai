@@ -181,7 +181,7 @@ def test_a_cancelled_prompt_keeps_the_hold_and_pay_tries_again_then_succeeds():
             assert "cancelled" in out.bodies(A)[-1].lower()
             assert await pool.fetchval("SELECT status FROM bookings") == "held"
             await post(c, payload(A, "pay", mid="r1"))
-            assert len(out.stk) == 2 and "sent an M-Pesa request" in out.bodies(A)[-1]
+            assert len(out.stk) == 2 and "M-Pesa request" in out.bodies(A)[-1] and "not confirmed until payment succeeds" in out.bodies(A)[-1]
             await deliver(c, callback("ws_CO_2", receipt="R2"))
         assert await pool.fetchval("SELECT status FROM bookings") == "confirmed"
         assert sorted(await pool.fetch("SELECT status FROM payments ORDER BY created_at"), key=lambda r: r["status"])[0]["status"] == "failed"
@@ -231,7 +231,8 @@ def test_a_late_payment_for_a_slot_someone_else_took_is_parked_for_refund_not_lo
             await deliver(c, callback("ws_CO_1", receipt="LATE1"))
         p = await pool.fetchrow("SELECT status, mpesa_receipt FROM payments WHERE checkout_request_id='ws_CO_1'")
         assert (p["status"], p["mpesa_receipt"]) == ("needs_refund", "LATE1")
-        assert "taken before it arrived" in out.bodies(A)[-1] and "will refund you" in out.bodies(A)[-1]
+        assert "taken before it arrived" in out.bodies(A)[-1] and "needs a refund review" in out.bodies(A)[-1]
+        assert "contact Zuri Cuts about next steps" in out.bodies(A)[-1]
         assert "Refund needed: KES 200 from 254711000001 (M-Pesa LATE1)" in out.bodies(OWNER)[-1]
         await pool.close()
     asyncio.run(run())
@@ -326,12 +327,13 @@ def test_daraja_down_keeps_the_slot_and_says_how_to_retry():
         out.stk_fails = True
         async with client() as c:
             await to_pay(c, out, pool)
-            assert "could not send" in out.bodies(A)[-1].lower() or "couldn't send" in out.bodies(A)[-1].lower() and 'reply "pay"' in out.bodies(A)[-1]
+            assert "couldn't send the M-Pesa request" in out.bodies(A)[-1]
+            assert 'Reply "pay" to try again' in out.bodies(A)[-1]
             assert await pool.fetchval("SELECT status FROM bookings") == "held"
             assert await pool.fetchval("SELECT status FROM payments") == "failed"
             out.stk_fails = False
             await post(c, payload(A, "pay", mid="r1"))
-            assert len(out.stk) == 1 and "sent an M-Pesa request" in out.bodies(A)[-1]
+            assert len(out.stk) == 1 and "M-Pesa request" in out.bodies(A)[-1] and "not confirmed until payment succeeds" in out.bodies(A)[-1]
         await pool.close()
     asyncio.run(run())
 
@@ -404,7 +406,7 @@ def test_manual_claim_accepts_a_two_digit_deposit_and_preserves_reference_digits
         payment = await pool.fetchrow("SELECT status, amount_kes, mpesa_receipt FROM payments")
         assert (payment["status"], payment["amount_kes"], payment["mpesa_receipt"]) == (
             "pending", 50, "QBA1GD3EG2")
-        assert "Please wait and do not pay again" in out.bodies(A)[-1]
+        assert "unverified" in out.bodies(A)[-1].lower() and "do not pay again" in out.bodies(A)[-1].lower()
         assert "QBA1GD3EG2" in out.bodies(OWNER)[-1]
         assert await pool.fetchval("SELECT hold_expires_at > now() + interval '20 minutes' FROM bookings")
         await pool.close()
@@ -452,7 +454,8 @@ def test_manual_till_confirms_on_owner_tap():
         assert (p["status"], p["method"], p["amount_kes"], p["mpesa_receipt"]) == ("pending", "manual", 200, "QAB1CD2EF3")
         assert await pool.fetchval("SELECT status FROM bookings") == "held"
         assert await pool.fetchval("SELECT hold_expires_at > now() + interval '20 minutes' FROM bookings")
-        assert "waiting for Zuri Cuts to verify" in out.bodies(A)[-1]
+        assert "unverified and waiting for Zuri Cuts" in out.bodies(A)[-1]
+        assert "booking is not confirmed yet" in out.bodies(A)[-1]
         req = [m for m in out.to(OWNER) if m["type"] == "interactive"][-1]
         yes = [b["reply"]["id"] for b in req["interactive"]["action"]["buttons"] if b["reply"]["id"].startswith("till:yes:")]
         assert len(yes) == 1 and yes[0].endswith(p["id"])
@@ -460,7 +463,7 @@ def test_manual_till_confirms_on_owner_tap():
             await post(c, payload(OWNER, reply_id=yes[0], mid="tap1"))
         assert await pool.fetchval("SELECT status FROM payments") == "paid"
         assert await pool.fetchval("SELECT status FROM bookings") == "confirmed"
-        assert "You're booked" in out.bodies(A)[-1]
+        assert "is confirmed" in out.bodies(A)[-1] and "is booked for" in out.bodies(A)[-1]
         assert "Deposit KES 200 received via M-Pesa" in out.bodies(OWNER)[-1]
         n_before = len(out.bodies(A))
         async with client() as c:
@@ -507,7 +510,7 @@ def test_amount_mismatch_claim_stays_in_the_owner_inbox_until_the_owner_resolves
         review = await pool.fetchrow("SELECT reason, status, expected_amount, received_amount FROM payment_reviews")
         assert (review["reason"], review["status"], review["expected_amount"], review["received_amount"]) == ("amount_mismatch", "pending_review", 200, 150)
         assert await pool.fetchval("SELECT status FROM bookings") == "held"
-        assert "human eye" in out.bodies(A)[-1]
+        assert "payment claim is saved for Zuri Cuts to review" in out.bodies(A)[-1]
         assert "KES 150" in out.bodies(OWNER)[-1]
         async with client() as c:
             await post(c, payload(OWNER, "pending payments", mid="queue-review"))
@@ -533,7 +536,7 @@ def test_manual_claims_wait_for_the_owner_not_the_sweeper():
         async with client() as c:
             await to_pay(c, out, pool)
             await post(c, payload(A, "200 QAB1CD2EF3", mid="claim1"))
-        assert "Please wait and do not pay again" in out.bodies(A)[-1]
+        assert "unverified" in out.bodies(A)[-1].lower() and "do not pay again" in out.bodies(A)[-1].lower()
         assert await payments.reconcile(app.state.ctx) == 0
         assert await pool.fetchval("SELECT status FROM payments") == "pending"
         await pool.execute("UPDATE bookings SET hold_expires_at=now() - interval '1 minute'")
@@ -592,7 +595,7 @@ def test_cancelling_a_booking_keeps_its_manual_claim_until_the_owner_resolves_it
             await post(c, payload(A, reply_id=cancel_id, mid="cancel-button"))
         assert await pool.fetchval("SELECT status FROM bookings") == "cancelled"
         assert await pool.fetchval("SELECT status FROM payments") == "pending"
-        assert "still has your payment claim" in out.bodies(A)[-1]
+        assert "still needs to review your payment claim" in out.bodies(A)[-1]
         pay_id = await pool.fetchval("SELECT id::text FROM payments")
         result, _ = await payments.confirm_manual_claim(pool, pay_id)
         assert result == "unavailable"
@@ -631,7 +634,7 @@ def test_a_foreign_whatsapp_number_is_asked_for_an_mpesa_number_and_cancelling_a
             await deliver(c, callback("ws_CO_1"))
             out.script["cancel it"] = {"intent": "cancel"}
             await post(c, payload(FOREIGN, "cancel it", mid="x1"))
-            assert "handles deposit refunds" in out.bodies(FOREIGN)[-1]
+            assert "deposit needs refund follow-up" in out.bodies(FOREIGN)[-1]
             assert "Refund needed: KES 200" in out.bodies(OWNER)[-1] and "customer cancelled" in out.bodies(OWNER)[-1]
         await pool.close()
     asyncio.run(run())
@@ -735,7 +738,8 @@ def test_overpayment_is_parked_for_refund_not_kept():
             await deliver(c, callback("ws_CO_1", receipt="BIG", amount=500))
         p = await pool.fetchrow("SELECT status, refund_reason FROM payments")
         assert (p["status"], p["refund_reason"]) == ("needs_refund", "overpaid")
-        assert "more than the deposit" in out.bodies(A)[-1] and "will refund you" in out.bodies(A)[-1]
+        assert "more than the deposit" in out.bodies(A)[-1] and "needs a refund review" in out.bodies(A)[-1]
+        assert "will refund you" not in out.bodies(A)[-1]
         assert "Refund needed: KES 200" in out.bodies(OWNER)[-1] and "more than the deposit" in out.bodies(OWNER)[-1]
         assert await pool.fetchval("SELECT reason FROM payment_reviews") == "amount_mismatch"
         await pool.close()
@@ -758,6 +762,28 @@ def test_customer_cancel_parks_a_paid_deposit_for_refund():
         assert (p["status"], p["refund_reason"]) == ("needs_refund", "cancelled") and p["announced_at"] is not None
         assert await pool.fetchval("SELECT status FROM payment_reviews") == "refund_due"
         assert await pool.fetchval("SELECT count(*) FROM reminder_jobs WHERE status='pending'") == 0
+        await pool.close()
+    asyncio.run(run())
+
+
+@needs_db
+def test_cancelling_with_an_unverified_manual_claim_does_not_imply_payment_or_refund():
+    async def run():
+        pool, out, salon = await build(DSN)
+        await manual_salon(pool, salon)
+        await pool.execute("UPDATE salons SET owner_wa_id=$1", OWNER)
+        out.script["cancel it"] = {"intent": "cancel"}
+        async with client() as c:
+            await to_pay(c, out, pool)
+            await post(c, payload(A, "200 QAB1CD2EF3", mid="claim-pending"))
+            await post(c, payload(A, "cancel it", mid="cancel-pending"))
+        assert await pool.fetchval("SELECT status FROM bookings") == "cancelled"
+        assert await pool.fetchval("SELECT status FROM payments") == "pending"
+        body = out.bodies(A)[-1].lower()
+        assert "is cancelled" in body
+        assert "needs to review your payment claim" in body
+        assert "do not pay again" in body and "contact zuri cuts" in body
+        assert "payment is confirmed" not in body and "refund is complete" not in body
         await pool.close()
     asyncio.run(run())
 

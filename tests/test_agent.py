@@ -61,6 +61,10 @@ def test_grounding_accepts_facts_and_rejects_inventions():
     assert check("Book at https://evil.example/pay", f)                  # a link nobody provided
     assert check("Umethibitishiwa, booking confirmed!", f)               # a result no tool produced
     assert check("Payment received, thanks", f)                          # only the payment system may say that
+    assert check("Your payment is confirmed", f)                         # natural wording still needs payment evidence
+    assert check("Malipo yako yamethibitishwa", f)                       # Swahili payment claims need the same evidence
+    assert check("Payment is not confirmed yet", f) == []                 # truthful pending-state wording is allowed
+    assert check("Malipo yako bado hayajathibitishwa", f) == []
     assert check("Sawa, nimeghairi miadi yako", f)                       # a cancellation no tool made
     assert check("I will call my find_slots tool", f)                    # internals
     assert check("", f) == ["empty"]
@@ -153,7 +157,7 @@ def test_an_invented_price_is_rejected_asked_again_then_replaced_by_code_templat
             await say(c, 1, "fade tomorrow afternoon")
         sent = last(out)
         assert "99999" not in sent["text"] and "77777" not in sent["text"]
-        assert "earliest available slots" in sent["text"]                        # code's template for the same real slots
+        assert "Available times for Fade:" in sent["text"]
         assert sent["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == "slot:0"
         row = await pool.fetchrow("SELECT outcome, grounded, problems FROM agent_turns")
         assert (row["outcome"], row["grounded"]) == ("templates", False) and any("not in the facts" in x for x in _j(row["problems"]))
@@ -198,7 +202,7 @@ def test_when_the_model_is_down_the_keyword_flow_answers_and_nothing_is_lost():
         out.down.add("primary.test")
         async with client() as c:
             await say(c, 1, "fade tomorrow afternoon")
-        assert "earliest available slots" in last(out)["text"]                    # the old flow's template, via the keyword rules
+        assert "Available times for Fade:" in last(out)["text"]
         assert await pool.fetchval("SELECT outcome FROM agent_turns") == "unavailable"
         await pool.close()
     asyncio.run(run())
@@ -213,7 +217,7 @@ def test_agent_mode_off_leaves_the_existing_flow_untouched():
         async with client() as c:
             await say(c, 1, "fade tomorrow afternoon")
         assert out.agent_requests == [] and await pool.fetchval("SELECT count(*) FROM agent_turns") == 0
-        assert "earliest available slots" in last(out)["text"]
+        assert "Available times for Fade:" in last(out)["text"]
         await pool.close()
     asyncio.run(run())
 
@@ -231,11 +235,11 @@ def test_the_model_cancels_a_booking_and_code_states_the_cancellation():
             await say(c, 1, "fade tomorrow afternoon")
             await say(c, 2, "the first one")
             assert await pool.fetchval("SELECT status FROM bookings") == "confirmed"
-            assert "all booked" in last(out)["text"]
+            assert "You're booked for Fade" in last(out)["text"]
             await say(c, 3, "I changed my mind, please cancel it")
         assert await pool.fetchval("SELECT status FROM bookings") == "cancelled"
         text = last(out)["text"]
-        assert "cancelled successfully" in text and text.startswith("Done, I have cancelled it.")
+        assert "Your booking for " in text and " is cancelled." in text
         await pool.close()
     asyncio.run(run())
 
