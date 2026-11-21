@@ -290,9 +290,11 @@ async def purge_expired_data(pool, webhook_days: int = 30, inbound_days: int = 9
                 "AND NOT EXISTS (SELECT 1 FROM outbound_outbox o WHERE o.draft_id=d.id) RETURNING 1) "
                 "SELECT count(*) FROM deleted")
             await con.execute(
+                # submitted means the provider accepted the request. It remains
+                # auditable until this resolved case reaches its retention date.
                 "DELETE FROM outbound_outbox WHERE handoff_id IN (SELECT id FROM handoffs WHERE status='resolved' "
                 "AND COALESCE(resolved_at,created_at) < now()-($1 * interval '1 day')) "
-                "AND state IN ('delivered','failed','cancelled')", handoff_days)
+                "AND state IN ('submitted','delivered','failed','cancelled')", handoff_days)
             h = await con.fetchval(
                 "WITH deleted AS (DELETE FROM handoffs h WHERE h.status='resolved' "
                 "AND COALESCE(h.resolved_at,h.created_at) < now()-($1 * interval '1 day') "

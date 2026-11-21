@@ -104,14 +104,6 @@ async def mark_expired_leases_unknown(pool) -> int:
     return int(result.split()[-1])
 
 
-async def mark_unconfirmed_submissions_unknown(pool) -> int:
-    """No provider receipt arrived in 24 hours; preserve uncertainty without retrying."""
-    result = await pool.execute(
-        "UPDATE outbound_outbox SET state='unknown',last_error_category='delivery_receipt_timeout',updated_at=now() "
-        "WHERE state='submitted' AND submitted_at < now()-interval '24 hours'")
-    return int(result.split()[-1])
-
-
 async def _claim_next(pool) -> dict | None:
     async with pool.acquire() as con:
         async with con.transaction():
@@ -263,7 +255,6 @@ async def worker(ctx) -> None:
     while True:
         try:
             await mark_expired_leases_unknown(ctx.pool)
-            await mark_unconfirmed_submissions_unknown(ctx.pool)
             result = await dispatch_one(ctx)
             if result is None:
                 await asyncio.sleep(1)

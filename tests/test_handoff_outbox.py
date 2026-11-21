@@ -106,16 +106,50 @@ async def test_dispatch_records_submission_then_delivery_receipt_separately():
 
 @needs_db
 @pytest.mark.asyncio
+async def test_accepted_telegram_and_whatsapp_submissions_stay_submitted_without_receipts_or_redispatch():
+    pool, _, salon_id = await build(DSN)
+    telegram_case, _ = await _case(pool, salon_id, customer="tg:71001")
+    whatsapp_case, _ = await _case(pool, salon_id, customer="254700000012")
+    telegram = await approve_reply(pool, salon_id, telegram_case["id"], "254700000010", 1, "Telegram reply.", "telegram-accepted")
+    whatsapp = await approve_reply(pool, salon_id, whatsapp_case["id"], "254700000010", 1, "WhatsApp reply.", "whatsapp-accepted")
+
+    class AcceptedSender:
+        def __init__(self):
+            self.calls = []
+
+        async def send_text_result(self, pid, token, recipient, body):
+            self.calls.append((recipient, body))
+            return SendResult(True, provider_message_id=f"accepted-{len(self.calls)}")
+
+    sender = AcceptedSender()
+    ctx = SimpleNamespace(pool=pool, settings=SimpleNamespace(token_encryption_key="", wa_access_token="test-token"), wa=sender)
+    assert await dispatch_one(ctx) == "submitted"
+    assert await dispatch_one(ctx) == "submitted"
+    await pool.execute(
+        "UPDATE outbound_outbox SET submitted_at=now()-interval '25 hours' WHERE id=ANY($1::uuid[])",
+        [telegram["id"], whatsapp["id"]])
+
+    # Both providers accepted their requests. A missing delivery receipt is not
+    # ambiguous acceptance and cannot place either record back on the queue.
+    assert await dispatch_one(ctx) is None
+    assert sender.calls == [("tg:71001", "Telegram reply."), ("254700000012", "WhatsApp reply.")]
+    rows = await pool.fetch("SELECT channel,state FROM outbound_outbox ORDER BY channel")
+    assert [(row["channel"], row["state"]) for row in rows] == [("telegram", "submitted"), ("whatsapp", "submitted")]
+    await pool.close()
+
+
+@needs_db
+@pytest.mark.asyncio
 async def test_ambiguous_acceptance_and_expired_worker_lease_are_never_retried():
     pool, _, salon_id = await build(DSN)
-    case, _ = await _case(pool, salon_id)
+    case, _ = await _case(pool, salon_id, customer="tg:71002")
     approved = await approve_reply(pool, salon_id, case["id"], "254700000010", 1, "I will check this for you.", "approval-1")
 
-    class AmbiguousSender:
+    class TelegramTimeout:
         async def send_text_result(self, *args):
             return SendResult(False, error_category="read_timeout", ambiguous=True)
 
-    ctx = SimpleNamespace(pool=pool, settings=SimpleNamespace(token_encryption_key="", wa_access_token="test-token"), wa=AmbiguousSender())
+    ctx = SimpleNamespace(pool=pool, settings=SimpleNamespace(token_encryption_key="", wa_access_token="test-token"), wa=TelegramTimeout())
     assert await dispatch_one(ctx) == "unknown"
     assert await _claim_next(pool) is None
     assert await pool.fetchval("SELECT state FROM outbound_outbox WHERE id=$1::uuid", approved["id"]) == "unknown"
@@ -195,4 +229,67 @@ async def test_salon_deletion_cannot_purge_unknown_outbound_audit():
     with pytest.raises(PendingOutboundError):
         await delete_salon(pool, salon_id)
     assert await pool.fetchval("SELECT count(*) FROM outbound_outbox WHERE id=$1::uuid", approved["id"]) == 1
+    await pool.close()
+
+
+@needs_db
+@pytest.mark.asyncio
+async def test_resolved_submitted_reply_is_retained_then_purged_with_its_case_before_salon_deletion():
+    from app.lifecycle import PendingOutboundError, delete_salon
+    from app.webhook_jobs import purge_expired_data
+
+    pool, _, salon_id = await build(DSN)
+    case, _ = await _case(pool, salon_id, customer="tg:71003")
+    approved = await approve_reply(pool, salon_id, case["id"], "254700000010", 1, "Submitted reply.", "retention-submitted")
+
+    class AcceptedSender:
+        async def send_text_result(self, *args):
+            return SendResult(True, provider_message_id="telegram-retention-1")
+
+    ctx = SimpleNamespace(pool=pool, settings=SimpleNamespace(token_encryption_key="", wa_access_token="test-token"), wa=AcceptedSender())
+    assert await dispatch_one(ctx) == "submitted"
+    await resolve_handoff(pool, salon_id, case["id"], "254700000010", "owner completed review")
+    await pool.execute("UPDATE handoffs SET resolved_at=now()-interval '29 days' WHERE id=$1::uuid", case["id"])
+    result = await purge_expired_data(pool, handoff_days=30)
+    assert result["handoffs"] == 0
+    assert await pool.fetchval("SELECT state FROM outbound_outbox WHERE id=$1::uuid", approved["id"]) == "submitted"
+    with pytest.raises(PendingOutboundError):
+        await delete_salon(pool, salon_id)
+
+    await pool.execute("UPDATE handoffs SET resolved_at=now()-interval '31 days' WHERE id=$1::uuid", case["id"])
+    result = await purge_expired_data(pool, handoff_days=30)
+    assert result["handoffs"] == 1
+    assert await pool.fetchval("SELECT count(*) FROM outbound_outbox WHERE id=$1::uuid", approved["id"]) == 0
+    assert await pool.fetchval("SELECT count(*) FROM handoffs WHERE id=$1::uuid", case["id"]) == 0
+    assert (await delete_salon(pool, salon_id))["salons"] == 1
+    await pool.close()
+
+
+@needs_db
+@pytest.mark.asyncio
+async def test_retention_keeps_open_and_nonterminal_outbound_cases():
+    from app.webhook_jobs import purge_expired_data
+
+    pool, _, salon_id = await build(DSN)
+    open_case, _ = await _case(pool, salon_id, customer="254700000013")
+    open_reply = await approve_reply(pool, salon_id, open_case["id"], "254700000010", 1, "Queued open reply.", "open-queued")
+    await pool.execute("UPDATE handoffs SET created_at=now()-interval '31 days' WHERE id=$1::uuid", open_case["id"])
+
+    cases = []
+    for state, customer in (("queued", "254700000014"), ("sending", "254700000015"), ("unknown", "254700000016")):
+        case, _ = await _case(pool, salon_id, customer=customer)
+        reply = await approve_reply(pool, salon_id, case["id"], "254700000010", 1, f"{state} reply.", f"retained-{state}")
+        # Exercise the retention predicate directly. A real resolver never
+        # resolves an in-flight send, but retention must preserve such a row.
+        await pool.execute(
+            "UPDATE handoffs SET status='resolved',resolved_at=now()-interval '31 days' WHERE id=$1::uuid", case["id"])
+        await pool.execute("UPDATE outbound_outbox SET state=$2 WHERE id=$1::uuid", reply["id"], state)
+        cases.append((case["id"], reply["id"], state))
+
+    result = await purge_expired_data(pool, handoff_days=30)
+    assert result["handoffs"] == 0
+    assert await pool.fetchval("SELECT state FROM outbound_outbox WHERE id=$1::uuid", open_reply["id"]) == "queued"
+    for handoff_id, reply_id, state in cases:
+        assert await pool.fetchval("SELECT status FROM handoffs WHERE id=$1::uuid", handoff_id) == "resolved"
+        assert await pool.fetchval("SELECT state FROM outbound_outbox WHERE id=$1::uuid", reply_id) == state
     await pool.close()

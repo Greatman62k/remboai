@@ -135,15 +135,20 @@ def test_only_so_many_availability_questions_reach_the_owner_at_once(monkeypatch
         out.script["book 0"] = {"intent": "book", "service": "fade", "date": day.isoformat(), "time": "17:00"}
         async with client() as c:
             await post(c, payload(owner, reply_id=f"availability:no:{first}", mid="no1"))
-            await _pick(c, 0, told[0])
+            await _pick(c, 0, told[0], attempt="retry")
         assert await pool.fetchval("SELECT count(*) FROM bookings WHERE owner_check_status='pending'") == 3
         await pool.close()
     asyncio.run(run())
 
 
-async def _pick(c, i, phone):
-    await post(c, payload(phone, text=f"book {i}", mid=f"{phone}-a{i}"))
-    await post(c, payload(phone, reply_id="slot:0", mid=f"{phone}-b{i}"))
+async def _pick(c, i, phone, attempt=""):
+    """Give an intentional retry fresh provider message identities.
+
+    Reusing the original ids would correctly exercise inbound deduplication,
+    rather than a second booking request after an owner frees queue capacity.
+    """
+    await post(c, payload(phone, text=f"book {i}", mid=f"{phone}-a{i}-{attempt}"))
+    await post(c, payload(phone, reply_id="slot:0", mid=f"{phone}-b{i}-{attempt}"))
 
 
 # -- "pending payments" brings back everything waiting for the owner, in a bounded list -------------------------------------------------------
