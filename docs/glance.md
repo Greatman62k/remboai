@@ -1,6 +1,10 @@
-# RemboAI Glance display copy
+# RemboAI Glance
 
-Proposed short, owner-facing labels for a future Glance client. These are display strings only; they do not represent implemented Glance behavior or change case, payment, or delivery state.
+RemboAI Glance is the owner escalation companion for Even Realities G2. It brings open customer handoffs from the RemboAI booking receptionist to a glanceable display, with the paired phone application used for full context review and exact-text reply editing.
+
+The RemboAI backend implements paired owner sessions, salon-scoped inbox and case context, AI and manual drafts, reply approval and status, and safe case resolution. The companion client is maintained separately. End-to-end HTTPS staging and packaged Even Hub WebView acceptance have not yet been completed, so these capabilities should not be presented as a live service.
+
+These short labels are UI copy. Case, payment, and delivery state must always come from the backend.
 
 | Situation | Display copy |
 |---|---|
