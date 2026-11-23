@@ -78,6 +78,11 @@ def _client_ip(scope, trusted_cidrs: str) -> str:
     return direct
 
 
+def client_ip(request, trusted_cidrs: str = "") -> str:
+    """Return the direct source, honoring X-Forwarded-For only from trusted proxies."""
+    return _client_ip(request.scope, trusted_cidrs)
+
+
 def _local_ingress_count(key: str, window_s: int) -> int:
     now = time.monotonic()
     if key not in _INGRESS_LOCAL and len(_INGRESS_LOCAL) >= _INGRESS_LOCAL_MAX_KEYS:
@@ -240,6 +245,7 @@ def callback_secret_ok(settings) -> bool:
 
 def startup_checks(settings) -> list[str]:
     problems: list[str] = []
+    glance_problems: list[str] = []
     mpesa_env = str(getattr(settings, "mpesa_env", "sandbox") or "sandbox").strip().lower()
     if mpesa_env not in {"sandbox", "production"}:
         problems.append("MPESA_ENV must be 'sandbox' or 'production'")
@@ -265,8 +271,29 @@ def startup_checks(settings) -> list[str]:
             valid = False
         if not valid:
             problems.append(f"{name.upper()} must be a positive integer")
+    if bool(getattr(settings, "glance_enabled", False)):
+        try:
+            from .glance_sessions import validate_security_settings
+            validate_security_settings(settings)
+        except Exception:
+            glance_problems.append(
+                "GLANCE_ENABLED requires a valid pairing HMAC keyring and bounded session/rate configuration")
+        origins = [origin.strip() for origin in
+                   (getattr(settings, "glance_cors_origins", "") or "").split(",") if origin.strip()]
+        # Pairing exchange returns a bearer token and always requires an exact origin,
+        # even when already-authenticated bearer routes use the wildcard fallback.
+        if not origins:
+            glance_problems.append(
+                "GLANCE_ENABLED requires an exact packaged WebView origin for pairing exchange")
+        if any(origin == "*" for origin in origins):
+            glance_problems.append("GLANCE_CORS_ORIGINS must contain exact origins, not '*'")
+        problems.extend(glance_problems)
     for p in problems:
         log.error("SECURITY CONFIG: %s", p)
+    if glance_problems:
+        # Glance is explicitly enabled only on an isolated stage. It must not start
+        # partially configured, even when the rest of the application is in sandbox mode.
+        raise RuntimeError("refusing to start with insecure Glance configuration: " + "; ".join(glance_problems))
     if problems and mpesa_env != "sandbox":
         raise RuntimeError("refusing to start with insecure production configuration: " + "; ".join(problems))
     return problems

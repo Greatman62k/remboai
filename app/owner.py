@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 import asyncpg
 
 from .names import LABEL
-from . import mpesa, payments, smalltalk, waitlist
+from . import glance_owner, mpesa, payments, smalltalk, waitlist
 from .channels import outbound
 from .contact import display_contact
 from .availability import day_slots
@@ -70,6 +70,8 @@ def is_owner(salon: dict, sender: str) -> bool:
 def is_command(text: str) -> bool:
     """Return whether an explicit owner command must stay in its guarded code flow."""
     if (text or "").strip().lower().strip(" ?.! ") in ("/id", "my id", "myid", "id"):
+        return True
+    if glance_owner.is_command(text):
         return True
     return any(pattern.match(text or "") for pattern in (
         KEEP, DEPOSIT, PAYMENT, PENDING_PAYMENTS, NOSHOW, CANCEL, CANCEL_WHO,
@@ -287,6 +289,8 @@ async def handle(ctx, salon: dict, to: str, text: str, tz: ZoneInfo, now: dateti
     """Run a salon-owner command. Unknown owner text stays in owner mode."""
     if not is_owner(salon, to):
         return False
+    if await glance_owner.handle_command(ctx, salon, to, text):
+        return True
     today, lang = now.date(), "sw" if SWAHILI.search(text) else "en"
     say = lambda body: _say(ctx, salon, to, body)  # noqa: E731
 
@@ -350,6 +354,8 @@ async def handle(ctx, salon: dict, to: str, text: str, tz: ZoneInfo, now: dateti
 async def handle_tap(ctx, salon: dict, sender: str, reply_id: str) -> bool:
     """An owner's tap on a manual-claim confirm request. Only the owner's tap counts;
     anything else falls through to the customer flow."""
+    if await glance_owner.handle_tap(ctx, salon, sender, reply_id):
+        return True
     availability = AVAILABILITY_TAP.match(reply_id or "")
     if availability:
         if not is_owner(salon, sender):

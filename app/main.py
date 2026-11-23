@@ -29,6 +29,7 @@ from .channels.whatsapp import Message, WhatsApp, explain, mask, parse_failures,
 from .agent import AgentModel
 from .webhook_jobs import QueueCapacityError, enqueue_jobs, webhook_worker, list_dead_jobs, requeue_dead_job, purge_expired_data
 from .metrics import observe_request, render as metrics_render, update_queue_depth
+from .glance_api import install_glance_api
 
 from .token_crypto import verify_stored_tokens
 
@@ -215,6 +216,7 @@ async def _retention_loop(ctx):
 
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 hardening.install(app)
+install_glance_api(app)
 
 _METRICS_EXACT = {"/health", "/ready", "/metrics", "/webhook", "/telegram/webhook",
                   "/ops/payment-reviews", "/ops/unmatched-payments", "/ops/webhook-jobs/dead"}

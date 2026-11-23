@@ -94,6 +94,21 @@ class Settings(BaseSettings):
     telegram_mode: str = "auto"
     telegram_webhook_secret: str = ""
 
+    # Glance stays unavailable unless explicitly enabled on an isolated staging stack.
+    glance_enabled: bool = False
+    glance_pairing_hmac_keyring: str = ""
+    glance_pairing_hmac_active_version: int = 0
+    glance_session_ttl_seconds: int = 604800
+    glance_exchange_window_seconds: int = 900
+    glance_exchange_source_limit: int = 12
+    glance_exchange_owner_limit: int = 10
+    glance_pairing_generation_window_seconds: int = 3600
+    glance_pairing_generation_limit: int = 5
+    glance_read_limit_per_minute: int = 120
+    glance_write_limit_per_minute: int = 20
+    glance_cors_origins: str = ""
+    glance_cors_wildcard_bearer: bool = False
+
     central_whatsapp_number: str = ""
     mpesa_env: str = "sandbox"
     mpesa_consumer_key: str = ""

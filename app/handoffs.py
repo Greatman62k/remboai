@@ -2,10 +2,28 @@
 from __future__ import annotations
 
 import json
+import uuid
+from datetime import timezone
 
 
 class CaseHasSendingReply(RuntimeError):
     """A provider send is in progress and cannot be atomically cancelled."""
+
+
+class CaseVersionConflict(RuntimeError):
+    pass
+
+
+class UnknownReplyNeedsAcknowledgement(RuntimeError):
+    pass
+
+
+class NoUnknownReply(RuntimeError):
+    pass
+
+
+class LegacyUnresolvedReplyViolation(RuntimeError):
+    pass
 
 
 
@@ -27,8 +45,13 @@ async def list_open_handoffs(pool, salon_id: str, owner_identity: str, limit: in
             await _verified_owner(con, salon_id, owner_identity)
             rows = await con.fetch(
                 "SELECT h.id::text,h.category,h.status,h.version,h.created_at,c.name AS customer_name, "
-                "CASE WHEN c.wa_id LIKE 'tg:%' THEN 'telegram' ELSE 'whatsapp' END AS channel "
+                "CASE WHEN c.wa_id LIKE 'tg:%' THEN 'telegram' ELSE 'whatsapp' END AS channel, "
+                "COALESCE(preview.body,'') AS preview, count(*) OVER()::bigint AS open_count "
                 "FROM handoffs h JOIN clients c ON c.id=h.client_id AND c.salon_id=h.salon_id "
+                "LEFT JOIN LATERAL (SELECT e.body FROM handoff_events e "
+                "WHERE e.handoff_id=h.id AND e.salon_id=h.salon_id AND e.visibility='customer_visible' "
+                "AND e.event_type IN ('customer_message','assistant_reply','approved_reply') "
+                "ORDER BY e.sequence DESC LIMIT 1) preview ON true "
                 "WHERE h.salon_id=$1::uuid AND h.status='open' ORDER BY h.created_at,h.id LIMIT $2",
                 salon_id, limit)
             return [dict(row) for row in rows]
@@ -55,6 +78,42 @@ async def get_handoff_context(pool, salon_id: str, handoff_id: str,
             result = dict(case)
             result["customer"] = {"name": case["customer_name"] or "Customer", "channel": case["channel"]}
             result["messages"] = [dict(row) for row in reversed(messages)]
+            return result
+
+
+async def get_glance_handoff_context(pool, salon_id: str, handoff_id: str,
+                                     owner_identity: str, limit: int = 11) -> dict | None:
+    """Read a Glance case with a visibility allowlist, eleven-event look-ahead and latest reply state.
+
+    The ordinary context service remains unchanged for its existing callers. This API-specific
+    read intentionally selects only customer messages and customer-visible replies, never
+    owner-internal events or diagnostic traces.
+    """
+    limit = max(1, min(int(limit), 11))
+    async with pool.acquire() as con:
+        async with con.transaction():
+            await _verified_owner(con, salon_id, owner_identity)
+            case = await con.fetchrow(
+                "SELECT h.id::text,h.category,h.status,h.version,h.created_at,h.resolved_at, "
+                "c.name AS customer_name,CASE WHEN c.wa_id LIKE 'tg:%' THEN 'telegram' ELSE 'whatsapp' END AS channel "
+                "FROM handoffs h JOIN clients c ON c.id=h.client_id AND c.salon_id=h.salon_id "
+                "WHERE h.id=$1::uuid AND h.salon_id=$2::uuid", handoff_id, salon_id)
+            if case is None:
+                return None
+            messages = await con.fetch(
+                "SELECT sequence,event_type,actor_type,body,channel,created_at FROM handoff_events "
+                "WHERE handoff_id=$1::uuid AND salon_id=$2::uuid AND visibility='customer_visible' "
+                "AND event_type IN ('customer_message','assistant_reply','approved_reply') "
+                "AND actor_type IN ('customer','assistant','owner') "
+                "ORDER BY sequence DESC LIMIT $3", handoff_id, salon_id, limit)
+            latest_reply = await con.fetchrow(
+                "SELECT id::text AS reply_id,state,channel,last_error_category,updated_at,submitted_at,delivered_at,failed_at FROM outbound_outbox "
+                "WHERE handoff_id=$1::uuid AND salon_id=$2::uuid ORDER BY created_at DESC,id DESC LIMIT 1",
+                handoff_id, salon_id)
+            result = dict(case)
+            result["customer"] = {"name": case["customer_name"] or "Customer", "channel": case["channel"]}
+            result["messages"] = [dict(row) for row in reversed(messages)]
+            result["latest_reply"] = dict(latest_reply) if latest_reply else None
             return result
 
 
@@ -200,12 +259,20 @@ async def record_customer_reply(pool, salon_id: str, customer_identity: str, bod
                 related_event_id=related)
 
 
-async def resolve_handoff(pool, salon_id: str, handoff_id: str, actor_identity: str, reason: str) -> dict | None:
-    """Resolve only with the salon's verified current owner identity; payments are untouched."""
+async def resolve_handoff(pool, salon_id: str, handoff_id: str, actor_identity: str, reason: str,
+                          *, expected_version: int | None = None,
+                          acknowledge_unknown_reply: bool = False,
+                          session_id: str | None = None,
+                          device_label: str | None = None,
+                          reason_code: str = "other",
+                          acknowledgement_note: str | None = None) -> dict | None:
+    """Resolve with the shared handoff-then-outbox lock order; payment state is untouched."""
     actor_identity = (actor_identity or "").strip()
     reason = " ".join((reason or "").split())[:200]
     if not actor_identity or not reason:
         raise ValueError("owner identity and resolution reason are required")
+    if reason_code not in {"handled_in_person", "customer_updated", "no_action_needed", "other"}:
+        raise ValueError("invalid resolution reason")
     async with pool.acquire() as con:
         async with con.transaction():
             salon = await con.fetchrow("SELECT owner_wa_id FROM salons WHERE id=$1::uuid FOR SHARE", salon_id)
@@ -215,29 +282,72 @@ async def resolve_handoff(pool, salon_id: str, handoff_id: str, actor_identity: 
             if owner_identity.lstrip("+") != actor_identity.lstrip("+"):
                 raise PermissionError("actor is not the salon owner")
             case_row = await con.fetchrow(
-                "SELECT id::text,salon_id::text,client_id::text,status FROM handoffs "
+                "SELECT id::text,salon_id::text,client_id::text,status,version,resolved_at,resolution_result FROM handoffs "
                 "WHERE id=$1::uuid AND salon_id=$2::uuid FOR UPDATE", handoff_id, salon_id)
             if case_row is None:
                 return None
             case = dict(case_row)
             if case["status"] != "open":
-                return {"id": case["id"], "status": "resolved", "already_resolved": True}
-            if await con.fetchval("SELECT 1 FROM outbound_outbox WHERE handoff_id=$1::uuid AND state='sending' LIMIT 1", case["id"]):
+                saved = case.get("resolution_result")
+                if isinstance(saved, str):
+                    saved = json.loads(saved)
+                if isinstance(saved, dict):
+                    return saved
+                return {"id": case["id"], "status": "resolved", "already_resolved": True,
+                        "version": int(case["version"]), "resolved_at": case["resolved_at"],
+                        "unknown_reply_acknowledged": False, "cancelled_reply_ids": []}
+            if expected_version is not None and int(case["version"]) != int(expected_version):
+                raise CaseVersionConflict("case changed; refresh its context before resolving")
+
+            # Dispatch takes the same case row lock before any outbox row.
+            unresolved = await con.fetch(
+                "SELECT id::text,state FROM outbound_outbox WHERE handoff_id=$1::uuid AND salon_id=$2::uuid "
+                "AND state IN ('queued','sending','unknown') ORDER BY id FOR UPDATE",
+                case["id"], salon_id)
+            if len(unresolved) > 1:
+                raise LegacyUnresolvedReplyViolation("case has multiple unresolved outbound replies")
+            sending = next((row for row in unresolved if row["state"] == "sending"), None)
+            if sending is not None:
                 raise CaseHasSendingReply("a customer reply is currently being submitted")
-            await con.execute(
-                "UPDATE outbound_outbox SET state='cancelled',last_error_category='case_resolved',updated_at=now() "
-                "WHERE handoff_id=$1::uuid AND state='queued'", case["id"])
+            unknown = next((row for row in unresolved if row["state"] == "unknown"), None)
+            if unknown is not None and not acknowledge_unknown_reply:
+                raise UnknownReplyNeedsAcknowledgement("an outbound reply has an ambiguous provider outcome")
+            if unknown is None and acknowledge_unknown_reply:
+                raise NoUnknownReply("there is no unknown outbound reply to acknowledge")
+            if unknown is not None:
+                await con.execute(
+                    "INSERT INTO handoff_unknown_reply_acknowledgements "
+                    "(handoff_id,salon_id,client_id,reply_id,owner_identity,session_id,device_label,reason,note) "
+                    "VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6::uuid,$7,$8,$9)",
+                    case["id"], salon_id, case["client_id"], unknown["id"], actor_identity,
+                    session_id, device_label, reason_code,
+                    " ".join((acknowledgement_note or "").split())[:200] or None)
+
+            cancelled = [row["id"] for row in unresolved if row["state"] == "queued"]
+            if cancelled:
+                await con.execute(
+                    "UPDATE outbound_outbox SET state='cancelled',last_error_category='case_resolved',updated_at=now() "
+                    "WHERE handoff_id=$1::uuid AND salon_id=$2::uuid AND id=ANY($3::uuid[]) AND state='queued'",
+                    case["id"], salon_id, [uuid.UUID(reply_id) for reply_id in cancelled])
             updated = await con.fetchrow(
                 "UPDATE handoffs SET status='resolved',resolved_at=now(),resolved_by=$2,resolution_reason=$3,version=version+1,event_seq=event_seq+1 "
-                "WHERE id=$1::uuid AND status='open' RETURNING event_seq,version", case["id"], actor_identity, reason)
+                "WHERE id=$1::uuid AND status='open' RETURNING event_seq,version,resolved_at", case["id"], actor_identity, reason)
             await con.execute(
                 "INSERT INTO handoff_events (handoff_id,salon_id,client_id,sequence,event_type,actor_type,visibility,body,channel) "
                 "VALUES ($1::uuid,$2::uuid,$3::uuid,$4,'case_resolved','owner','owner_internal',$5,$6)",
                 case["id"], salon_id, case["client_id"], updated["event_seq"], reason,
                 channel_for(actor_identity))
-            client_identity = await con.fetchval("SELECT wa_id FROM clients WHERE id=$1::uuid AND salon_id=$2::uuid", case["client_id"], salon_id)
+            client_identity = await con.fetchval(
+                "SELECT wa_id FROM clients WHERE id=$1::uuid AND salon_id=$2::uuid", case["client_id"], salon_id)
             await con.execute(
                 "UPDATE conversations SET state=COALESCE(state,'{}'::jsonb)-'state'-'category',updated_at=now() "
                 "WHERE salon_id=$1::uuid AND wa_id=$2 AND state->>'state'='handoff'", salon_id, client_identity)
-            return {"id": case["id"], "status": "resolved", "already_resolved": False,
-                    "version": updated["version"], "resolved_by": actor_identity, "resolution_reason": reason}
+            result = {"id": case["id"], "status": "resolved", "already_resolved": False,
+                      "version": int(updated["version"]), "resolved_by": actor_identity,
+                      "resolved_at": updated["resolved_at"].astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                      "resolution_reason": reason,
+                      "unknown_reply_acknowledged": bool(unknown), "cancelled_reply_ids": cancelled,
+                      "acknowledged_unknown_reply_id": unknown["id"] if unknown else None}
+            await con.execute("UPDATE handoffs SET resolution_result=$2::jsonb WHERE id=$1::uuid",
+                              case["id"], json.dumps(result))
+            return result

@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
+import json
 import logging
 import uuid
 
 from .channels.outbound import salon_token
-from .handoffs import _next_event, _verified_owner
+from .handoffs import LegacyUnresolvedReplyViolation, _next_event, _verified_owner
 
 log = logging.getLogger("rembo.handoff_outbox")
 MAX_ATTEMPTS = 5
@@ -17,32 +20,124 @@ class StaleCaseVersion(RuntimeError):
     pass
 
 
+class DraftExpired(StaleCaseVersion):
+    pass
+
+
+class DraftConsumed(StaleCaseVersion):
+    pass
+
+
+class DraftSuperseded(StaleCaseVersion):
+    pass
+
+
+class DraftNotFound(StaleCaseVersion):
+    pass
+
+
 class IdempotencyConflict(RuntimeError):
     pass
 
 
+class RequestInProgress(RuntimeError):
+    pass
+
+
+class UnresolvedReplyExists(RuntimeError):
+    pass
+
+
+def delivery_state(channel: str, state: str) -> str:
+    if channel == "telegram":
+        return "unsupported"
+    return "confirmed" if state == "delivered" else "unconfirmed"
+
+
+def _public_error_category(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if value in {"recipient_unreachable", "provider_rejected", "provider_unavailable", "internal"}:
+        return value
+    if value in {"invalid_recipient", "recipient_not_found", "blocked_recipient"}:
+        return "recipient_unreachable"
+    if value in {"rate_limited", "network_error", "provider_timeout", "provider_unavailable",
+                 "connection", "channel_unavailable"}:
+        return "provider_unavailable"
+    if value in {"provider_delivery_failure", "provider_rejected"}:
+        return "provider_rejected"
+    return "internal"
+
+
+async def get_reply_status(pool, salon_id: str, reply_id: str) -> dict | None:
+    async with pool.acquire() as con:
+        row = await con.fetchrow(
+            "SELECT id::text AS reply_id,handoff_id::text AS case_id,state,channel,last_error_category,created_at,updated_at,submitted_at,delivered_at,failed_at "
+            "FROM outbound_outbox WHERE id=$1::uuid AND salon_id=$2::uuid", reply_id, salon_id)
+    if row is None:
+        return None
+    return {
+        "reply_id": row["reply_id"], "case_id": row["case_id"], "state": row["state"],
+        "delivery": delivery_state(row["channel"], row["state"]),
+        "error_category": _public_error_category(row["last_error_category"]),
+        "created_at": row["created_at"], "updated_at": row["updated_at"],
+        "submitted_at": row["submitted_at"], "delivered_at": row["delivered_at"],
+        "failed_at": row["failed_at"],
+    }
+
+
 async def approve_reply(pool, salon_id: str, handoff_id: str, owner_identity: str,
                         expected_version: int, text: str, idempotency_key: str,
-                        draft_id: str | None = None) -> dict:
+                        draft_id: str | None = None, *, request_method: str = "POST",
+                        resource_path: str | None = None, session_id: str | None = None,
+                        device_label: str | None = None,
+                        idempotency_claim=None) -> dict:
     """Atomically store the exact owner-approved text, timeline event, and queued send."""
     if not isinstance(text, str) or not text.strip() or len(text) > 4096:
         raise ValueError("reply must contain 1 to 4096 characters")
     if not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key) <= 200:
         raise ValueError("idempotency key must contain 1 to 200 characters")
+    resource_path = resource_path or f"/api/v1/glance/cases/{handoff_id}/replies"
+    payload_raw = json.dumps({"expected_version": int(expected_version), "draft_id": draft_id,
+                              "owner_identity": owner_identity, "text": text},
+                             sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    request_hash = hashlib.sha256(payload_raw).digest()
     async with pool.acquire() as con:
         async with con.transaction():
             await _verified_owner(con, salon_id, owner_identity)
-            await con.execute("SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
-                              f"handoff-reply:{salon_id}:{idempotency_key}")
+            # Scope lookup is salon-bound and precedes idempotency replay.
+            scoped = await con.fetchval(
+                "SELECT 1 FROM handoffs WHERE id=$1::uuid AND salon_id=$2::uuid", handoff_id, salon_id)
+            if not scoped:
+                return None
+            lock_key = f"handoff-reply:{salon_id}:{request_method}:{resource_path}:{idempotency_key}"
+            locked = await con.fetchval("SELECT pg_try_advisory_xact_lock(hashtextextended($1,0))", lock_key)
+            if not locked:
+                raise RequestInProgress("the approval request is still being processed")
             existing = await con.fetchrow(
-                "SELECT o.id::text,o.handoff_id::text,o.state,o.approved_by,o.draft_id::text,e.body "
+                "SELECT o.id::text,o.handoff_id::text,o.state,o.approved_by,o.draft_id::text,e.body,"
+                "o.request_payload_hash,o.response_status,o.response_body,o.approved_case_version "
                 "FROM outbound_outbox o JOIN handoff_events e ON e.id=o.approved_event_id "
-                "WHERE o.salon_id=$1::uuid AND o.idempotency_key=$2", salon_id, idempotency_key)
+                "WHERE o.salon_id=$1::uuid AND o.idempotency_method=$2 AND o.idempotency_resource_path=$3 "
+                "AND o.idempotency_key=$4", salon_id, request_method, resource_path, idempotency_key)
             if existing:
                 if (existing["handoff_id"] != handoff_id or existing["approved_by"] != owner_identity or
-                        existing["body"] != text or existing["draft_id"] != draft_id):
+                        existing["request_payload_hash"] is None or
+                        not hmac.compare_digest(bytes(existing["request_payload_hash"]), request_hash)):
                     raise IdempotencyConflict("idempotency key was already used for a different reply")
-                return {"id": existing["id"], "handoff_id": existing["handoff_id"], "state": existing["state"], "duplicate": True}
+                response = existing["response_body"]
+                if isinstance(response, str):
+                    response = json.loads(response)
+                if response is None:
+                    response = {"data": {"reply_id": existing["id"], "state": "queued",
+                                          "case_version": int(existing["approved_case_version"])} }
+                if idempotency_claim is not None:
+                    from .glance_workflows import complete_request
+                    await complete_request(con, idempotency_claim, int(existing["response_status"] or 202), response)
+                return {"id": existing["id"], "handoff_id": existing["handoff_id"], "state": "queued",
+                        "duplicate": True, "approved_case_version": int(existing["approved_case_version"]),
+                        "response_status": int(existing["response_status"] or 202),
+                        "response_body": response}
 
             row = await con.fetchrow(
                 "SELECT h.id::text,h.salon_id::text,h.client_id::text,h.status,h.version, "
@@ -57,15 +152,29 @@ async def approve_reply(pool, salon_id: str, handoff_id: str, owner_identity: st
                 raise StaleCaseVersion("handoff is no longer open")
             if int(case["version"]) != int(expected_version):
                 raise StaleCaseVersion("case changed; refresh its context before approving")
+            draft = None
             if draft_id:
                 draft = await con.fetchrow(
-                    "SELECT based_case_version,requested_by,expires_at,consumed_at FROM handoff_drafts "
+                    "SELECT based_case_version,requested_by,expires_at,consumed_at,body,source,superseded_at FROM handoff_drafts "
                     "WHERE id=$1::uuid AND handoff_id=$2::uuid AND salon_id=$3::uuid AND client_id=$4::uuid FOR UPDATE",
                     draft_id, handoff_id, salon_id, case["client_id"])
-                if (draft is None or draft["requested_by"] != owner_identity or draft["consumed_at"] is not None or
-                        draft["expires_at"] <= await con.fetchval("SELECT now()") or
-                        int(draft["based_case_version"]) != int(expected_version)):
-                    raise StaleCaseVersion("draft expired, was already approved, or no longer matches this case")
+                if draft is None or draft["requested_by"] != owner_identity:
+                    raise DraftNotFound("draft not found")
+                if draft["superseded_at"] is not None:
+                    raise DraftSuperseded("draft was superseded")
+                if draft["consumed_at"] is not None:
+                    raise DraftConsumed("draft was already approved")
+                if draft["expires_at"] <= await con.fetchval("SELECT now()"):
+                    raise DraftExpired("draft expired")
+                if int(draft["based_case_version"]) != int(expected_version):
+                    raise StaleCaseVersion("draft no longer matches this case")
+            unresolved = await con.fetch(
+                "SELECT id::text,state FROM outbound_outbox WHERE handoff_id=$1::uuid AND salon_id=$2::uuid "
+                "AND state IN ('queued','sending','unknown') ORDER BY id FOR UPDATE", handoff_id, salon_id)
+            if len(unresolved) > 1:
+                raise LegacyUnresolvedReplyViolation("case has multiple unresolved outbound replies")
+            if unresolved:
+                raise UnresolvedReplyExists("case already has an unresolved outbound reply")
             channel = "telegram" if case["wa_id"].startswith("tg:") else "whatsapp"
             related = await con.fetchval(
                 "SELECT id::text FROM handoff_events WHERE handoff_id=$1::uuid AND event_type='customer_message' "
@@ -73,35 +182,66 @@ async def approve_reply(pool, salon_id: str, handoff_id: str, owner_identity: st
             event = await _next_event(
                 con, case, event_type="approved_reply", actor_type="owner", visibility="customer_visible",
                 body=text, channel=channel, related_event_id=related, bump_version=True)
-            await con.execute(
-                "UPDATE outbound_outbox SET state='cancelled',last_error_category='stale_case_version',updated_at=now() "
-                "WHERE handoff_id=$1::uuid AND state='queued' AND approved_case_version<>$2",
-                handoff_id, event["case_version"])
+            if draft is None or draft["source"] == "owner":
+                reply_source = "owner"
+            else:
+                reply_source = "ai" if draft["body"] == text else "ai_edited"
             outbox_id = await con.fetchval(
-                "INSERT INTO outbound_outbox (handoff_id,salon_id,client_id,approved_event_id,channel,recipient,phone_number_id,approved_by,idempotency_key,approved_case_version,draft_id) "
-                "VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,$7,$8,$9,$10,$11::uuid) RETURNING id::text",
+                "INSERT INTO outbound_outbox (handoff_id,salon_id,client_id,approved_event_id,channel,recipient,phone_number_id,approved_by,idempotency_key,approved_case_version,draft_id,"
+                "approved_glance_session_id,approved_device_label,reply_source,approved_draft_text,idempotency_method,idempotency_resource_path,request_payload_hash,response_status,response_body) "
+                "VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,$7,$8,$9,$10,$11::uuid,$12::uuid,$13,$14,$15,$16,$17,$18,202,$19::jsonb) RETURNING id::text",
                 handoff_id, salon_id, case["client_id"], event["id"], channel, case["wa_id"],
                 case["wa_phone_number_id"] if channel == "whatsapp" else None, owner_identity,
-                idempotency_key, event["case_version"], draft_id)
+                idempotency_key, event["case_version"], draft_id, session_id, device_label,
+                reply_source, draft["body"] if draft else None, request_method, resource_path, request_hash,
+                json.dumps({"data": {"reply_id": "", "state": "queued", "case_version": int(event["case_version"])}}))
+            response_body = {"data": {"reply_id": outbox_id, "state": "queued",
+                                      "case_version": int(event["case_version"])} }
+            await con.execute("UPDATE outbound_outbox SET response_body=$2::jsonb WHERE id=$1::uuid",
+                              outbox_id, json.dumps(response_body))
+            if idempotency_claim is not None:
+                from .glance_workflows import complete_request
+                await complete_request(con, idempotency_claim, 202, response_body)
             if draft_id:
                 await con.execute("UPDATE handoff_drafts SET consumed_at=now() WHERE id=$1::uuid AND consumed_at IS NULL", draft_id)
             return {"id": outbox_id, "handoff_id": handoff_id, "state": "queued", "duplicate": False,
-                    "approved_case_version": event["case_version"], "provider_message_id": None}
+                    "approved_case_version": event["case_version"], "provider_message_id": None,
+                    "response_status": 202, "response_body": response_body}
 
 
 async def _cancel_stale_queued(con) -> None:
-    await con.execute(
-        "UPDATE outbound_outbox o SET state='cancelled',last_error_category='stale_case_version',updated_at=now() "
-        "WHERE o.state='queued' AND NOT EXISTS (SELECT 1 FROM handoffs h WHERE h.id=o.handoff_id "
-        "AND h.salon_id=o.salon_id AND h.client_id=o.client_id AND h.status='open' AND h.version=o.approved_case_version)")
+    rows = await con.fetch(
+        "SELECT o.id::text FROM handoffs h JOIN outbound_outbox o ON o.handoff_id=h.id "
+        "AND o.salon_id=h.salon_id AND o.client_id=h.client_id "
+        "WHERE o.state='queued' AND (h.status<>'open' OR h.version<>o.approved_case_version) "
+        "ORDER BY h.id,o.id LIMIT 100 FOR UPDATE OF h SKIP LOCKED")
+    for row in rows:
+        await con.execute(
+            "UPDATE outbound_outbox SET state='cancelled',last_error_category='stale_case_version',updated_at=now() "
+            "WHERE id=$1::uuid AND state='queued'", row["id"])
 
 
 async def mark_expired_leases_unknown(pool) -> int:
     """A worker may have reached the provider before crashing; never resend its claim."""
-    result = await pool.execute(
-        "UPDATE outbound_outbox SET state='unknown',last_error_category='worker_lease_expired', "
-        "claim_token=NULL,lease_until=NULL,updated_at=now() WHERE state='sending' AND lease_until < now()")
-    return int(result.split()[-1])
+    changed = 0
+    async with pool.acquire() as con:
+        async with con.transaction():
+            candidates = await con.fetch(
+                "SELECT o.id::text,o.handoff_id::text,o.salon_id::text FROM outbound_outbox o "
+                "JOIN handoffs h ON h.id=o.handoff_id AND h.salon_id=o.salon_id AND h.client_id=o.client_id "
+                "WHERE o.state='sending' AND o.lease_until<now() ORDER BY h.id,o.id "
+                "LIMIT 100 FOR UPDATE OF h SKIP LOCKED")
+            for candidate in candidates:
+                row = await con.fetchrow(
+                    "SELECT state,lease_until FROM outbound_outbox WHERE id=$1::uuid FOR UPDATE", candidate["id"])
+                if row is None or row["state"] != "sending" or row["lease_until"] is None or row["lease_until"] >= await con.fetchval("SELECT now()"):
+                    continue
+                await con.execute(
+                    "UPDATE outbound_outbox SET state='unknown',last_error_category='worker_lease_expired', "
+                    "claim_token=NULL,lease_until=NULL,updated_at=now() WHERE id=$1::uuid AND state='sending'",
+                    candidate["id"])
+                changed += 1
+    return changed
 
 
 async def _claim_next(pool) -> dict | None:

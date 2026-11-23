@@ -295,6 +295,12 @@ async def purge_expired_data(pool, webhook_days: int = 30, inbound_days: int = 9
                 "DELETE FROM outbound_outbox WHERE handoff_id IN (SELECT id FROM handoffs WHERE status='resolved' "
                 "AND COALESCE(resolved_at,created_at) < now()-($1 * interval '1 day')) "
                 "AND state IN ('submitted','delivered','failed','cancelled')", handoff_days)
+            await con.execute(
+                "DELETE FROM glance_request_idempotency g WHERE "
+                "(g.state='completed' AND g.expires_at < now() OR g.state='in_progress' AND g.lease_until < now()-interval '1 day') "
+                "AND NOT EXISTS (SELECT 1 FROM outbound_outbox o WHERE o.salon_id=g.salon_id "
+                "AND o.idempotency_method=g.http_method AND o.idempotency_resource_path=g.resource_path "
+                "AND o.idempotency_key=g.idempotency_key)")
             h = await con.fetchval(
                 "WITH deleted AS (DELETE FROM handoffs h WHERE h.status='resolved' "
                 "AND COALESCE(h.resolved_at,h.created_at) < now()-($1 * interval '1 day') "

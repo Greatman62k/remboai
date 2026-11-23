@@ -148,7 +148,7 @@ async def owner_command(ctx, salon: dict, wa_id: str, text: str, send) -> bool:
     if not owner or wa_id != owner:
         return False
 
-    command = (text or "").strip()
+    command = re.sub(r"^/", "", (text or "").strip(), count=1)
     if re.fullmatch(r"resolve", command, re.I):
         rows = await ctx.pool.fetch(
             "SELECT c.wa_id, c.name, h.category FROM handoffs h JOIN clients c ON c.id=h.client_id "
@@ -165,7 +165,7 @@ async def owner_command(ctx, salon: dict, wa_id: str, text: str, send) -> bool:
         m = re.fullmatch(r"resolve\s+((?:tg:\d{5,15})|(?:\+?\d{9,15}))", command, re.I)
         if not m:
             if re.match(r"resolve\b", command, re.I):
-                await send.text("Use RESOLVE for the only open request, or RESOLVE <customer ID> when there are several.")
+                await send.text("Use /resolve for the only open request, or /resolve <customer ID> when there are several. Ambiguous replies require explicit acknowledgement in Glance.")
                 return True
             return False
         target = m.group(1)
@@ -173,15 +173,27 @@ async def owner_command(ctx, salon: dict, wa_id: str, text: str, send) -> bool:
 
     from . import handoffs
     target_case = await ctx.pool.fetchrow(
-        "SELECT h.id::text FROM handoffs h JOIN clients c ON c.id=h.client_id AND c.salon_id=h.salon_id "
+        "SELECT h.id::text,h.version FROM handoffs h JOIN clients c ON c.id=h.client_id AND c.salon_id=h.salon_id "
         "WHERE h.salon_id=$1::uuid AND h.status='open' AND c.wa_id=$2 ORDER BY h.created_at LIMIT 1", salon["id"], target)
     if not target_case:
         await send.text(f"There is no open request for {display_contact(target)}.")
         return True
     try:
-        resolved = await handoffs.resolve_handoff(ctx.pool, salon["id"], target_case["id"], wa_id, "owner_resolved_via_telegram")
+        resolved = await handoffs.resolve_handoff(
+            ctx.pool, salon["id"], target_case["id"], wa_id, "owner_resolved_via_telegram",
+            expected_version=int(target_case["version"]), acknowledge_unknown_reply=False,
+            reason_code="other")
     except handoffs.CaseHasSendingReply:
         await send.text("A reply is currently being submitted to that customer. Try RESOLVE again after it finishes.")
+        return True
+    except handoffs.UnknownReplyNeedsAcknowledgement:
+        await send.text("A reply may already have reached that customer. The case was not resolved. Review and explicitly acknowledge the uncertain reply in Glance before resolving.")
+        return True
+    except handoffs.CaseVersionConflict:
+        await send.text("The case changed while you were resolving it. Refresh the owner inbox and try again.")
+        return True
+    except handoffs.LegacyUnresolvedReplyViolation:
+        await send.text("This case has conflicting reply state and needs review in Glance.")
         return True
     if not resolved or resolved.get("already_resolved"):
         await send.text(f"There is no open request for {display_contact(target)}.")
