@@ -1,4 +1,5 @@
 .env
+deploy/.env.glance-staging
 .venv/
 __pycache__/
 *.pyc

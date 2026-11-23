@@ -1,5 +1,7 @@
 import logging
+import json
 import time
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI, Request
@@ -103,6 +105,29 @@ def test_startup_checks_production_ok():
         mpesa_verify_callbacks = True
         token_encryption_key = "a"*64
     assert startup_checks(S()) == []
+
+
+def test_enabled_glance_fails_sandbox_startup_without_pairing_secrets_or_exact_origin():
+    settings = SimpleNamespace(
+        mpesa_env="sandbox", mpesa_callback_secret="effaf554118a08d5bafbff7e59e8f62f",
+        wa_app_secret="a" * 16, wa_verify_token="verify-token", ingress_rate_burst=120,
+        ingress_rate_global=600, ingress_rate_window_s=60, ops_api_key="",
+        mpesa_verify_callbacks=True, glance_enabled=True,
+        glance_pairing_hmac_keyring="", glance_pairing_hmac_active_version=1,
+        glance_session_ttl_seconds=604800, glance_exchange_window_seconds=900,
+        glance_exchange_source_limit=12, glance_exchange_owner_limit=10,
+        glance_pairing_generation_window_seconds=3600, glance_pairing_generation_limit=5,
+        glance_read_limit_per_minute=120, glance_cors_origins="https://glance.example",
+        glance_cors_wildcard_bearer=False,
+    )
+    with pytest.raises(RuntimeError, match="insecure Glance configuration"):
+        startup_checks(settings)
+
+    settings.glance_pairing_hmac_keyring = json.dumps({"1": "0123456789abcdef" * 4})
+    settings.glance_cors_origins = ""
+    settings.glance_cors_wildcard_bearer = True
+    with pytest.raises(RuntimeError, match="exact packaged WebView origin"):
+        startup_checks(settings)
 
 
 def test_mask_phones():

@@ -1,0 +1,104 @@
+name: remboai-glance-staging
+
+# Run only on a dedicated staging host with its own DNS name and firewall.
+# PostgreSQL and Redis have no published ports and use project-specific volumes.
+services:
+  caddy:
+    image: caddy:2.11.7-alpine
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:?set the dedicated staging DOMAIN}
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ../site:/srv/site:ro
+      - staging_caddy_data:/data
+    depends_on:
+      app:
+        condition: service_started
+    networks: [staging]
+
+  app:
+    build: ..
+    restart: unless-stopped
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", "--no-server-header", "--no-access-log", "--forwarded-allow-ips=*", "--limit-concurrency", "64", "--backlog", "128", "--timeout-keep-alive", "5"]
+    environment:
+      DATABASE_URL: postgresql://rembo_stage:${STAGING_POSTGRES_PASSWORD:?set a staging-only PostgreSQL password}@db:5432/remboai_glance_staging
+      REDIS_URL: redis://:${STAGING_REDIS_PASSWORD:?set a staging-only Redis password}@redis:6379/0
+      PUBLIC_BASE_URL: https://${DOMAIN:?set the dedicated staging DOMAIN}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?set a staging-only Telegram bot token}
+      TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:?set a staging-only Telegram webhook secret}
+      TELEGRAM_MODE: webhook
+      TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:?set a staging-only token encryption key}
+      MPESA_ENV: sandbox
+      GLANCE_ENABLED: "true"
+      GLANCE_PAIRING_HMAC_KEYRING: ${GLANCE_PAIRING_HMAC_KEYRING:?set the staging Glance HMAC keyring}
+      GLANCE_PAIRING_HMAC_ACTIVE_VERSION: ${GLANCE_PAIRING_HMAC_ACTIVE_VERSION:-1}
+      GLANCE_SESSION_TTL_SECONDS: ${GLANCE_SESSION_TTL_SECONDS:-604800}
+      GLANCE_EXCHANGE_WINDOW_SECONDS: ${GLANCE_EXCHANGE_WINDOW_SECONDS:-900}
+      GLANCE_EXCHANGE_SOURCE_LIMIT: ${GLANCE_EXCHANGE_SOURCE_LIMIT:-12}
+      GLANCE_EXCHANGE_OWNER_LIMIT: ${GLANCE_EXCHANGE_OWNER_LIMIT:-10}
+      GLANCE_PAIRING_GENERATION_WINDOW_SECONDS: ${GLANCE_PAIRING_GENERATION_WINDOW_SECONDS:-3600}
+      GLANCE_PAIRING_GENERATION_LIMIT: ${GLANCE_PAIRING_GENERATION_LIMIT:-5}
+      GLANCE_READ_LIMIT_PER_MINUTE: ${GLANCE_READ_LIMIT_PER_MINUTE:-120}
+      GLANCE_WRITE_LIMIT_PER_MINUTE: ${GLANCE_WRITE_LIMIT_PER_MINUTE:-20}
+      GLANCE_CORS_ORIGINS: ${GLANCE_CORS_ORIGINS:?set the observed packaged WebView origin}
+      GLANCE_CORS_WILDCARD_BEARER: ${GLANCE_CORS_WILDCARD_BEARER:-false}
+      GLANCE_STAGING_CONFIRM: I_CONFIRM_THIS_IS_ISOLATED_GLANCE_STAGING
+      GLANCE_STAGING_DATABASE_NAME: remboai_glance_staging
+      GLANCE_STAGING_DATABASE_HOST: db
+      GLANCE_STAGING_REDIS_HOST: redis
+      GLANCE_STAGING_OWNER_CHAT_ID: ${GLANCE_STAGING_OWNER_CHAT_ID:?set the dedicated Telegram test owner chat ID}
+      TRUSTED_PROXY_CIDRS: 172.16.0.0/12
+      AGENT_POLICY_PATH: /srv/config/remboai_agent_policy.json
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - staging_applogs:/tmp/logs
+      - ../config/remboai_agent_policy.json:/srv/config/remboai_agent_policy.json:ro
+    networks: [staging]
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: rembo_stage
+      POSTGRES_PASSWORD: ${STAGING_POSTGRES_PASSWORD:?set a staging-only PostgreSQL password}
+      POSTGRES_DB: remboai_glance_staging
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rembo_stage -d remboai_glance_staging"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes: [staging_pgdata:/var/lib/postgresql/data]
+    networks: [staging]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${STAGING_REDIS_PASSWORD:?set a staging-only Redis password}", "--appendonly", "yes"]
+    environment:
+      REDIS_PASSWORD: ${STAGING_REDIS_PASSWORD:?set a staging-only Redis password}
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes: [staging_redisdata:/data]
+    networks: [staging]
+
+networks:
+  staging: {}
+
+volumes:
+  staging_pgdata: {}
+  staging_redisdata: {}
+  staging_caddy_data: {}
+  staging_applogs: {}
