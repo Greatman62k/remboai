@@ -6,7 +6,7 @@ Target: one small VPS (2 GB RAM is plenty), Ubuntu 24.04, a domain you control. 
 1. Create the VPS and point an **A record** for your domain (for example `rembo.example.com`) at its IP. Wait until `dig +short rembo.example.com` shows it.
 2. `ssh root@SERVER`, then `git clone <your public repo> /opt/remboai && cd /opt/remboai`.
 3. `bash deploy/server-setup.sh` (firewall with only 22/80/443, fail2ban, automatic security updates, swap, Docker).
-4. Create a normal sudo user and disable root and password SSH logins if you plan to keep the server after the event.
+4. Create a normal sudo user and disable root and password SSH logins before keeping the server in service.
 
 ## 2. Configuration
 `cp .env.example .env` and fill it in, then `chmod 600 .env` so only your user can read the secrets. Beyond WhatsApp and model settings, set these values. Daraja credentials are needed only for automatic M-PESA STK; manual M-PESA and Airtel Money destinations are configured by each owner during registration:
@@ -34,7 +34,7 @@ docker compose -f deploy/docker-compose.prod.yml exec app python scripts/seed_sa
 docker compose -f deploy/docker-compose.prod.yml exec app python scripts/doctor.py
 ```
 The command above configures Daraja STK. For manual payments, owners can register in chat and choose a bare seven-digit M-PESA till, a phone number explicitly marked as Pochi la Biashara or direct M-PESA Send Money, or an Airtel Money number. Customers receive route-specific instructions and send the amount and transaction reference in chat. The owner confirms only after checking the destination account.
-`doctor` must end with "All set" (warnings about sandbox mode or failover are fine for a demo).
+`doctor` must end with "All set". Warnings about sandbox mode or an intentionally unconfigured optional service should be reviewed before enabling that integration.
 It also sends an in-memory synthetic M-PESA receipt with fake details to the configured vision endpoint and checks every extracted field. This tests image parsing without uploading customer payment evidence or creating a payment. The output names the model and reports whether its fields matched the fixture.
 
 ### RemboAI Glance staging gate

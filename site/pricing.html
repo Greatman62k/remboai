@@ -5,12 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#072352">
 <script>document.documentElement.classList.replace('no-js','js');</script>
-<title>Pricing: RemboAI</title>
-<meta name="description" content="RemboAI pricing: free while we pilot with Nairobi barbershops and salons, then one flat monthly fee per shop. No commission on your bookings.">
+<title>Pricing and hosting: RemboAI</title>
+<meta name="description" content="RemboAI is open-source software. Hosted pricing and managed-service availability are not currently published.">
 <link rel="canonical" href="https://remboai.duckdns.org/pricing.html">
 <meta property="og:type" content="website">
 <meta property="og:title" content="Pricing: RemboAI">
-<meta property="og:description" content="Free during the pilot. Then one flat fee per shop, no commission.">
+<meta property="og:description" content="Open-source booking software with self-hosted deployment instructions.">
 <meta property="og:url" content="https://remboai.duckdns.org/pricing.html">
 <meta name="twitter:card" content="summary">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
@@ -32,9 +32,8 @@
       <a href="pricing.html" aria-current="page">Pricing</a>
       <a href="setup.html">Setup guide</a>
       <a href="https://github.com/Greatman62k/remboai" target="_blank" rel="noopener noreferrer">Code</a>
-      
       <div class="nav-cta">
-        <a class="btn btn-primary btn-sm" href="https://t.me/Remboai1_bot">Telegram</a>
+        <a class="btn btn-primary btn-sm" href="setup.html">Setup guide</a>
       </div>
     </nav>
   </div>
@@ -43,67 +42,34 @@
 <main>
   <section class="page-hero">
     <div class="wrap reveal">
-      <p class="section-kicker">Pricing</p>
-      <h1>Free while we pilot. One flat fee after that.</h1>
-      <p>No commission on your bookings, no cut of your deposits. The money your customers pay is yours; you pay us for the receptionist.</p>
+      <p class="section-kicker">Pricing and hosting</p>
+      <h1>Hosted pricing is not published.</h1>
+      <p>This repository contains open-source RemboAI software. It does not advertise a managed subscription or confirm a hosted service offer.</p>
     </div>
   </section>
 
   <section style="padding-top:0">
     <div class="wrap">
-      <div class="tiers reveal">
-        <div class="tier">
-          <span class="tier-tag">Now onboarding</span>
-          <h3>Pilot</h3>
-          <p class="price">KES 0</p>
-          <p class="per">free for early Nairobi barbershops and salons, until launch</p>
-          <ul>
-            <li>Full booking diary on Telegram today; WhatsApp after Meta verification</li>
-            <li>M-PESA STK push where Safaricom has approved it, or manual M-PESA and Airtel Money destinations checked by the owner</li>
-            <li>Reminders, waitlist, owner commands</li>
-            <li>Direct line to the builders for feedback</li>
-          </ul>
-          <div class="btn-row"><a class="btn btn-outline" href="https://t.me/Remboai1_bot">Claim a pilot slot</a></div>
-        </div>
-        <div class="tier featured">
-          <span class="tier-tag">Most shops</span>
-          <h3>Standard</h3>
-          <p class="price">Talk to us</p>
-          <p class="per">one flat monthly fee per shop</p>
-          <ul>
-            <li>Everything in Pilot, unlimited bookings</li>
-            <li>Up to 5 barbers or stylists and service stations</li>
-            <li>Daily summaries and no-show tracking</li>
-            <li>Priority support on Telegram today; WhatsApp after launch</li>
-          </ul>
-          <div class="btn-row"><a class="btn btn-tg" href="https://t.me/Remboai1_bot">Ask about pricing</a></div>
-        </div>
-        <div class="tier">
-          <span class="tier-tag">Chains, planned</span>
-          <h3>Multi-branch</h3>
-          <p class="price">Custom</p>
-          <p class="per">per branch, one shared number if you like</p>
-          <ul>
-            <li>Everything in Standard, per branch</li>
-            <li>One WhatsApp line across branches after WhatsApp launch</li>
-            <li>Cross-branch reporting (planned)</li>
-            <li>Onboarding visit for your team</li>
-          </ul>
-          <div class="btn-row"><a class="btn btn-outline" href="https://t.me/Remboai1_bot">Tell us what you need</a></div>
-        </div>
+      <div class="guide-step reveal">
+        <h2>Self-hosted deployment</h2>
+        <p>Operators can deploy the backend from this repository. Hosting, database and Redis capacity, model API usage, messaging provider charges, and any payment-provider charges depend on the chosen infrastructure and accounts.</p>
+        <p>See the <a href="https://github.com/Greatman62k/remboai/blob/main/docs/DEPLOY.md">deployment guide</a> and <a href="https://github.com/Greatman62k/remboai/blob/main/README.md">project README</a>.</p>
       </div>
-      <p class="fineprint">Launch prices are being set with our pilot barbershops and salons now. Pilot shops keep a founder discount for their first year. Payment-provider charges stay between you and the provider; RemboAI never touches your money.</p>
+      <div class="guide-step reveal">
+        <h2>Payment handling</h2>
+        <p>RemboAI supports configured M-PESA STK flows and owner-reviewed manual payment claims. Provider approval, transaction fees, credentials, and settlement behavior are controlled by Safaricom, Airtel, and the salon's own accounts.</p>
+      </div>
     </div>
   </section>
 
   <section class="cta-band" aria-labelledby="start">
     <div class="wrap">
       <div>
-        <h2 id="start">Start free, decide at launch.</h2>
-        <p>Join the pilot today and help set the price you will pay tomorrow.</p>
+        <h2 id="start">Explore the software</h2>
+        <p>Review the source and deployment requirements before configuring a service.</p>
       </div>
       <div class="btn-row">
-        <a class="btn btn-tg" href="https://t.me/Remboai1_bot">Start on Telegram</a>
+        <a class="btn btn-tg" href="https://github.com/Greatman62k/remboai">View on GitHub</a>
       </div>
     </div>
   </section>
@@ -126,18 +92,11 @@
           <li><a href="pricing.html">Pricing</a></li>
           <li><a href="setup.html">Setup guide</a></li>
           <li><a href="https://github.com/Greatman62k/remboai" target="_blank" rel="noopener noreferrer">Code</a></li>
-          <li></li>
-        </ul>
-      </div>
-      <div>
-        <h3>Talk to us</h3>
-        <ul>
-          <li><a href="https://t.me/Remboai1_bot">Telegram bot</a></li>
         </ul>
       </div>
     </div>
     <div class="footer-base">
-      <span>© <span id="year">2026</span> RemboAI. Nairobi, Kenya.</span>
+      <span>© <span id="year">2026</span> RemboAI.</span>
       <span>Made for the chairs that never sit empty.</span>
     </div>
   </div>

@@ -1,4 +1,4 @@
-"""Regression tests for the previously identified issues. Each test states the behaviour that must hold;
+"""Regression tests for previously identified issues. Each test states the behaviour that must hold;
 they were written first and failed against the code as it was before the fixes."""
 import asyncio
 import hashlib

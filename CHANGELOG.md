@@ -1,9 +1,17 @@
 # Changelog
 
-This file records engineering milestones; dated entries are historical project notes.
+This file records engineering milestones. Dated entries are historical project notes; test totals and migration counts describe the checkpoint where they were recorded, not the current checkout. The repository has not declared semantic-versioned releases here.
+
+## 2026-11-23 — RemboAI Glance backend
+
+- Migration 047 adds salon-bound Glance pairing codes and bearer sessions, storing HMACs and token hashes rather than plaintext credentials. Pairing, expiry, revocation, owner-to-salon revalidation, and bounded exchange controls are implemented in the backend.
+- Migration 048 adds durable write-workflow idempotency, draft provenance and lifecycle, reply attribution, unknown-send acknowledgement records, and the one-unresolved-outbound-reply-per-case invariant.
+- The Glance API supports pairing exchange, session revocation, inbox and case context, AI and manual drafts, revision, exact-text approval, reply status, and guarded resolution through existing handoff services.
+- Production Compose keeps `GLANCE_ENABLED=false`. A separate staging stack and synthetic seeder are provided; no live staging host or packaged WebView acceptance is recorded.
+
 ## Review fixes
 
-An outside review of the code found the problems below. Each has a regression test that failed before the fix. 653 tests now pass; the repository has 43 database migrations.
+An outside review of the code found the problems below. Each has a regression test that failed before the fix. At the time of this note, the test run reported 653 passing tests and the repository had 43 database migrations.
 
 - **Cross-salon payment confirmation.** An owner could confirm or decline another salon's manual payment claim by sending its payment id. Owner taps are now scoped to the owner's own salon.
 - **Deposit destination changes** now need a confirming tap, expire after 10 minutes, and are recorded in `salon_payment_changes`.
@@ -29,22 +37,25 @@ An outside review of the code found the problems below. Each has a regression te
 - **Eval:** a second corpus of 117 messages (`docs/AGENT_EVAL_V2.md`), conversation history, 95% intervals, a `--verbose` miss list, and mechanical checks of the gold labels.
 
 ## Engineering follow-up
-471 tests pass against Postgres and Redis; the repository has 40 database migrations.
 
+Historical checkpoint: 471 tests passed against PostgreSQL and Redis; the repository had 40 database migrations.
+
+- README setup instructions documented how to run the Docker test suite, configure a local instance, and inspect model evidence without overwriting an existing `.env`.
 - Model traces now record the sanitized endpoint, provider request ID, model ID, and latency for text and vision requests.
 - Tightened shared Telegram routing so customers must enter a shop through its invite link or an existing binding. Typed and approximate shop names cannot select another business; owner action buttons are checked against the owning account and channel.
 - Added model-guided post-service feedback, including a follow-up for negative feedback and an owner notification, with feedback retained on the visit record.
 - Expanded registration and assistant guardrails and added regression coverage for shop identity, manual-payment claims, model evidence, and customer feedback.
 - Updated the agent, payment, architecture, and message-lifecycle documentation and diagrams to match the implementation.
 
-## Nov 4 (engineering follow-up)
-451 tests, all passing.
+## Nov 4 — reliability and product documentation
+
+Historical checkpoint: 451 tests were recorded as passing.
 
 - QR door sticker built into the bot. When a shop goes live, and whenever the owner sends `invite` or `qr`, Telegram sends a printable sticker (shop name, QR code, "Scan to book") together with the invite link. The sticker is made in `app/channels/invites.py` (`sticker_png`) and sent once-only through the normal outbound guard; WhatsApp gets the link until image upload is built. `scripts/invite_qr.py` still works for printing offline.
 
 - New diagrams: life of one message, how a reply is checked (`grounding-checker.svg`), and the manual-payment lifecycle. The existing diagrams were redrawn with rounded shapes, and the architecture and agent-flow diagrams now say plainly that only Muse Spark 1.3 is configured and that WhatsApp is awaiting verification.
-- Limitations and next steps section added; Privacy states where customer messages go; README counts corrected (451 tests, 39 migrations).
-- Site: "Under the hood" section with the Meta models and the measured result, FAQ entries for model outage, data and open source, the sample-chat buttons and empty pricing buttons now link to the Telegram bot, and unbuilt multi-branch features are marked as planned.
+- README documented product limitations, customer-data handling, channel status, and the then-current evaluation and test information.
+- Site: an "Under the hood" section describes model integrations; FAQ entries cover model outages, data handling, and open source; navigation links and planned multi-branch features were clarified.
 
 ## Nov 3 (manual payment destinations)
 
@@ -73,7 +84,7 @@ An outside review of the code found the problems below. Each has a regression te
 - **Manual till format** (migration 034): manual tills store and accept only the seven-digit till number. Daraja shortcode details remain required only for STK configuration.
 - **Conversation polish from live traces**: onboarding accepts spoken hours such as "from eight to eight" and acknowledgement-prefixed registration commands; the short "ye" affirmative is accepted only at the non-creating ownership notice; platform status commands tolerate one-character typos, and suggestion offers get a natural follow-up.
 - Diagrams: the README flow chart is now `docs/assets/agent-flow.svg` (renders everywhere, matches agent mode); the old keyword-first `model-fallback.svg` is removed and the other two diagrams no longer say rules read the intent.
-- README documented channel status, model design, evaluation results, trust boundaries, and privacy behavior.
+- README documented channel status, model design, evaluation results, trust boundaries, and the then-current 14-day trace-retention setting.
 - Owner-facing replies show Telegram customers as "Telegram ID ..." instead of a fake phone number (`app/contact.py`).
 
 ## Nov 1 (the Meta model runs the receptionist)

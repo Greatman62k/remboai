@@ -6,11 +6,11 @@
 <meta name="theme-color" content="#072352">
 <script>document.documentElement.classList.replace('no-js','js');</script>
 <title>Setup guide: RemboAI</title>
-<meta name="description" content="Register your barbershop or salon on RemboAI by chat. Add your services, prices and hours, then share your booking link.">
+<meta name="description" content="Configure a RemboAI deployment and register a salon through a connected Telegram bot.">
 <link rel="canonical" href="https://remboai.duckdns.org/setup.html">
 <meta property="og:type" content="website">
 <meta property="og:title" content="Setup guide: RemboAI">
-<meta property="og:description" content="Register your barbershop or salon by chat. Get an invite link and start taking bookings.">
+<meta property="og:description" content="Setup notes for operators configuring a RemboAI messaging integration.">
 <meta property="og:url" content="https://remboai.duckdns.org/setup.html">
 <meta name="twitter:card" content="summary">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
@@ -32,9 +32,8 @@
       <a href="pricing.html">Pricing</a>
       <a href="setup.html" aria-current="page">Setup guide</a>
       <a href="https://github.com/Greatman62k/remboai" target="_blank" rel="noopener noreferrer">Code</a>
-      
       <div class="nav-cta">
-        <a class="btn btn-primary btn-sm" href="https://t.me/Remboai1_bot">Telegram</a>
+        <a class="btn btn-primary btn-sm" href="https://github.com/Greatman62k/remboai/blob/main/docs/TELEGRAM.md">Telegram setup</a>
       </div>
     </nav>
   </div>
@@ -44,8 +43,8 @@
   <section class="page-hero">
     <div class="wrap reveal">
       <p class="section-kicker">Setup guide</p>
-      <h1>Register by chatting. Take bookings today.</h1>
-      <p>No forms, no portals, no computer needed. Registration and bookings are live on Telegram today. WhatsApp will be available after Meta completes business verification.</p>
+      <h1>Register a salon through a configured bot.</h1>
+      <p>Once an operator has deployed RemboAI and connected a Telegram bot, an owner can register by chat. This guide describes the code path; it does not indicate that a hosted bot is currently available. The WhatsApp adapter also requires an eligible, configured WhatsApp Business account.</p>
     </div>
   </section>
 
@@ -53,7 +52,7 @@
     <div class="wrap">
       <div class="guide-step reveal">
         <h2>1. Start registration</h2>
-        <p>Open the bot and send <b>/start register</b>, or simply write what you want: "I want to register my barbershop" or "Nataka kusajili kinyozi changu". Either one starts the same walkthrough.</p>
+        <p>In the Telegram bot connected to your RemboAI instance, send <b>/start register</b>, or write what you want: "I want to register my barbershop" or "Nataka kusajili kinyozi changu". Either one starts the registration walkthrough.</p>
         <p class="sample"><b>You:</b> Nataka kusajili kinyozi changu<br><b>RemboAI:</b> Karibu! Jina la kinyozi chako ni lipi?</p>
       </div>
       <div class="guide-step reveal">
@@ -62,18 +61,18 @@
       </div>
       <div class="guide-step reveal">
         <h2>3. Send your services and prices</h2>
-        <p>Type your services and prices, send them as a voice note, or photograph your price board and type the list alongside it. For example: "Fade 500, Cut 300, Beard trim 250." Then confirm the list and set how long each service takes.</p>
+        <p>Type your services and prices, for example: "Fade 500, Cut 300, Beard trim 250." If a speech endpoint is configured, supported voice notes can be transcribed. Price-board photos are not treated as authoritative service lists; review and enter the text yourself, then set how long each service takes.</p>
         <p class="sample"><b>You:</b> [Voice note] "Fade mia tano, cut mia tatu, beard trim mia mbili hamsini"<br><b>RemboAI:</b> Nimepata: Fade 500, Cut 300, Beard trim 250. Ni sawa?</p>
       </div>
       <div class="guide-step reveal">
-        <h2>4. Set your hours and go live</h2>
-        <p>Give your opening hours and deposit. If you charge a deposit, choose a seven-digit M-PESA till or a phone number and identify it as Pochi la Biashara, direct M-PESA Send Money, or Airtel Money. For a phone route, provide the number where your shop receives those payments; no separate owner contact number is needed. Review everything and confirm. Your shop then goes live with its own invite link. Example only: <code>t.me/Remboai1_bot?start=your-shop</code>; the real link uses your shop's slug.</p>
+        <h2>4. Set your hours and confirm</h2>
+        <p>Give your opening hours and deposit policy. If you use manual deposits, choose a seven-digit M-PESA till or a phone destination identified as Pochi la Biashara, direct M-PESA Send Money, or Airtel Money. For a phone route, provide the number where your shop receives those payments. The owner must verify manual payment claims before confirming them. After registration is confirmed, the bot returns an invite link for the shop.</p>
       </div>
       <div class="guide-step reveal">
-        <h2>5. Share the link, take bookings</h2>
-        <p>Share your Telegram invite link in your WhatsApp status, your bio, and on a small printed card at the mirror. Today it opens your shop in Telegram; WhatsApp support will follow after Meta completes business verification. Registration attempts are limited to a few per person per day, so a stranger cannot flood the diary with fake shops.</p>
+        <h2>5. Share the link with customers</h2>
+        <p>In a running Telegram deployment, customers who open the invite link are routed to the registered shop. WhatsApp operation depends on the deployment's Meta business verification, credentials, webhook configuration, and any required approved message templates.</p>
         <div class="btn-row">
-          <a class="btn btn-tg" href="https://t.me/Remboai1_bot">Start on Telegram</a>
+          <a class="btn btn-tg" href="https://github.com/Greatman62k/remboai/blob/main/docs/TELEGRAM.md">Read Telegram setup</a>
         </div>
       </div>
     </div>
@@ -105,18 +104,11 @@
           <li><a href="pricing.html">Pricing</a></li>
           <li><a href="setup.html">Setup guide</a></li>
           <li><a href="https://github.com/Greatman62k/remboai" target="_blank" rel="noopener noreferrer">Code</a></li>
-          <li></li>
-        </ul>
-      </div>
-      <div>
-        <h3>Talk to us</h3>
-        <ul>
-          <li><a href="https://t.me/Remboai1_bot">Telegram bot</a></li>
         </ul>
       </div>
     </div>
     <div class="footer-base">
-      <span>© <span id="year">2026</span> RemboAI. Nairobi, Kenya.</span>
+      <span>© <span id="year">2026</span> RemboAI.</span>
       <span>Made for the chairs that never sit empty.</span>
     </div>
   </div>
