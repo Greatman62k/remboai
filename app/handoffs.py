@@ -117,6 +117,30 @@ async def get_glance_handoff_context(pool, salon_id: str, handoff_id: str,
             return result
 
 
+async def get_glance_handoff_status(pool, salon_id: str, handoff_id: str,
+                                    owner_identity: str) -> dict | None:
+    """Fetch the small version/reply projection used for Glance polling.
+
+    Case time comes from the latest event that mutates the case version. Outbox
+    state transitions have their own timestamp and do not alter this value.
+    """
+    async with pool.acquire() as con:
+        async with con.transaction():
+            await _verified_owner(con, salon_id, owner_identity)
+            row = await con.fetchrow(
+                "SELECT h.id::text,h.status,h.version, "
+                "COALESCE((SELECT e.created_at FROM handoff_events e "
+                "WHERE e.handoff_id=h.id AND e.salon_id=h.salon_id "
+                "AND e.event_type IN ('customer_message','approved_reply','case_resolved') "
+                "ORDER BY e.sequence DESC LIMIT 1),h.created_at) AS case_updated_at, "
+                "(SELECT jsonb_build_object('reply_id',o.id::text,'state',o.state,'updated_at',o.updated_at) "
+                "FROM outbound_outbox o WHERE o.handoff_id=h.id AND o.salon_id=h.salon_id "
+                "ORDER BY o.created_at DESC,o.id DESC LIMIT 1) AS latest_reply "
+                "FROM handoffs h WHERE h.id=$1::uuid AND h.salon_id=$2::uuid",
+                handoff_id, salon_id)
+            return dict(row) if row else None
+
+
 async def _next_event(con, case: dict, *, event_type: str, actor_type: str, visibility: str,
                       body: str | None = None, channel: str | None = None,
                       provider_message_id: str | None = None, related_event_id: str | None = None,

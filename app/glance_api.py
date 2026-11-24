@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -532,6 +533,33 @@ async def get_case(case_id: str, request: Request,
         "latest_reply": latest_reply,
         "has_earlier": has_earlier,
         "context": context,
+    }}
+
+
+@router.get("/cases/{case_id}/status")
+async def get_case_status(case_id: str, request: Request,
+                          session: glance_sessions.GlanceSession = Depends(require_session)):
+    canonical_id = _canonical_uuid(case_id)
+    try:
+        case = await handoffs.get_glance_handoff_status(
+            request.app.state.pool, session.salon_id, canonical_id, session.owner_identity)
+    except PermissionError:
+        raise glance_sessions.GlanceAuthError("owner_not_authorized", 403, "Owner no longer controls this salon")
+    if case is None:
+        raise GlanceAPIError("case_not_found", 404, "Case not found.")
+    latest = case.get("latest_reply")
+    if isinstance(latest, str):
+        latest = json.loads(latest)
+    return {"data": {
+        "case_id": case["id"],
+        "status": case["status"],
+        "version": int(case["version"]),
+        "latest_reply": ({
+            "reply_id": latest["reply_id"],
+            "state": latest["state"],
+            "updated_at": utc_timestamp(latest["updated_at"]),
+        } if latest else None),
+        "case_updated_at": utc_timestamp(case["case_updated_at"]),
     }}
 
 

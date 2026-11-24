@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import re
+import uuid
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -395,6 +396,99 @@ async def test_case_context_uses_eleven_visible_event_lookahead_and_redacts_cont
         response = await client.get(PREFIX + f"/cases/{second['id']}", headers=headers)
         assert response.json()["data"]["has_earlier"] is False
         assert len(response.json()["data"]["context"]) == 10
+        await client.aclose()
+    finally:
+        await pool.close()
+
+
+@needs_db
+@pytest.mark.asyncio
+async def test_case_status_is_lightweight_versioned_tenant_scoped_and_reports_latest_reply():
+    pool, _, salon_id, settings = await _built()
+    try:
+        case = await _make_case(pool, salon_id, "tg:800000031", "Synthetic status context", "Amina")
+        other_salon = await pool.fetchval(
+            "INSERT INTO salons (name,wa_phone_number_id,owner_wa_id) "
+            "VALUES ('Status Tenant','PID-STATUS-OTHER','tg:700000099') RETURNING id::text")
+        other_case = await _make_case(pool, other_salon, "tg:800000032", "Other salon context", "Other")
+        _, paired = await _paired(pool, settings, salon_id)
+        client = await _client()
+        headers = {"Authorization": f"Bearer {paired['access_token']}"}
+
+        unauthenticated = await client.get(PREFIX + f"/cases/{case['id']}/status")
+        assert unauthenticated.status_code == 401
+        first = await client.get(PREFIX + f"/cases/{case['id']}/status", headers=headers)
+        first_data = first.json()["data"]
+        assert first.status_code == 200
+        assert set(first_data) == {"case_id", "status", "version", "latest_reply", "case_updated_at"}
+        assert first_data["case_id"] == case["id"] and first_data["version"] == 1
+        assert first_data["status"] == "open" and first_data["latest_reply"] is None
+        assert first_data["case_updated_at"].endswith("Z")
+        assert "context" not in first_data and "customer_label" not in first_data
+        assert first.headers["cache-control"] == "no-store"
+        assert first.headers["x-request-id"].startswith("req_")
+
+        await record_customer_message(pool, salon_id, "tg:800000031", "A new synthetic message", "status-new-message")
+        bumped = await client.get(PREFIX + f"/cases/{case['id']}/status", headers=headers)
+        assert bumped.json()["data"]["version"] == 2
+
+        manual = await client.post(PREFIX + f"/cases/{case['id']}/drafts/manual",
+                                   json={"expected_version": 2, "text": "The owner will confirm shortly."},
+                                   headers=headers | {"Idempotency-Key": str(uuid.uuid4())})
+        assert manual.status_code == 201
+        approval = await client.post(PREFIX + f"/cases/{case['id']}/replies",
+                                     json={"expected_version": 2, "draft_id": manual.json()["data"]["draft_id"],
+                                           "text": "The owner will confirm shortly."},
+                                     headers=headers | {"Idempotency-Key": str(uuid.uuid4())})
+        assert approval.status_code == 202
+        queued = await client.get(PREFIX + f"/cases/{case['id']}/status", headers=headers)
+        queued_data = queued.json()["data"]
+        assert queued_data["version"] == 3
+        assert queued_data["latest_reply"]["reply_id"] == approval.json()["data"]["reply_id"]
+        assert queued_data["latest_reply"]["state"] == "queued"
+        assert set(queued_data["latest_reply"]) == {"reply_id", "state", "updated_at"}
+        assert queued_data["case_updated_at"] >= bumped.json()["data"]["case_updated_at"]
+
+        # Outbox state timestamps can advance without changing the case version/time.
+        await pool.execute("UPDATE outbound_outbox SET updated_at=updated_at+interval '1 second' WHERE id=$1::uuid",
+                           approval.json()["data"]["reply_id"])
+        outbox_only = await client.get(PREFIX + f"/cases/{case['id']}/status", headers=headers)
+        assert outbox_only.json()["data"]["version"] == queued_data["version"]
+        assert outbox_only.json()["data"]["case_updated_at"] == queued_data["case_updated_at"]
+        assert outbox_only.json()["data"]["latest_reply"]["updated_at"] != queued_data["latest_reply"]["updated_at"]
+
+        foreign = await client.get(PREFIX + f"/cases/{other_case['id']}/status", headers=headers)
+        missing = await client.get(PREFIX + "/cases/00000000-0000-4000-8000-000000000001/status", headers=headers)
+        assert foreign.status_code == missing.status_code == 404
+        assert foreign.json()["error"] == missing.json()["error"]
+        assert foreign.json()["error"]["code"] == "case_not_found"
+        await client.aclose()
+    finally:
+        await pool.close()
+
+
+@needs_db
+@pytest.mark.asyncio
+async def test_case_status_uses_existing_per_session_read_quota():
+    pool, _, salon_id, settings = await _built(glance_read_limit_per_minute=90)
+    try:
+        case = await _make_case(pool, salon_id, "tg:800000033", "Synthetic rate limit case", "Nia")
+        _, paired = await _paired(pool, settings, salon_id)
+        from app.glance_sessions import GlanceSession, check_read_quota
+        row = await pool.fetchrow(
+            "SELECT gs.id::text,gs.salon_id::text,gs.owner_identity,gs.device_label,s.name AS salon_name,"
+            "gs.expires_at,gs.created_at,gs.last_used_at,gs.revoked_at "
+            "FROM glance_sessions gs JOIN salons s ON s.id=gs.salon_id WHERE gs.token_hash=$1",
+            hashlib.sha256(paired["access_token"].encode()).digest())
+        session = GlanceSession(**dict(row))
+        for _ in range(90):
+            await check_read_quota(pool, settings, session)
+        client = await _client()
+        headers = {"Authorization": f"Bearer {paired['access_token']}"}
+        limited = await client.get(PREFIX + f"/cases/{case['id']}/status", headers=headers)
+        assert limited.status_code == 429
+        assert limited.json()["error"]["code"] == "rate_limited"
+        assert int(limited.headers["retry-after"]) >= 1
         await client.aclose()
     finally:
         await pool.close()
