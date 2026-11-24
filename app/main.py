@@ -8,7 +8,7 @@ from uuid import UUID
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from . import hardening, logs
@@ -262,6 +262,36 @@ async def model_info(request: Request, x_ops_key: str | None = Header(default=No
             "fallback_endpoint": safe_chat_endpoint(s.llm_fallback_base_url) if s.llm_fallback_base_url else None,
             "quantization": getattr(s, "llm_quantization", "") or None, "host": getattr(s, "llm_host", "") or None,
             "agent_mode": getattr(s, "agent_mode", "off"), "agent_protocol": getattr(s, "agent_protocol", "auto")}
+
+
+@app.post("/ops/asr/warmup")
+async def asr_warmup(request: Request, x_ops_key: str | None = Header(default=None)):
+    """Protected ASR health probe to let operators start a cold worker without customer audio."""
+    ctx = request.app.state.ctx
+    await _check_ops_key(ctx, x_ops_key, request)
+    voice = getattr(ctx, "voice", None)
+    if voice is None or not getattr(voice, "enabled", False):
+        return JSONResponse({"status": "disabled"}, status_code=503,
+                            headers={"Cache-Control": "no-store"})
+    started = asyncio.get_running_loop().time()
+    try:
+        response = await voice.http.get(
+            ctx.settings.asr_url.rsplit("/", 1)[0] + "/health",
+            headers=voice.auth_headers,
+            timeout=ctx.settings.asr_timeout_s,
+        )
+        response.raise_for_status()
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        duration_ms = int((asyncio.get_running_loop().time() - started) * 1000)
+        log.warning("protected ASR warmup unavailable duration_ms=%d error=%s",
+                    duration_ms, exc.__class__.__name__)
+        return JSONResponse({"status": "unavailable", "duration_ms": duration_ms}, status_code=503,
+                            headers={"Cache-Control": "no-store"})
+    duration_ms = int((asyncio.get_running_loop().time() - started) * 1000)
+    return JSONResponse({"status": "ready", "duration_ms": duration_ms},
+                        headers={"Cache-Control": "no-store"})
 
 @app.get("/ready")
 async def ready(request: Request):

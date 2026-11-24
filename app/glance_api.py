@@ -1,8 +1,10 @@
 """Small authenticated HTTP boundary for the Day 1 Glance vertical slice."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+import time
 import unicodedata
 from datetime import datetime, timezone
 from uuid import UUID
@@ -13,12 +15,16 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.requests import ClientDisconnect
 
 from . import glance_sessions, glance_workflows, handoff_drafts, handoff_outbox, handoffs
+from .ai.audio import MAX_PCM_BYTES, wrap_pcm_s16le_mono_16khz
+from .ai.voice import MAX_TEXT
 from .hardening import client_ip
 
 log = logging.getLogger("rembo.glance")
 PREFIX = "/api/v1/glance"
+TRANSCRIPTION_TIMEOUT_SECONDS = 15.0
 _BIDI = {"\u061c", "\u200e", "\u200f", "\u202a", "\u202b", "\u202c", "\u202d", "\u202e",
          "\u2066", "\u2067", "\u2068", "\u2069"}
 _PHONE_LIKE = re.compile(r"(?<!\w)\+?\d[\d ().-]{7,}\d(?!\w)")
@@ -276,6 +282,40 @@ async def require_session(request: Request) -> glance_sessions.GlanceSession:
     return session
 
 
+async def _read_transcription_pcm(request: Request) -> bytearray:
+    content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type != "application/octet-stream":
+        raise GlanceAPIError("invalid_content_type", 415, "Audio must use application/octet-stream.")
+
+    content_lengths = [value for name, value in request.scope.get("headers", []) if name.lower() == b"content-length"]
+    if len(content_lengths) > 1 or (content_lengths and not content_lengths[0].isdigit()):
+        raise GlanceAPIError("invalid_audio", 422, "The audio request is malformed.")
+    declared_length = int(content_lengths[0]) if content_lengths else None
+    if declared_length is not None and declared_length > MAX_PCM_BYTES:
+        raise GlanceAPIError("audio_too_large", 413, "Audio exceeds the maximum supported size.")
+
+    content_encoding = request.headers.get("content-encoding", "identity").strip().lower()
+    if content_encoding not in {"", "identity"}:
+        raise GlanceAPIError("invalid_audio", 422, "The audio request is malformed.")
+
+    pcm = bytearray()
+    try:
+        async for chunk in request.stream():
+            if len(pcm) + len(chunk) > MAX_PCM_BYTES:
+                raise GlanceAPIError("audio_too_large", 413, "Audio exceeds the maximum supported size.")
+            pcm.extend(chunk)
+    except ClientDisconnect:
+        raise GlanceAPIError("invalid_audio", 422, "The audio request is incomplete.")
+
+    if declared_length is not None and len(pcm) != declared_length:
+        raise GlanceAPIError("invalid_audio", 422, "The audio request length does not match its content.")
+    if not pcm:
+        raise GlanceAPIError("empty_audio", 400, "Audio is empty.")
+    if len(pcm) % 2:
+        raise GlanceAPIError("invalid_audio", 422, "Audio must contain complete 16-bit PCM samples.")
+    return pcm
+
+
 def _canonical_uuid(value: str, code: str = "case_not_found") -> str:
     try:
         return str(UUID(value))
@@ -377,6 +417,60 @@ async def delete_current_session(request: Request):
         request.app.state.pool, request.app.state.settings, parts[1], allow_revoked=True)
     await glance_sessions.revoke_current_session(request.app.state.pool, session.id)
     return Response(status_code=204)
+
+
+@router.post("/transcriptions")
+async def transcribe_audio(request: Request,
+                           session: glance_sessions.GlanceSession = Depends(require_session)):
+    started = time.perf_counter()
+    await glance_sessions.check_transcription_quota(
+        request.app.state.pool, request.app.state.settings, session)
+
+    content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type != "application/octet-stream":
+        raise GlanceAPIError("invalid_content_type", 415, "Audio must use application/octet-stream.")
+
+    voice = getattr(request.app.state.ctx, "voice", None)
+    try:
+        enabled = bool(voice is not None and voice.enabled)
+    except Exception as exc:
+        log.warning("glance transcription unavailable request_id=%s error=%s",
+                    getattr(request.state, "glance_request_id", "req_unavailable"), exc.__class__.__name__)
+        raise GlanceAPIError("transcription_unavailable", 503, "Transcription is temporarily unavailable.")
+    if not enabled:
+        raise GlanceAPIError("transcription_disabled", 503, "Transcription is not enabled.")
+
+    pcm = await _read_transcription_pcm(request)
+    try:
+        wav_audio = wrap_pcm_s16le_mono_16khz(pcm)
+    except (TypeError, ValueError):
+        raise GlanceAPIError("invalid_audio", 422, "Audio is not valid 16-bit PCM.")
+
+    request_id = getattr(request.state, "glance_request_id", "req_unavailable")
+    try:
+        async with asyncio.timeout(TRANSCRIPTION_TIMEOUT_SECONDS):
+            result = await voice.transcribe(wav_audio, "audio/wav", None, salon_id=session.salon_id)
+    except TimeoutError:
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        log.warning("glance transcription timed out request_id=%s bytes=%d duration_ms=%d",
+                    request_id, len(pcm), elapsed_ms)
+        raise GlanceAPIError("transcription_timeout", 504, "Transcription took too long. Try a shorter recording.")
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        log.warning("glance transcription unavailable request_id=%s bytes=%d duration_ms=%d error=%s",
+                    request_id, len(pcm), elapsed_ms, exc.__class__.__name__)
+        raise GlanceAPIError("transcription_unavailable", 503, "Transcription is temporarily unavailable.")
+
+    if result is None:
+        raise GlanceAPIError("transcription_unavailable", 503, "Transcription is temporarily unavailable.")
+    transcript = " ".join(str(getattr(result, "text", "") or "").split())[:MAX_TEXT]
+    if not transcript:
+        raise GlanceAPIError("empty_transcript", 422, "No speech was detected.")
+
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    return {"data": {"transcript": transcript, "duration_ms": duration_ms}}
 
 
 @router.get("/inbox")

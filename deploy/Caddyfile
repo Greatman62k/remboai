@@ -1,46 +1,79 @@
 {
-    servers {
-        max_header_size 8KiB
-        timeouts {
-            read_header 5s
-            read_body 15s
-            read_body_idle 5s 1024
-            write 30s
-            write_idle 10s 1024
-            idle 30s
-        }
-    }
+	servers {
+		max_header_size 8KiB
+		timeouts {
+			read_header 5s
+			read_body 15s
+			read_body_idle 5s 1024
+			write 30s
+			write_idle 10s 1024
+			idle 30s
+		}
+	}
 }
 
 {$DOMAIN} {
-    # The M-Pesa callback secret travels in the URL: never write those requests to the access log.
-    log_skip /mpesa/callback/*
-    encode gzip
-    header {
-        Strict-Transport-Security "max-age=31536000"
-        X-Content-Type-Options "nosniff"
-        Referrer-Policy "no-referrer"
-        -Server
-    }
-    request_body {
-        max_size 256KiB
-    }
-    # The Glance API is enabled only on an explicitly isolated staging app. The
-    # production compose file pins GLANCE_ENABLED=false, so this route returns 404 there.
-    @app path /health /ready /webhook /telegram/webhook /mpesa/callback/* /ops/* /metrics /model-info /api/v1/glance /api/v1/glance/*
-    handle @app {
-        reverse_proxy app:8080 {
-            transport http {
-                dial_timeout 2s
-                response_header_timeout 20s
-                max_conns_per_host 48
-                keepalive_idle_conns_per_host 16
-            }
-        }
-    }
-    handle {
-        root * /srv/site
-        try_files {path} {path}.html /index.html
-        file_server
-    }
+	# The M-Pesa callback secret travels in the URL: never write those requests to the access log.
+	log_skip /mpesa/callback/*
+	encode gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+	# The Glance API is enabled only on an explicitly isolated staging app. The
+	# production compose file pins GLANCE_ENABLED=false, so this route returns 404 there.
+	@app path /health /ready /webhook /telegram/webhook /mpesa/callback/* /ops/* /metrics /model-info /api/v1/glance /api/v1/glance/*
+	@glance_transcription {
+		method POST
+		path /api/v1/glance/transcriptions
+	}
+	handle @glance_transcription {
+		# Exactly 1,280,000 raw PCM bytes (40 seconds at 16 kHz mono S16LE).
+		request_body {
+			max_size 1250KiB
+		}
+		reverse_proxy app:8080 {
+			transport http {
+				dial_timeout 2s
+				response_header_timeout 20s
+				max_conns_per_host 48
+				keepalive_idle_conns_per_host 16
+			}
+		}
+	}
+	handle @app {
+		request_body {
+			max_size 256KiB
+		}
+		reverse_proxy app:8080 {
+			transport http {
+				dial_timeout 2s
+				response_header_timeout 20s
+				max_conns_per_host 48
+				keepalive_idle_conns_per_host 16
+			}
+		}
+	}
+	handle {
+		request_body {
+			max_size 256KiB
+		}
+		root * /srv/site
+		try_files {path} {path}.html /index.html
+		file_server
+	}
+	handle_errors 413 {
+		@glance_transcription_too_large {
+			method POST
+			path /api/v1/glance/transcriptions
+		}
+		handle @glance_transcription_too_large {
+			header Cache-Control "no-store"
+			header Content-Type "application/json"
+			header X-Request-ID "{err.id}"
+			respond `{"error":{"code":"audio_too_large","message":"Audio exceeds the maximum supported size."},"request_id":"{err.id}"}` 413
+		}
+	}
 }

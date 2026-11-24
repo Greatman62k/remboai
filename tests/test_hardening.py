@@ -182,6 +182,33 @@ def test_body_limit_streamed():
     assert r.status_code == 413
 
 
+def test_body_limit_exception_is_only_post_transcription_route():
+    app = FastAPI()
+
+    @app.post("/api/v1/glance/transcriptions")
+    async def transcriptions(request: Request):
+        total = 0
+        async for chunk in request.stream():
+            total += len(chunk)
+        return PlainTextResponse(str(total))
+
+    @app.post("/ordinary")
+    async def ordinary(request: Request):
+        total = 0
+        async for chunk in request.stream():
+            total += len(chunk)
+        return PlainTextResponse(str(total))
+
+    app.add_middleware(BodyLimit, max_bytes=256 * 1024)
+    c = TestClient(app)
+    payload = b"a" * 300_000
+    accepted = c.post("/api/v1/glance/transcriptions", content=payload)
+    assert accepted.status_code == 200
+    assert accepted.text == str(len(payload))
+    assert c.post("/ordinary", content=payload).status_code == 413
+    assert c.put("/api/v1/glance/transcriptions", content=payload).status_code == 413
+
+
 def test_ingress_local_fallback():
     from app import hardening as h
     h._INGRESS_LOCAL.clear()

@@ -106,6 +106,7 @@ class Settings(BaseSettings):
     glance_pairing_generation_limit: int = 5
     glance_read_limit_per_minute: int = 120
     glance_write_limit_per_minute: int = 20
+    glance_transcription_limit_per_minute: int = 6
     glance_cors_origins: str = ""
     glance_cors_wildcard_bearer: bool = False
 

@@ -6,6 +6,8 @@ import logging
 import re
 import time
 
+from .ai.audio import MAX_PCM_BYTES
+
 log = logging.getLogger("rembo.hardening")
 
 
@@ -143,6 +145,9 @@ class IngressRateLimit:
 
 
 class BodyLimit:
+    GLANCE_TRANSCRIPTION_PATH = "/api/v1/glance/transcriptions"
+    GLANCE_TRANSCRIPTION_MAX_BYTES = MAX_PCM_BYTES
+
     def __init__(self, app, max_bytes: int = 256 * 1024):
         self.app = app
         self.max_bytes = max_bytes
@@ -151,11 +156,21 @@ class BodyLimit:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        length = next((v for k, v in scope.get("headers", []) if k.lower() == b"content-length"), None)
+        transcription = (scope.get("method", "").upper() == "POST" and
+                         scope.get("path") == self.GLANCE_TRANSCRIPTION_PATH)
+        max_bytes = self.GLANCE_TRANSCRIPTION_MAX_BYTES if transcription else self.max_bytes
+        lengths = [v for k, v in scope.get("headers", []) if k.lower() == b"content-length"]
+        if transcription and (len(lengths) > 1 or (lengths and not lengths[0].isdigit())):
+            await self._reject(send, scope, status=422, code="invalid_audio",
+                               message="The audio request is malformed.")
+            return
+        length = lengths[0] if lengths else None
         if length is not None:
             try:
-                if int(length) > self.max_bytes:
-                    await self._reject(send)
+                if int(length) > max_bytes:
+                    await self._reject(send, scope, status=413,
+                                       code="audio_too_large" if transcription else None,
+                                       message="Audio exceeds the maximum supported size." if transcription else None)
                     return
             except ValueError:
                 pass
@@ -167,10 +182,12 @@ class BodyLimit:
             msg = await receive()
             if msg["type"] == "http.request":
                 seen += len(msg.get("body", b""))
-                if seen > self.max_bytes:
+                if seen > max_bytes:
                     if not started and not rejected:
                         rejected = True
-                        await self._reject(send)
+                        await self._reject(send, scope, status=413,
+                                           code="audio_too_large" if transcription else None,
+                                           message="Audio exceeds the maximum supported size." if transcription else None)
                     return {"type": "http.disconnect"}
             return msg
         async def tracked_send(msg):
@@ -187,9 +204,22 @@ class BodyLimit:
                 raise
 
     @staticmethod
-    async def _reject(send) -> None:
-        await send({"type": "http.response.start", "status": 413, "headers": [(b"content-type", b"text/plain"), (b"connection", b"close")]})
-        await send({"type": "http.response.body", "body": b"payload too large"})
+    async def _reject(send, scope, *, status: int = 413,
+                      code: str | None = None, message: str | None = None) -> None:
+        if code is None:
+            headers = [(b"content-type", b"text/plain"), (b"connection", b"close")]
+            body = b"payload too large"
+        else:
+            import json
+            request_id = scope.get("state", {}).get("glance_request_id", "req_unavailable")
+            body = json.dumps({"error": {"code": code, "message": message},
+                               "request_id": request_id}, separators=(",", ":")).encode()
+            headers = [(b"content-type", b"application/json"),
+                       (b"content-length", str(len(body)).encode()),
+                       (b"cache-control", b"no-store"),
+                       (b"x-request-id", request_id.encode()), (b"connection", b"close")]
+        await send({"type": "http.response.start", "status": status, "headers": headers})
+        await send({"type": "http.response.body", "body": body})
 
 _PHONE = re.compile(r"(?<![\d])(\+?)(\d{10,13})(?!\d)")
 _SENSITIVE_QUERY = re.compile(r"([?&](?:access_token|token|api[_-]?key|client_secret|password|passkey|secret|key)=)([^&\s\"']+)", re.I)

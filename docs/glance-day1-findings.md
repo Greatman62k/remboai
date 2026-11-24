@@ -43,3 +43,12 @@ The v6 workflow is authoritative for the Glance API. These findings record the i
 - `migrations/045_handoff_outbox.sql`: creates tenant-bound outbound audit/state, provider snapshot, and salon-scoped idempotency uniqueness.
 - `migrations/046_handoff_drafts.sql`: creates tenant-bound drafts with 700-character bodies, mandatory model IDs and draft-to-outbox FK/unique constraints.
 - **Conclusion:** the Day 1 routes call the existing inbox service and a Glance-specific filtered context service. No draft, approval, outbox, resolution or transcription endpoints were added.
+
+## Day 3 — Authenticated audio transcription
+
+- `POST /api/v1/glance/transcriptions` accepts raw `application/octet-stream` S16LE mono PCM at 16 kHz, authenticates and revalidates the existing Glance session, applies a dedicated per-session quota, wraps the bounded payload with `wrap_pcm_s16le_mono_16khz()`, then calls the existing `Transcriber` with `audio/wav`, `lang=None` and the authenticated salon ID.
+- The Glance request cancels the async inference coroutine at a 15-second deadline. The general RemboAI ASR client timeout remains unchanged. A provider timeout/failure hidden by `Transcriber`'s existing `None` result maps to the stable `transcription_unavailable` response; the API does not guess which internal cause occurred.
+- `GLANCE_TRANSCRIPTION_LIMIT_PER_MINUTE` defaults to 6 and uses the existing HMAC-scoped `glance_rate_limits` table. Migration 049 only extends that table's allowed scope; no second quota store is introduced.
+- The app and Caddy keep their 256 KiB limits for other routes. Only `POST /api/v1/glance/transcriptions` accepts at most 1,280,000 raw bytes; both layers reject bodies incrementally without using `Content-Length` as the sole check.
+- `/ops/asr/warmup` is protected by the existing `X-Ops-Key` check. It calls only the ASR service health endpoint (no customer or synthetic audio); this can start a cold ASR worker but does not prove end-to-end audio transcription. Confirm actual speech transcription with a synthetic fixture in isolated staging before claiming provider or WebView acceptance.
+- Audio and transcript values are not persisted or logged. Automated API tests mock `Transcriber`; no Modal request is made by tests.

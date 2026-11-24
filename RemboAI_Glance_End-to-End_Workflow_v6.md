@@ -1069,11 +1069,13 @@ Response:
 ```json
 {
   "data": {
-    "text": "Can you ask the owner whether walk-ins are still available today?",
+    "transcript": "Can you ask the owner whether walk-ins are still available today?",
     "duration_ms": 4200
   }
 }
 ```
+
+**Contract reconciliation (Day 3.1, 24 Nov 2026):** `data.transcript` is the canonical success field for this endpoint. Keep API schemas and examples aligned with this field.
 
 Constraints:
 

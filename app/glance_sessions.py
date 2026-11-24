@@ -125,6 +125,7 @@ def validate_security_settings(settings) -> tuple[dict[int, bytes], int, int]:
     if read_limit < 90:
         raise GlanceAuthError("security_configuration", 503, "Glance security configuration is unavailable")
     _positive(settings, "glance_write_limit_per_minute", 20)
+    _positive(settings, "glance_transcription_limit_per_minute", 6)
     for name, default in (
         ("glance_exchange_window_seconds", 900),
         ("glance_exchange_source_limit", 12),
@@ -354,6 +355,19 @@ async def check_write_quota(pool, settings, session: GlanceSession) -> None:
             count, started = await _increment(con, "write_session", subject, 60)
     if count > limit:
         raise GlanceAuthError("rate_limited", 429, "Draft request limit reached", _retry_after(started, 60))
+
+
+async def check_transcription_quota(pool, settings, session: GlanceSession) -> None:
+    """Bound expensive Glance ASR calls independently for each authenticated session."""
+    keys, active, _ = validate_security_settings(settings)
+    limit = _positive(settings, "glance_transcription_limit_per_minute", 6)
+    subject = _subject_hash(keys[active], "transcription_session", session.id)
+    async with pool.acquire() as con:
+        async with con.transaction():
+            count, started = await _increment(con, "transcription_session", subject, 60)
+    if count > limit:
+        raise GlanceAuthError("rate_limited", 429, "Transcription request limit reached",
+                              _retry_after(started, 60))
 
 
 async def list_owner_sessions(pool, owner_identity: str, bot_id: str) -> list[dict]:
