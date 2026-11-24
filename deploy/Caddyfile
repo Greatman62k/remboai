@@ -34,12 +34,19 @@
 		request_body {
 			max_size 1250KiB
 		}
-		reverse_proxy app:8080 {
-			transport http {
-				dial_timeout 2s
-				response_header_timeout 20s
-				max_conns_per_host 48
-				keepalive_idle_conns_per_host 16
+		# Read the bounded binary body before proxying so an over-limit chunked
+		# request cannot be turned into a reverse-proxy 502 while streaming. The
+		# body_base64 placeholder forces a bounded read and restores the original
+		# bytes for the upstream; it is not logged or sent as a header.
+		@bounded_pcm vars_regexp {http.request.body_base64} .*
+		handle @bounded_pcm {
+			reverse_proxy app:8080 {
+				transport http {
+					dial_timeout 2s
+					response_header_timeout 20s
+					max_conns_per_host 48
+					keepalive_idle_conns_per_host 16
+				}
 			}
 		}
 	}
