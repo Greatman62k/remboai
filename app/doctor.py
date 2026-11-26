@@ -5,6 +5,7 @@ from __future__ import annotations
 import time as clock
 from dataclasses import dataclass
 from datetime import datetime
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -32,12 +33,149 @@ def _platform_identity_overlaps(settings, salons: list[dict]) -> tuple[set[str],
     return ids, overlap
 
 
+_GLANCE_MIGRATIONS = (
+    "047_glance_pairing_sessions.sql",
+    "048_glance_day2_workflow.sql",
+    "049_glance_transcription_quota.sql",
+)
+
+
+def _exact_origins(raw: str) -> list[str] | None:
+    origins = [item.strip() for item in (raw or "").split(",") if item.strip()]
+    if not origins or "*" in origins:
+        return None
+    for origin in origins:
+        try:
+            parsed = urlsplit(origin)
+            # An Origin header is only scheme + authority: no path, credentials,
+            # query or fragment. Compare with the original string because CORS
+            # matching is exact and the pairing exchange returns a bearer token.
+            if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+                    or parsed.username is not None or parsed.password is not None
+                    or parsed.path or parsed.query or parsed.fragment
+                    or origin != f"{parsed.scheme}://{parsed.netloc}"):
+                return None
+            _ = parsed.port  # Validate malformed ports without exposing values.
+        except ValueError:
+            return None
+    return origins
+
+
+async def _glance_checks(s, http: httpx.AsyncClient, pool) -> list[Check]:
+    """Check Glance security, migration state, public routing and CORS without credentials."""
+    checks: list[Check] = []
+    enabled = bool(getattr(s, "glance_enabled", False))
+    if not enabled:
+        checks.append(Check("Glance configuration", True, "disabled (GLANCE_ENABLED=false)", warn=True))
+    else:
+        try:
+            from .glance_sessions import validate_security_settings
+
+            validate_security_settings(s)
+            origins = _exact_origins(getattr(s, "glance_cors_origins", ""))
+            if origins is None:
+                checks.append(Check(
+                    "Glance configuration", False,
+                    "enabled, but pairing HMAC/session settings or exact CORS origins are invalid",
+                ))
+            else:
+                checks.append(Check(
+                    "Glance configuration", True,
+                    f"enabled; pairing/session settings valid; {len(origins)} exact CORS origin(s)",
+                ))
+        except Exception:  # noqa: BLE001 - Never include secret or parser detail in doctor output.
+            origins = None
+            checks.append(Check(
+                "Glance configuration", False,
+                "enabled, but pairing HMAC/session settings or exact CORS origins are invalid",
+            ))
+
+    try:
+        applied = {row["name"] for row in await pool.fetch(
+            "SELECT name FROM schema_migrations WHERE name=ANY($1::text[])", list(_GLANCE_MIGRATIONS))
+        }
+        scope_constraint = await pool.fetchval(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conrelid='glance_rate_limits'::regclass AND conname='glance_rate_limits_scope_check'"
+        )
+        missing = [name.removesuffix(".sql") for name in _GLANCE_MIGRATIONS if name not in applied]
+        quota_ready = bool(scope_constraint and "transcription_session" in scope_constraint)
+        schema_ok = not missing and quota_ready
+        detail = "migrations 047–049 and transcription quota are present"
+        if missing:
+            detail = "missing migration(s): " + ", ".join(missing)
+        elif not quota_ready:
+            detail = "transcription_session quota scope is missing"
+        checks.append(Check("Glance database", schema_ok, detail, warn=not enabled and not schema_ok))
+    except Exception as e:  # noqa: BLE001
+        checks.append(Check(
+            "Glance database", False,
+            f"could not verify Glance migrations or quota scope ({e.__class__.__name__})",
+            warn=not enabled,
+        ))
+
+    if not enabled or origins is None:
+        return checks
+
+    public_url = (getattr(s, "public_base_url", "") or "").rstrip("/")
+    if not public_url:
+        checks.append(Check("Glance HTTPS API", False, "PUBLIC_BASE_URL is unset; public routing was not checked", warn=True))
+        checks.append(Check("Glance CORS", False, "public CORS preflight was not checked", warn=True))
+        return checks
+
+    origin = origins[0]
+    endpoint = public_url + "/api/v1/glance/inbox"
+    try:
+        preflight = await http.options(endpoint, headers={
+            "Origin": origin,
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "authorization,content-type",
+        }, timeout=8)
+        allow_origin = preflight.headers.get("access-control-allow-origin") == origin
+        allow_methods = {
+            value.strip().upper()
+            for value in (preflight.headers.get("access-control-allow-methods") or "").split(",")
+        }
+        allow_headers = {
+            value.strip().lower()
+            for value in (preflight.headers.get("access-control-allow-headers") or "").split(",")
+        }
+        cors_ok = (
+            preflight.status_code == 204 and allow_origin and "GET" in allow_methods
+            and {"authorization", "content-type"}.issubset(allow_headers)
+        )
+        checks.append(Check(
+            "Glance CORS", cors_ok,
+            "exact-origin preflight accepted" if cors_ok else "public preflight did not allow the configured origin, method, and headers",
+        ))
+    except httpx.HTTPError as e:
+        checks.append(Check("Glance CORS", False, f"public preflight failed ({e.__class__.__name__})"))
+
+    try:
+        response = await http.get(endpoint, params={"limit": 1}, headers={"Origin": origin}, timeout=8)
+        api_ok = (
+            response.status_code == 401
+            and response.headers.get("access-control-allow-origin") == origin
+            and "no-store" in (response.headers.get("cache-control") or "").lower()
+            and bool(response.headers.get("x-request-id"))
+        )
+        checks.append(Check(
+            "Glance HTTPS API", api_ok,
+            "public route is reachable, CORS is present, and unauthenticated access is rejected" if api_ok
+            else f"expected an unauthenticated 401 with no-store and request ID; received HTTP {response.status_code}",
+        ))
+    except httpx.HTTPError as e:
+        checks.append(Check("Glance HTTPS API", False, f"public route check failed ({e.__class__.__name__})"))
+    return checks
+
+
 async def run_checks(s, http: httpx.AsyncClient, pool) -> list[Check]:
     out: list[Check] = []
     add = lambda *a, **k: out.append(Check(*a, **k))  # noqa: E731
 
     missing = [n for n, v in (("LLM_API_KEY", s.llm_api_key), ("DATABASE_URL", getattr(s, "database_url", ""))) if not v]
     add("configuration", not missing, "required values present" if not missing else "missing in .env: " + ", ".join(missing))
+    out.extend(await _glance_checks(s, http, pool))
 
     salons = []
     try:

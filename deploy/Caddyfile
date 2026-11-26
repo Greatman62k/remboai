@@ -22,8 +22,8 @@
 		Referrer-Policy "no-referrer"
 		-Server
 	}
-	# The Glance API is enabled only on an explicitly isolated staging app. The
-	# production compose file pins GLANCE_ENABLED=false, so this route returns 404 there.
+	# The app feature flag controls Glance availability. Production Compose defaults
+	# it off; explicit production configuration is required to opt in.
 	@app path /health /ready /webhook /telegram/webhook /mpesa/callback/* /ops/* /metrics /model-info /api/v1/glance /api/v1/glance/*
 	@glance_transcription {
 		method POST

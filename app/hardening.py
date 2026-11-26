@@ -321,8 +321,8 @@ def startup_checks(settings) -> list[str]:
     for p in problems:
         log.error("SECURITY CONFIG: %s", p)
     if glance_problems:
-        # Glance is explicitly enabled only on an isolated stage. It must not start
-        # partially configured, even when the rest of the application is in sandbox mode.
+        # Explicitly enabled Glance must never start partially configured, including
+        # when the rest of the application is running in sandbox mode.
         raise RuntimeError("refusing to start with insecure Glance configuration: " + "; ".join(glance_problems))
     if problems and mpesa_env != "sandbox":
         raise RuntimeError("refusing to start with insecure production configuration: " + "; ".join(problems))

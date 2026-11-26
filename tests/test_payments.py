@@ -700,6 +700,8 @@ def test_doctor_reports_what_works_and_says_what_to_fix():
             bad_checks = {c.name: c for c in await run_checks(s, http, pool)}
         assert not bad_checks["payment screenshot vision muse-spark-1.3"].ok
         assert checks["M-Pesa"].ok and checks["M-Pesa mode"].warn and checks["model failover"].warn
+        assert checks["Glance configuration"].warn and "disabled" in checks["Glance configuration"].detail
+        assert checks["Glance database"].ok
         await pool.close()
     asyncio.run(run())
 

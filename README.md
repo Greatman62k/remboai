@@ -59,9 +59,9 @@ When a conversation needs a person, RemboAI records a salon-scoped handoff and p
 
 ## RemboAI Glance
 
-The backend implementation is in this repository. Migrations 047 and 048 add pairing/session security and the draft, approval, idempotency, outbox-attribution, and safe-resolution data needed by the Glance workflow. The API is registered under `/api/v1/glance`; pairing codes are generated through Telegram owner interactions, while bearer sessions are validated and salon ownership is rechecked on requests.
+The backend implementation is in this repository. Migrations 047–049 add pairing/session security, draft/approval/idempotency and safe-resolution data, plus transcription rate limiting. The API is registered under `/api/v1/glance`; pairing codes are generated through Telegram owner interactions, while bearer sessions are validated and salon ownership is rechecked on requests.
 
-Production Compose explicitly sets `GLANCE_ENABLED=false`. A separate staging Compose definition, staging configuration example, and synthetic seeder are provided, but this checkout does not have a configured staging host. Packaged Even Hub WebView CORS and the end-to-end HTTPS workflow have not been accepted against a live staging deployment. The frontend is maintained in a separate `remboai-glance` repository and is not bundled here.
+Production Compose defaults to `GLANCE_ENABLED=false` and can opt in through the deployment environment after the pairing HMAC keyring and exact Even Hub WebView origin are configured. The application fails startup if required Glance security settings are missing. A separate staging Compose definition, staging configuration example, and synthetic seeder are provided, but this checkout does not have a configured staging host. Packaged Even Hub WebView CORS and the end-to-end HTTPS workflow have not been accepted against a live staging deployment. The frontend is maintained in a separate `remboai-glance` repository and is not bundled here.
 
 Read [the Day 1 contract findings](docs/glance-day1-findings.md), [Glance display copy](docs/glance.md), [staging and deployment instructions](docs/DEPLOY.md), and the [complete v6 workflow](RemboAI_Glance_End-to-End_Workflow_v6.md). The v6 workflow includes Even Realities project planning and is retained as a current project document; it is not evidence that those deployment or packaged-client checks have passed.
 
@@ -137,7 +137,7 @@ The root [`.env.example`](.env.example) lists application settings. Common varia
 | `MPESA_ENV`, `MPESA_CONSUMER_KEY`, `MPESA_CONSUMER_SECRET`, `MPESA_PASSKEY` | Daraja environment and credentials |
 | `TOKEN_ENCRYPTION_KEY`, `OPS_API_KEY` | Sensitive token encryption and operations access |
 
-Never commit `.env` files or put provider credentials, database URLs, operations keys, or Glance HMAC secrets in the client or static site. `GLANCE_*` settings should remain disabled in production. The staging-only environment template is [`deploy/.env.glance-staging.example`](deploy/.env.glance-staging.example).
+Never commit `.env` files or put provider credentials, database URLs, operations keys, or Glance HMAC secrets in the client or static site. Keep Glance pairing keys and exact CORS origins in the private server environment. The staging-only environment template is [`deploy/.env.glance-staging.example`](deploy/.env.glance-staging.example).
 
 ## Database and migrations
 
@@ -145,7 +145,7 @@ On application startup, [`app/db.py`](app/db.py) acquires a migration lock, appl
 
 ## Deployment and operations
 
-The production stack is defined in [`deploy/docker-compose.prod.yml`](deploy/docker-compose.prod.yml). It runs Caddy, the API, PostgreSQL, and Redis on a private Compose network; only Caddy publishes HTTP and HTTPS. PostgreSQL and Redis are not published to the host. The production Compose configuration forces Glance off regardless of environment-file values.
+The production stack is defined in [`deploy/docker-compose.prod.yml`](deploy/docker-compose.prod.yml). It runs Caddy, the API, PostgreSQL, and Redis on a private Compose network; only Caddy publishes HTTP and HTTPS. PostgreSQL and Redis are not published to the host. Glance defaults off and can be enabled through the private environment file; the application validates its required keyring and exact CORS origin before startup.
 
 See [`docs/DEPLOY.md`](docs/DEPLOY.md) and [`deploy/PRODUCTION.md`](deploy/PRODUCTION.md) before deploying. Production operation requires a secured host, DNS, firewall rules, backups, private environment files, and provider-side webhook configuration. The separate [`deploy/docker-compose.staging.yml`](deploy/docker-compose.staging.yml) uses its own database and Redis services and must run only on a dedicated staging host with synthetic records and staging-only credentials. No staging hostname is configured in this repository.
 
@@ -164,7 +164,7 @@ See [`docs/DEPLOY.md`](docs/DEPLOY.md) and [`deploy/PRODUCTION.md`](deploy/PRODU
 - M-PESA STK defaults to sandbox. Production STK depends on provider approval. Manual M-PESA and Airtel Money claims require owner verification.
 - This repository does not announce a managed hosting service or publish hosted-service pricing.
 - Glance backend write workflows and synthetic staging tools are present, while a real isolated HTTPS staging run and packaged WebView CORS acceptance remain outstanding.
-- Glance microphone capture and transcription are not part of the current API workflow.
+- Glance transcription is implemented through the existing ASR service; physical G2 microphone, real provider, packaged WebView CORS, and locked-phone acceptance remain unverified.
 - Evaluation corpora in [`docs/AGENT_EVAL.md`](docs/AGENT_EVAL.md) and [`docs/AGENT_EVAL_V2.md`](docs/AGENT_EVAL_V2.md) are engineering checks, not broad production quality guarantees.
 
 ## Development and contribution
