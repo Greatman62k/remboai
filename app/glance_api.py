@@ -7,7 +7,7 @@ import logging
 import re
 import time
 import unicodedata
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from uuid import UUID
 from typing import Literal
 
@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import ClientDisconnect
 
-from . import glance_sessions, glance_workflows, handoff_drafts, handoff_outbox, handoffs
+from . import glance_attention, glance_schedule, glance_sessions, glance_workflows, handoff_drafts, handoff_outbox, handoffs
 from .ai.audio import MAX_PCM_BYTES, wrap_pcm_s16le_mono_16khz
 from .ai.voice import MAX_TEXT
 from .hardening import client_ip
@@ -494,6 +494,81 @@ async def get_inbox(request: Request, limit: int = Query(default=20, ge=1, le=20
         "preview": sanitize_display_text(row.get("preview"), 120),
     } for row in rows]
     return {"data": {"items": items, "open_count": open_count, "has_more": open_count > len(items), "next_cursor": None}}
+
+
+@router.get("/attention")
+async def get_attention(request: Request, limit: int = Query(default=50, ge=1, le=50),
+                        session: glance_sessions.GlanceSession = Depends(require_session)):
+    """Return the unified durable owner attention feed for the paired salon.
+
+    Existing Glance case routes remain unchanged.  This supplemental feed lets
+    the client surface owner work that is not an open customer handoff while
+    retaining the original WhatsApp/Telegram workflows for actions that have
+    not yet been given a safe Glance mutation contract.
+    """
+    try:
+        rows = await glance_attention.list_attention(
+            request.app.state.pool, session.salon_id, session.owner_identity, limit=limit)
+    except PermissionError:
+        raise glance_sessions.GlanceAuthError("owner_not_authorized", 403, "Owner no longer controls this salon")
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    items = [{
+        "attention_id": row["attention_id"],
+        "kind": row["kind"],
+        "priority": row["priority"],
+        "state": row["state"],
+        "title": sanitize_display_text(row["title"], 80),
+        "summary": sanitize_display_text(row["summary"], 240),
+        "created_at": utc_timestamp(row.get("created_at")),
+        "expires_at": utc_timestamp(row.get("expires_at")),
+        "case_id": row.get("case_id"),
+        "resource_id": row.get("resource_id"),
+        "action": row["action"],
+    } for row in rows]
+    return {"data": {"items": items, "count": len(items), "has_more": has_more, "next_cursor": None}}
+
+
+@router.get("/schedule")
+async def get_schedule(request: Request, schedule_date: str | None = Query(default=None, alias="date"),
+                       limit: int = Query(default=20, ge=1, le=50),
+                       offset: int = Query(default=0, ge=0, le=1000),
+                       session: glance_sessions.GlanceSession = Depends(require_session)):
+    """Return the authenticated owner's active bookings for one local day."""
+    if schedule_date is not None and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", schedule_date):
+        raise GlanceAPIError("invalid_request", 422, "The schedule date is invalid.")
+    try:
+        day = date.fromisoformat(schedule_date) if schedule_date else None
+    except ValueError:
+        raise GlanceAPIError("invalid_request", 422, "The schedule date is invalid.")
+    if day is not None and (day < date(2000, 1, 1) or day > date(2100, 12, 31)):
+        raise GlanceAPIError("invalid_request", 422, "The schedule date is invalid.")
+    try:
+        result = await glance_schedule.list_schedule(
+            request.app.state.pool, session.salon_id, session.owner_identity, day, limit=limit, offset=offset)
+    except PermissionError:
+        raise glance_sessions.GlanceAuthError("owner_not_authorized", 403, "Owner no longer controls this salon")
+    rows = result["items"]
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    items = [{
+        "booking_id": row["booking_id"],
+        "status": row["status"],
+        "customer_label": _safe_customer_label(row.get("customer_name")),
+        "service": sanitize_display_text(row.get("service_name"), 60),
+        "staff": sanitize_display_text(row.get("staff_name"), 40),
+        "starts_at": utc_timestamp(row.get("starts_at")),
+        "ends_at": utc_timestamp(row.get("ends_at")),
+        "payment_state": row["payment_state"],
+    } for row in rows]
+    return {"data": {
+        "date": result["date"],
+        "timezone": result["timezone"],
+        "items": items,
+        "count": len(items),
+        "has_more": has_more,
+        "next_offset": offset + len(items) if has_more else None,
+    }}
 
 
 @router.get("/cases/{case_id}")
